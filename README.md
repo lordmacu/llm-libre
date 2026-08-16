@@ -129,7 +129,7 @@ gasto de pago igual queda registrado y visible por otra vía: consultar
 |---|---|
 | `POST /v1/chat/completions` | El contrato de chat de OpenAI, con `stream: true` opcional y las extensiones `x_*` de arriba |
 | `GET /v1/models` | El catálogo normalizado (formato OpenAI) más los alias `auto*` |
-| `GET /v1/ranking` | Puntaje de cada ruta (con `prioridad`) y sus componentes desglosados, **ordenado con la misma clave que usa el router** — para auditar por qué el router eligió lo que eligió, sin que la fila de arriba contradiga a `X-Ruta-Usada` |
+| `GET /v1/ranking` | Puntaje de cada ruta (con `prioridad`) y sus componentes desglosados, **ordenado con la misma clave que usa el router** — cooldown incluido: una ruta castigada (`en_cooldown_hasta` en la fila) va al final, aunque puntúe mejor que todas — para auditar por qué el router eligió lo que eligió, sin que la fila de arriba contradiga a `X-Ruta-Usada` |
 | `GET /v1/uso` | Consumo de pago del día para la llave que llama, contra su tope diario |
 | `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. No requiere llave |
 
@@ -140,7 +140,7 @@ Variables de entorno (ver `.env.example`):
 | Variable | Default | Qué es |
 |---|---|---|
 | `LLM_LIBRE_API_KEYS` | *(sin default — obligatoria)* | Llaves que aceptan los clientes, separadas por coma. El proceso **no arranca** si falta o queda vacía: ver más abajo |
-| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml`. Idealmente incluye el `/v1` (sus rutas reales son `/v1/chat/completions` y `/v1/models`), pero **si no lo trae, se agrega solo** — con un aviso en el log — para que un typo del operador no deje cada chat pegando a una URL inexistente |
+| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml`. Idealmente incluye el `/v1` (sus rutas reales son `/v1/chat/completions` y `/v1/models`); si se pone **solo el host** (sin ninguna ruta), el `/v1` se agrega solo, con un aviso en el log. Si en cambio se pone **una ruta propia** (p.ej. un mount de reverse proxy, `.../v2`), esa ruta se respeta tal cual — no se le pisa nada, solo se avisa si no coincide con `/v1` por si fue sin querer |
 | `KILO_API_KEY` | *(sin definir)* | Opcional. **Dejar SIN DEFINIR**, no en blanco — ver nota abajo |
 | `OPENROUTER_API_KEY` | *(sin definir)* | Llave de OpenRouter (su tier gratis sí exige llave para completions, aunque `/models` sea público) |
 | `MINIMAX_API_KEY` | *(sin definir)* | Llave del proveedor de pago (escalón de fallback) |
@@ -267,6 +267,14 @@ sondea aproximadamente una vez al día— vuelve a cero.
   cadena más larga, y `/health` sigue en `ok` mientras quede una ruta viva.
   Un fallo aislado no castiga (evita sacar una ruta sana por un hiccup); al
   tercer fallo seguido, sí, con el mismo backoff exponencial que ya usa el
-  `429`. Un proveedor puede además declarar su propio `timeout_s` en
+  `429`. **Un `4xx` (que no sea `429`) nunca cuenta para esto**: es un error
+  determinista del *cliente* — payload inválido, un parámetro que el
+  proveedor no soporta — que el proveedor le devolvería a cualquiera que
+  mande ese mismo pedido. Contarlo convertiría el error de un cliente en un
+  apagón para todos los demás (verificado: tres pedidos malformados
+  seguidos bastan para dejar las cinco rutas en cooldown si se cuenta el
+  `4xx`); un `400` solo debe perjudicar a quien lo mandó, como siempre. Un
+  proveedor puede además declarar su propio `timeout_s` en
   `proveedores.yaml` (default: el global, 90 s) para acotar el peor caso de
-  uno que se sepa lento, sin bajarle el timeout a todos.
+  uno que se sepa lento, sin bajarle el timeout a todos — aplica igual al
+  camino síncrono y al de streaming.
