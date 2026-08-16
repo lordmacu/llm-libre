@@ -122,7 +122,7 @@ gasto de pago igual queda registrado y visible por otra vía: consultar
 |---|---|
 | `POST /v1/chat/completions` | El contrato de chat de OpenAI, con `stream: true` opcional y las extensiones `x_*` de arriba |
 | `GET /v1/models` | El catálogo normalizado (formato OpenAI) más los alias `auto*` |
-| `GET /v1/ranking` | Puntaje de cada ruta con sus componentes desglosados (calidad, confiabilidad, latencia, cooldown) — para auditar por qué el router eligió lo que eligió |
+| `GET /v1/ranking` | Puntaje de cada ruta con sus componentes desglosados y la fecha de su última sonda — para auditar por qué el router eligió lo que eligió |
 | `GET /v1/uso` | Consumo de pago del día para la llave que llama, contra su tope diario |
 | `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. No requiere llave |
 
@@ -181,12 +181,28 @@ sondea aproximadamente una vez al día— vuelve a cero.
   aproximadamente una vez al día) con una batería de casos verificables por
   código (JSON válido, tool call correcto, formato pedido, aritmética,
   idioma) — sin juez-LLM.
+- El catálogo descarta lo que el proveedor **describe** como algo que no es un
+  modelo de chat de propósito general —guardrails y clasificadores de
+  seguridad, rerankers, modelos de embeddings— y los *meta-routers*, que no son
+  un modelo sino un sorteo entre otros modelos. Se decide leyendo los campos
+  `name` y `description` del propio `/models`, nunca por una lista de ids: una
+  lista negra de ids se pudriría igual que los ids cableados que este gateway
+  existe para reemplazar.
 - El ranking combina calidad medida, confiabilidad reciente (éxitos sobre
   sondas + tráfico real) y latencia (p50 de time-to-first-token), con pesos
   que cambian según el perfil pedido: `rapido` pondera la latencia por
   encima de la calidad, `potente` al revés, `balanceado` reparte parejo. La
   ventana de contexto (`x_min_contexto`) es un filtro previo, no entra en el
   puntaje.
+- **Una ruta que todavía no pasó por la batería de calidad va después de las
+  que sí**, aunque su valor neutro puntúe más alto: ese 0.6 es un supuesto, no
+  una medición, y `/v1/ranking` lo dice (`calidad: null`, `calidad_medida:
+  false`). Sigue en la cadena de intentos para que llegue a medirse alguna vez.
+- `ttft_p50_ms` es **tiempo hasta el primer token** y solo lo mide el camino de
+  streaming, que es el único que puede. El camino no-streaming (y la sonda de
+  salud) reportan su round-trip completo aparte, en `latencia_p50_ms`, que no
+  entra en el puntaje: son dos magnitudes distintas y promediarlas juntas daba
+  un número sin significado.
 - Las rutas de pago siempre van al final de la cadena de intentos, y solo se
   usan si se agotaron las gratis, la llave no superó su tope diario y la
   petición no trae `x_permitir_pago: false`.
