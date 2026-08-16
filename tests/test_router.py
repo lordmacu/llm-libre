@@ -165,3 +165,46 @@ def test_un_modelo_explicito_se_sirve_aunque_no_sea_el_de_mayor_prioridad():
              _rp("elegido-a-mano:free", 1)]
     salida = ordenar(rutas, {}, Pedido(modelo="elegido-a-mano:free"), ahora=0.0)
     assert [x.modelo_id for x in salida] == ["elegido-a-mano:free"]
+
+
+# --- Follow-up de Task 13: chatgpt paso a catalogo DESCUBIERTO con
+#     capacidades declaradas (tools:false SIEMPRE). Se fija el comportamiento
+#     que ya cubria el filtro generico de tools/id explicito, con una ruta
+#     con la FORMA real de una ruta de chatgpt (prioridad 0, tools=False). ---
+
+def test_una_peticion_con_tools_nunca_enruta_a_chatgpt():
+    chatgpt = _rp("gpt-5-3-mini", 0, proveedor="chatgpt", tools=False)
+    kilo = _rp("con-tools:free", 1, tools=True)
+    salida = ordenar([chatgpt, kilo], {}, Pedido(requiere_tools=True), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["con-tools:free"]
+
+
+def test_una_peticion_sin_tools_prefiere_chatgpt_por_su_prioridad():
+    # La contracara: sin exigir tools, chatgpt sigue yendo primero pese a
+    # tools=False, porque nadie lo esta pidiendo.
+    chatgpt = _rp("gpt-5-3-mini", 0, proveedor="chatgpt", tools=False)
+    kilo = _rp("normal:free", 1, tools=True)
+    salida = ordenar([chatgpt, kilo], {}, Pedido(), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["gpt-5-3-mini", "normal:free"]
+
+
+def test_un_id_de_chatgpt_elegido_a_mano_sigue_ruteando_directo():
+    chatgpt = _rp("gpt-5-3-mini", 0, proveedor="chatgpt", tools=False)
+    kilo = _rp("otro:free", 1)
+    salida = ordenar([chatgpt, kilo], {}, Pedido(modelo="gpt-5-3-mini"), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["gpt-5-3-mini"]
+
+
+def test_una_ruta_de_chatgpt_descubierta_de_verdad_rutea_directo_al_pedirla():
+    # Integra catalogo.normalizar (donde chatgpt DESCUBRE sus ids, con
+    # capacidades_por_defecto) con router.ordenar: prueba el camino
+    # completo, no rutas armadas a mano.
+    from llm_libre.catalogo import normalizar
+    defaults = Capacidades(tools=False, vision=False, contexto=128000, max_salida=8192)
+    descubiertas = normalizar(
+        "chatgpt",
+        {"data": [{"id": "gpt-5-3-mini", "description": "GPT-5.3 Mini"},
+                  {"id": "gpt-5-5", "description": "GPT-5.5"}]},
+        prioridad=0, capacidades_por_defecto=defaults)
+    salida = ordenar(descubiertas, {}, Pedido(modelo="gpt-5-3-mini"), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["gpt-5-3-mini"]

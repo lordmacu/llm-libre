@@ -1,0 +1,25 @@
+{
+  "object": "list",
+  "data": [
+    {"id": "gpt-5-5", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "GPT-5.5"},
+    {"id": "gpt-5-6", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "GPT-5.6 Luna"},
+    {"id": "gpt-5-3-mini", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "GPT-5.3 Mini"},
+    {"id": "gpt-5-5-mini", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "GPT-5.5 Mini"},
+    {"id": "gpt-5-6-mini", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "GPT-5.6 Luna Mini"},
+    {"id": "auto", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "Auto"},
+    {"id": "gpt-4o", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "Alias → auto"},
+    {"id": "gpt-4o-mini", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "Alias → gpt-5-3-mini"},
+    {"id": "gpt-4", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "Alias → gpt-5-5"},
+    {"id": "gpt-3.5-turbo", "object": "model", "created": 1750000000, "owned_by": "openai",
+     "description": "Alias → gpt-5-3-mini"}
+  ]
+}

@@ -3,8 +3,11 @@ import logging
 from pathlib import Path
 
 from llm_libre.catalogo import normalizar
+from llm_libre.modelos import Capacidades
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+_DEFAULTS_CHATGPT = Capacidades(tools=False, vision=False, contexto=128000, max_salida=8192)
 
 
 def _cargar(nombre):
@@ -204,3 +207,95 @@ def test_una_entrada_que_no_es_un_objeto_se_omite_sin_reventar(caplog):
     with caplog.at_level(logging.WARNING, logger="llm_libre.catalogo"):
         assert normalizar("kilo", {"error": "unauthorized"}) == []
     assert caplog.records
+
+
+# --- Follow-up de Task 13: chatgpt-proxy paso a ser un catalogo DESCUBIERTO
+#     (su /v1/models ahora es dinamico, con TTL cache), pero sigue sin traer
+#     metadatos de capacidad -- solo id/object/created/owned_by/description.
+#     `capacidades_por_defecto` es el mecanismo GENERAL para ese patron:
+#     ids descubiertos, capacidades declaradas una sola vez para todos. ---
+
+def test_chatgpt_descubre_los_cinco_ids_reales_del_fixture():
+    rutas = normalizar("chatgpt", _cargar("chatgpt_models.json"),
+                       capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    assert len(rutas) == 5
+    assert {r.modelo_id for r in rutas} == {
+        "gpt-5-5", "gpt-5-6", "gpt-5-3-mini", "gpt-5-5-mini", "gpt-5-6-mini"}
+
+
+def test_chatgpt_descarta_los_alias_legacy_por_su_propia_description():
+    rutas = normalizar("chatgpt", _cargar("chatgpt_models.json"),
+                       capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    ids = {r.modelo_id for r in rutas}
+    assert not ids & {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"}
+
+
+def test_chatgpt_descarta_auto_por_ser_un_id_reservado():
+    rutas = normalizar("chatgpt", _cargar("chatgpt_models.json"),
+                       capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    assert "auto" not in {r.modelo_id for r in rutas}
+
+
+def test_un_modelo_nuevo_del_proxy_aparece_sin_tocar_el_yaml():
+    # El fixture "con_modelo_nuevo" simula que manana el backend real de
+    # ChatGPT agrega un modelo (gpt-5-7) que hoy no existe: tiene que
+    # aparecer solo, sin que nadie edite proveedores.yaml ni este test.
+    rutas = normalizar("chatgpt", _cargar("chatgpt_models_con_modelo_nuevo.json"),
+                       capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    ids = {r.modelo_id for r in rutas}
+    assert "gpt-5-7" in ids
+    assert len(ids) == 6
+
+
+def test_las_capacidades_por_defecto_se_aplican_a_cada_id_descubierto():
+    rutas = normalizar("chatgpt", _cargar("chatgpt_models.json"),
+                       capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    assert len(rutas) == 5
+    assert all(r.capacidades == _DEFAULTS_CHATGPT for r in rutas)
+    assert all(r.capacidades.tools is False for r in rutas)   # obligatorio: tools -> HTTP 500
+
+
+def test_capacidades_por_defecto_saltea_precio_y_modalidad_de_salida():
+    # Un proveedor que declara defaults esta afirmando lo que su catalogo NO
+    # puede decir: una entrada sin "pricing" (normalmente => "de pago", se
+    # descarta) y con output_modalities de musica (normalmente se descarta)
+    # igual se acepta, porque esos dos chequeos se saltean en este modo.
+    datos = {"data": [
+        {"id": "modelo-sin-metadatos", "description": "Un Modelo"},
+    ]}
+    rutas = normalizar("chatgpt", datos, capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    assert [r.modelo_id for r in rutas] == ["modelo-sin-metadatos"]
+    assert rutas[0].capacidades == _DEFAULTS_CHATGPT
+
+
+def test_capacidades_por_defecto_no_desactiva_el_filtro_de_especialidad():
+    # Solo se saltean precio/modalidad -- lo que el brief pidio. El filtro de
+    # especialidad (guardrails, clasificadores, meta-routers) sigue activo
+    # como defensa: un proveedor con defaults tambien puede exponer algo asi.
+    datos = {"data": [
+        {"id": "guardrail-1", "description": "A content safety guardrail model."},
+    ]}
+    assert normalizar("chatgpt", datos, capacidades_por_defecto=_DEFAULTS_CHATGPT) == []
+
+
+def test_un_proveedor_sin_capacidades_por_defecto_mantiene_el_comportamiento_de_siempre():
+    # Kilo/OpenRouter no declaran defaults: normalizar() sin ese argumento
+    # (o con None explicito) tiene que dar EXACTAMENTE lo mismo que antes de
+    # este cambio -- precio, modalidad de salida y especialidad siguen
+    # filtrando como siempre.
+    datos = {"data": [
+        {"id": "caro/modelo", "pricing": {"prompt": "0.0000015"},
+         "architecture": {"output_modalities": ["text"]}},
+    ]}
+    assert normalizar("kilo", datos, capacidades_por_defecto=None) == []
+    assert normalizar("kilo", datos) == []
+
+
+def test_contra_el_catalogo_real_de_chatgpt_proxy():
+    # El fixture completo, tal cual lo devuelve /v1/models hoy (verificado
+    # 2026-08-16): 10 entradas -- 5 modelos reales, 4 alias legacy, "auto".
+    rutas = normalizar("chatgpt", _cargar("chatgpt_models.json"),
+                       capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    assert len(rutas) == 5
+    assert all(r.proveedor == "chatgpt" for r in rutas)
+    assert all(r.tier == "gratis" for r in rutas)

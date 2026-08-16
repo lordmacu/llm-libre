@@ -50,18 +50,52 @@ _META_ROUTER = (
 
 _DESCARTAR = re.compile("|".join(_ESPECIALIDAD + _META_ROUTER), re.IGNORECASE)
 
+# Ids reservados por llm-libre MISMO, no por ningun proveedor: "auto" colisiona
+# con el alias propio de interpretar_pedido (api.py). Pedir el modelo "auto"
+# siempre resuelve al alias, nunca a una ruta real -- asi que una ruta con ese
+# modelo_id literal quedaria inalcanzable para siempre. Se filtra aca, en el
+# descubrimiento, para que NINGUN proveedor (presente o futuro) pueda colar
+# sin querer una ruta invalida por coincidencia de nombres.
+IDS_RESERVADOS = frozenset({"auto"})
+
+# Los proveedores que agregan alias legacy a su propio catalogo (chatgpt-proxy
+# expone "gpt-4o" como alias de "auto", p.ej.) se autoidentifican con este
+# prefijo en su `description`. Quedarselos crearia una ruta DUPLICADA
+# apuntando al mismo modelo bajo otro nombre -- el ranking terminaria
+# midiendo, y compitiendo, el mismo modelo consigo mismo.
+_PREFIJO_ALIAS = "Alias →"
+
 
 def es_de_especialidad(m: dict) -> bool:
     """True si el proveedor describe este modelo como algo que no es chat general."""
     return _DESCARTAR.search(f"{m.get('name') or ''} {m.get('description') or ''}") is not None
 
 
-def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100) -> list[Ruta]:
+def _es_alias(m: dict) -> bool:
+    return str(m.get("description") or "").startswith(_PREFIJO_ALIAS)
+
+
+def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100,
+              capacidades_por_defecto: Capacidades | None = None) -> list[Ruta]:
     """Convierte la respuesta de /models en rutas gratis utilizables para chat.
 
     `prioridad` es la del PROVEEDOR (ver Proveedor.prioridad), no algo que
     /models pueda traer: se estampa igual en cada ruta descubierta para que
     el router las ordene sin tener que volver a consultar el registro.
+
+    `capacidades_por_defecto` (Proveedor.capacidades_por_defecto) marca un
+    proveedor cuyo /models trae IDS pero ningun metadato de capacidad --
+    chatgpt-proxy es el caso que motivo esto: su catalogo es dinamico (se
+    descubre, no se cablea) pero solo trae
+    id/object/created/owned_by/description, nunca pricing ni modalidades.
+    Cuando esta declarado, esas capacidades se aplican IGUAL a cada id
+    descubierto y se SALTEAN los chequeos de precio y de modalidad de salida
+    -- un proveedor que declara defaults esta afirmando lo que su catalogo no
+    puede decir. El filtro de especialidad (guardrails, meta-routers) sigue
+    activo en los dos modos: no tiene nada que ver con lo que el catalogo
+    puede o no reportar. Sigue siendo DESCUBRIMIENTO en el sentido que
+    importa (§1 del diseno): los IDS se leen de /models, nunca se cablean;
+    solo las capacidades vienen del registro.
     """
     items = datos.get("data", datos) if isinstance(datos, dict) else datos
     rutas: list[Ruta] = []
@@ -77,30 +111,39 @@ def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100) -> list
         if not m.get("id"):
             log.warning("catalogo %s: entrada sin 'id', se omite: %.120r", proveedor, m)
             continue
-        if not _es_gratis(m):
+        if m["id"] in IDS_RESERVADOS:
+            continue
+        if _es_alias(m):
             continue
         if es_de_especialidad(m):
             log.info("catalogo %s: %s se descarta, el proveedor no lo describe como "
                      "un modelo de chat general", proveedor, m["id"])
             continue
-        arch = m.get("architecture") or {}
-        # Exigir salida SOLO texto: los modelos de musica (lyria) tambien traen
-        # "text" entre sus salidas, asi que "contiene texto" los dejaria pasar.
-        salidas = set(arch.get("output_modalities") or ["text"])
-        if salidas != {"text"}:
-            continue
-        soportados = m.get("supported_parameters") or []
-        top = m.get("top_provider") or {}
-        rutas.append(Ruta(
-            proveedor=proveedor,
-            modelo_id=m["id"],
-            tier="gratis",
-            capacidades=Capacidades(
+        if capacidades_por_defecto is not None:
+            capacidades = capacidades_por_defecto
+        else:
+            if not _es_gratis(m):
+                continue
+            arch = m.get("architecture") or {}
+            # Exigir salida SOLO texto: los modelos de musica (lyria) tambien
+            # traen "text" entre sus salidas, asi que "contiene texto" los
+            # dejaria pasar.
+            salidas = set(arch.get("output_modalities") or ["text"])
+            if salidas != {"text"}:
+                continue
+            soportados = m.get("supported_parameters") or []
+            top = m.get("top_provider") or {}
+            capacidades = Capacidades(
                 tools="tools" in soportados,
                 vision="image" in (arch.get("input_modalities") or []),
                 contexto=int(m.get("context_length") or top.get("context_length") or 0),
                 max_salida=int(top.get("max_completion_tokens") or 0),
-            ),
+            )
+        rutas.append(Ruta(
+            proveedor=proveedor,
+            modelo_id=m["id"],
+            tier="gratis",
+            capacidades=capacidades,
             prioridad=prioridad,
         ))
     return rutas
