@@ -1,0 +1,12 @@
+# Solo para correr en local durante el desarrollo. En produccion lo maneja
+# Coolify (build desde el Dockerfile, redeploy en cada push a main).
+services:
+  llm-libre:
+    build: .
+    container_name: llm-libre
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "127.0.0.1:8101:8101"
+    volumes:
+      - ./datos:/datos

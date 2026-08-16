@@ -1,0 +1,97 @@
+import asyncio
+import contextlib
+import os
+from contextlib import asynccontextmanager
+
+import httpx
+
+from llm_libre.almacen import Almacen
+from llm_libre.api import Estado, crear_app
+from llm_libre.auth import LimitadorPorLlave
+from llm_libre.proveedores import cargar
+from llm_libre.proxy import Proxy
+from llm_libre.sondeo import ciclo
+
+YAML = os.getenv("PROVEEDORES_YAML", "proveedores.yaml")
+RUTA_DB = os.getenv("RUTA_DB", "/datos/llm-libre.sqlite3")
+HORAS_SALUD = float(os.getenv("SONDEO_SALUD_HORAS", "5"))
+
+
+def crear_estado() -> Estado:
+    """Arma el Estado real del proceso: carga los proveedores desde el YAML +
+    entorno, abre la DB SQLite (creando el esquema si falta) y comparte UN
+    solo cliente httpx entre el proxy y el planificador de sondeo.
+    """
+    proveedores = cargar(YAML, dict(os.environ))
+    almacen = Almacen(RUTA_DB)
+    almacen.crear_esquema()
+    http = httpx.AsyncClient()
+    proxy = Proxy({p.id: p for p in proveedores}, almacen, http)
+    llaves = {k.strip() for k in os.getenv("LLM_LIBRE_API_KEYS", "").split(",") if k.strip()}
+    estado = Estado(almacen=almacen, proxy=proxy, llaves=llaves,
+                    tope_pago_diario=int(os.getenv("TOPE_PAGO_DIARIO", "200")),
+                    limitador=LimitadorPorLlave(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
+    estado.proveedores = proveedores
+    estado.http = http
+    return estado
+
+
+async def planificador(estado: Estado) -> None:
+    """Loop de fondo que corre `sondeo.ciclo` sin parar, cada HORAS_SALUD.
+
+    Desviacion respecto del brief original (Task 12): el brief traia el
+    cuerpo entero del ciclo -- sincronizar catalogo, sondear salud, sondear
+    calidad cada N pasadas, podar -- copiado linea por linea aca mismo. Esa
+    logica ya existe, escrita y probada, como `sondeo.ciclo(estado,
+    contador)` desde la Task 11 (incluye alli mismo el "cada N ciclos" via
+    `CALIDAD_CADA_N_CICLOS` y la retencion de 30 dias): dos copias de un
+    mismo loop solo garantizan que se desincronicen con el tiempo. Este
+    planificador se limita a invocarla.
+
+    `ciclo` a proposito NO atrapa excepciones (ver su docstring en
+    sondeo.py): esa responsabilidad es de quien lo llama en un loop
+    infinito. Por eso el try/except vive ACA: un ciclo puntual que revienta
+    (proveedor caido, DB bloqueada, lo que sea) se loguea y se sigue
+    durmiendo hasta el proximo, en vez de tumbar esta tarea de fondo para
+    siempre -- lo que dejaria al proceso sirviendo trafico con metricas cada
+    vez mas viejas sin que nadie se entere, y sin tumbar el servicio.
+
+    El contador local se llama `contador`, no `ciclo` (como lo nombraba el
+    brief): ese nombre ya lo usa la funcion importada de `sondeo`, y
+    reusarlo la taparia dentro de este loop.
+    """
+    contador = 0
+    while True:
+        try:
+            await ciclo(estado, contador)
+        except Exception as e:  # el planificador nunca debe matar al servicio
+            print(f"[sondeo] ciclo {contador} fallo: {e}", flush=True)
+        contador += 1
+        await asyncio.sleep(HORAS_SALUD * 3600)
+
+
+estado = crear_estado()
+app = crear_app(estado)
+
+
+@asynccontextmanager
+async def _ciclo_de_vida(_app):
+    """Reemplaza el `@app.on_event("startup"/"shutdown")` del brief -- deprecado
+    en la version de FastAPI/Starlette que trae este proyecto (ya emite
+    warning en la suite) -- por el `lifespan` recomendado. `crear_app` (Task
+    9) no expone un parametro para pasarlo en el constructor, asi que se
+    engancha reasignando `app.router.lifespan_context` despues de crear la
+    app: Starlette solo lee ese atributo cuando llega el mensaje ASGI de
+    lifespan (al arrancar uvicorn), no en el momento de la asignacion, asi
+    que reemplazarlo aca es equivalente a haberlo pasado en el constructor.
+    """
+    tarea = asyncio.create_task(planificador(estado))
+    try:
+        yield
+    finally:
+        tarea.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await tarea
+
+
+app.router.lifespan_context = _ciclo_de_vida
