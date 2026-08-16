@@ -7,16 +7,25 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_libre.auth import LimitadorPorLlave
-from llm_libre.modelos import Pedido
+from llm_libre.modelos import METRICAS_NEUTRAS, Pedido
 from llm_libre.ranking import puntuar
 from llm_libre.router import ordenar
 
 PERFILES = {"rapido", "balanceado", "potente"}
 ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
 
+# Piso de confiabilidad reciente para que /health considere una ruta "viva".
+# Una ruta sin ninguna telemetria todavia carga la confiabilidad NEUTRA
+# (ver CONFIABILIDAD_NEUTRA en modelos.py), que queda por encima de este piso
+# a proposito: una ruta recien vista no debe leerse como rota.
+UMBRAL_CONFIABILIDAD_SALUD = 0.5
+
 
 def interpretar_pedido(cuerpo: dict) -> Pedido:
-    modelo_pedido = (cuerpo.get("model") or "auto").strip()
+    # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
+    # colarse como si fuera un id explicito (quedaria vacio tras el strip y
+    # produciria un 404 confuso sobre el modelo '').
+    modelo_pedido = (cuerpo.get("model") or "").strip() or "auto"
     modelo, perfil = None, "balanceado"
     requiere_tools = bool(cuerpo.get("tools"))
     requiere_vision = False
@@ -96,8 +105,21 @@ def crear_app(estado: Estado) -> FastAPI:
         ahora = time.time()
         crudo = bool(cuerpo.get("x_crudo"))
         if cuerpo.get("stream"):
+            def _contar_si_sirvio_de_pago(ruta) -> None:
+                # El proxy llama esto COMO MUCHO una vez, y solo cuando esta
+                # ruta de verdad sirvio la respuesta (ver el docstring de
+                # `completar_stream`): asi el tope diario de pago tambien ata
+                # en la rama de streaming, no solo en la sincronica de abajo.
+                # Nunca se llama para una ruta meramente ofrecida, ni para una
+                # que gano el failover sin llegar a responder, ni una vez por
+                # chunk.
+                if ruta.tier == "pago":
+                    estado.almacen.sumar_uso_pago(
+                        llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
             return StreamingResponse(
-                estado.proxy.completar_stream(rutas, cuerpo, ahora, crudo),
+                estado.proxy.completar_stream(
+                    rutas, cuerpo, ahora, crudo,
+                    en_ruta_comprometida=_contar_si_sirvio_de_pago),
                 media_type="text/event-stream")
         r = await estado.proxy.completar(rutas, cuerpo, ahora, crudo)
         if r.ruta is not None and r.ruta.tier == "pago":
@@ -145,11 +167,25 @@ def crear_app(estado: Estado) -> FastAPI:
 
     @app.get("/health")
     def health():
-        # Honesto: mira si hay una ruta VIVA y servible, no si el proceso esta arriba.
+        # Honesto: mira si hay una ruta VIVA y servible, no si el proceso esta
+        # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (eso
+        # solo lo dispara un 429, ver Proxy._castigar) Y que su confiabilidad
+        # reciente -- calculada sobre trafico real de eventos ok/fail, no
+        # sobre el cooldown -- no este por el piso. Una ruta que devuelve 500
+        # en cada intento nunca entra en cooldown pero tampoco esta viva; si
+        # solo mirara cooldowns este endpoint diria "ok" con esa ruta muerta,
+        # que es exactamente el incidente que este endpoint existe para
+        # evitar.
         ahora = time.time()
         activas = estado.almacen.rutas_activas()
-        libres = [r for r in activas
-                  if estado.proxy.cooldowns.get(r.clave, 0.0) <= ahora]
+        metricas = _metricas(estado, ahora)
+
+        def _viva(r) -> bool:
+            m = metricas.get(r.clave, METRICAS_NEUTRAS)
+            return (m.en_cooldown_hasta <= ahora
+                    and m.confiabilidad >= UMBRAL_CONFIABILIDAD_SALUD)
+
+        libres = [r for r in activas if _viva(r)]
         gratis = [r for r in libres if r.tier == "gratis"]
         if gratis:
             situacion = "ok"

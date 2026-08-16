@@ -1,5 +1,6 @@
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -86,13 +87,25 @@ class Proxy:
         }}, None, intentos)
 
     async def completar_stream(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
-                               crudo: bool = False):
+                               crudo: bool = False,
+                               en_ruta_comprometida: Callable[[Ruta], None] | None = None):
         """Emite lineas SSE ya recortadas, terminando siempre en `data: [DONE]`.
 
         Hace failover solo ANTES del primer byte util: una vez que al cliente le
         llego contenido de una ruta, cambiar de modelo mezclaria dos respuestas
         distintas en un mismo stream. Por eso una falla de red DESPUES de emitir
         no reintenta la siguiente ruta: cierra el stream ahi mismo.
+
+        `en_ruta_comprometida`, si se pasa, se llama COMO MUCHO una vez por
+        llamada a este generador: exactamente cuando (y si) una ruta queda
+        confirmada como la que de verdad sirvio la peticion. Se dispara desde
+        el mismo lugar que ya decide "esto fue un exito real" para la
+        telemetria (`_registrar_exito_una_vez`, mas abajo) -- no desde el
+        status 200 crudo, porque un 200 que muere sin emitir nada antes del
+        primer byte util TODAVIA hace failover a la siguiente ruta (ver mas
+        arriba) y ahi no hubo servicio real. Sirve para que el llamador pueda
+        contar uso de pago (u otra cosa) atado a "esta ruta sirvio", sin
+        arriesgarse a contar de mas ni de menos.
         """
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
@@ -114,6 +127,8 @@ class Proxy:
                         ruta.clave, True, int((time.monotonic() - t0) * 1000),
                         200, ahora)
                     evento_registrado = True
+                    if en_ruta_comprometida is not None:
+                        en_ruta_comprometida(ruta)
 
             try:
                 async with self.http.stream("POST", url, headers=cabeceras, json=payload,
