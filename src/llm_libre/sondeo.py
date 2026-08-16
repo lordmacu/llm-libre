@@ -4,15 +4,31 @@ import time
 
 import httpx
 
-from llm_libre.bateria import CASOS, evaluar
+from llm_libre.bateria import CASOS, TOPE_CORTO, evaluar
 from llm_libre.catalogo import normalizar
 from llm_libre.modelos import Ruta
 from llm_libre.proveedores import Proveedor, rutas_fijas
 
 log = logging.getLogger(__name__)
 
-PING = {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 8,
-        "temperature": 0}
+# El PING de salud comparte el tope de la bateria (TOPE_CORTO) por la MISMA
+# razon, y no puede quedarse atras cuando ese numero se mueve.
+#
+# Tenia `max_tokens: 8`, cuatro veces menos que los 32 que la bateria ya
+# demostro insuficientes. Mientras un 200 vacio contaba como exito eso era
+# inofensivo; desde que un 200 sin respuesta adentro es (con razon) un intento
+# FALLIDO, un ping que no deja pensar al modelo FABRICA el fallo que dice
+# medir: la sonda declara muerta a una ruta sana. Medido contra Kilo con
+# max_tokens=8, una pasada sobre las 11 rutas gratis daba 5 sanas; entre las
+# "muertas" estaban cohere/north-mini-code:free -- la que sirve `auto` en el
+# arranque en frio -- y tencent/hy3:free, que saca 5/5 en la bateria.
+#
+# El dano no es solo un /health pesimista: `_confiabilidad` mira las ultimas 50
+# observaciones y las sondas son ~125 por dia, asi que el trafico real no
+# alcanza a desmentirlas. El ranking terminaria ordenando por quien contesta
+# mas corto, que es exactamente la premisa que este proyecto elimino.
+PING = {"messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": TOPE_CORTO, "temperature": 0}
 
 # Cada cuanto ciclos se corre la bateria de calidad (gasta cuota gratis, por eso
 # no en cada pasada) y cuanto se retiene la telemetria vieja antes de podarla.
@@ -113,8 +129,14 @@ async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None
         # es un round-trip completo y no un time-to-first-token. Escribirlo en
         # la columna de ttft mezclaba dos magnitudes distintas en un mismo p50
         # (ver el comentario de cabecera de almacen.py).
+        #
+        # `codigo_http` guarda el status del PROVEEDOR, no el `estado` que
+        # sintetiza el gateway. Con el 503 sintetico, la tabla `sondas` no podia
+        # distinguir "el proveedor esta caido" de "el proveedor dijo 200 y vino
+        # vacio" -- justo la diferencia que hacia falta para diagnosticar por
+        # que el ping de 8 tokens mataba rutas sanas.
         almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
-                                r.estado, 0, 0, ahora)
+                                r.codigo_upstream, 0, 0, ahora)
 
 
 async def sondear_calidad(proxy, almacen, rutas: list[Ruta], ahora: float) -> None:

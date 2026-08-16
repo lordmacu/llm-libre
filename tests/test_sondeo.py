@@ -1,3 +1,4 @@
+import json
 import logging
 
 import httpx
@@ -7,7 +8,9 @@ from llm_libre.api import Estado
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.proveedores import Proveedor
 from llm_libre.proxy import Proxy
-from llm_libre.sondeo import ciclo, sincronizar_catalogo, sondear_calidad, sondear_salud
+from llm_libre.bateria import TOPE_CORTO
+from llm_libre.sondeo import (PING, ciclo, sincronizar_catalogo, sondear_calidad,
+                              sondear_salud)
 
 CATALOGO = {"data": [
     {"id": "x:free", "pricing": {"prompt": "0"}, "context_length": 1000,
@@ -486,3 +489,63 @@ async def test_la_sonda_de_salud_no_escribe_un_ttft_que_no_midio():
         "SELECT latencia_ms, ttft_ms FROM sondas WHERE tipo='salud'").fetchone()
     assert fila[0] >= 0
     assert fila[1] == 0
+
+
+# --- Fix round 4, N1 (Blocking): el PING de salud tenia max_tokens=8, cuatro
+#     veces menos que los 32 que la bateria ya demostro insuficientes. Mientras
+#     un 200 vacio contaba como exito era inofensivo; desde que es un intento
+#     FALLIDO (fix B1), un ping que no deja pensar al modelo FABRICA el fallo
+#     que dice medir. Medido contra Kilo: 5 de 11 rutas gratis "muertas" con
+#     max_tokens=8, incluida la que sirve `auto` en el arranque en frio. ---
+
+def _modelo_que_razona(tope_minimo=512, respuesta="pong"):
+    """Un proveedor que se comporta como los modelos gratis de verdad: si no le
+    alcanza el presupuesto, se lo gasta pensando y devuelve 200 con
+    finish_reason 'length' y content null."""
+    def handler(req):
+        cuerpo = json.loads(req.content)
+        if cuerpo.get("max_tokens", 0) < tope_minimo:
+            return httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": None},
+                 "finish_reason": "length"}]})
+        return httpx.Response(200, json={"choices": [
+            {"message": {"role": "assistant", "content": respuesta},
+             "finish_reason": "stop"}]})
+    return handler
+
+
+async def test_la_sonda_de_salud_no_mata_a_un_modelo_por_no_dejarlo_pensar():
+    p = _proxy(_modelo_que_razona())
+    await sondear_salud(p, p.almacen, [_ruta()], ahora=100.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok FROM sondas WHERE tipo='salud'").fetchone()
+    assert fila[0] == 1, ("el ping fabrico el fallo que dice medir: no le dio "
+                          "presupuesto suficiente al modelo")
+
+
+async def test_el_ping_de_salud_no_puede_quedarse_atras_del_tope_de_la_bateria():
+    # Los dos topes existen por la misma razon; si la bateria sube y el ping no,
+    # vuelve exactamente este bug.
+    assert PING["max_tokens"] >= TOPE_CORTO
+
+
+async def test_la_sonda_de_salud_guarda_el_codigo_del_proveedor_no_el_del_gateway():
+    # Un 200 que llega vacio SIGUE siendo un fallo (fix B1), pero en la tabla
+    # tiene que quedar el 200 que dio el proveedor, no el 503 que sintetiza el
+    # gateway: sin eso no hay forma de distinguir "el proveedor esta caido" de
+    # "respondio bien pero sin nada adentro".
+    p = _proxy(lambda req: httpx.Response(200, json={"choices": [
+        {"message": {"role": "assistant", "content": None},
+         "finish_reason": "length"}]}))
+    await sondear_salud(p, p.almacen, [_ruta()], ahora=100.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok, codigo_http FROM sondas WHERE tipo='salud'").fetchone()
+    assert fila == (0, 200)
+
+
+async def test_la_sonda_de_salud_guarda_el_404_real_de_un_modelo_que_ya_no_existe():
+    p = _proxy(lambda req: httpx.Response(404, json={"error": "model_not_found"}))
+    await sondear_salud(p, p.almacen, [_ruta()], ahora=100.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok, codigo_http FROM sondas WHERE tipo='salud'").fetchone()
+    assert fila == (0, 404)

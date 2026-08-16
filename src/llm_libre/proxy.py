@@ -61,6 +61,18 @@ class Respuesta:
     ruta: Ruta | None
     intentos: int
     razonamiento: str = ""
+    # Status HTTP que devolvio el PROVEEDOR en el ultimo intento (0 = ni
+    # siquiera hubo respuesta: error de red). No es lo mismo que `estado`, que
+    # es lo que este gateway decidio: un 200 que llega vacio queda como
+    # `estado=503, codigo_upstream=200`, y esa diferencia es justo lo que hace
+    # falta para diagnosticar desde la tabla de sondas si el proveedor esta
+    # caido o si respondio bien pero sin nada adentro.
+    #
+    # En una cadena de varias rutas es el codigo de la ULTIMA intentada; quien
+    # necesite atribucion exacta por ruta tiene la tabla `eventos`, que guarda
+    # una fila por intento. La sonda de salud pasa siempre una sola ruta, asi
+    # que ahi no hay ambiguedad.
+    codigo_upstream: int = 0
 
 
 class Proxy:
@@ -75,6 +87,7 @@ class Proxy:
                         crudo: bool = False) -> Respuesta:
         intentos = 0
         ultimo_error = None
+        ultimo_codigo = 0
         claves_del_pedido = {ruta.clave for ruta in rutas}
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
@@ -87,6 +100,7 @@ class Proxy:
                 codigo = resp.status_code
             except httpx.HTTPError as e:
                 codigo, resp, ultimo_error = 0, None, str(e)
+            ultimo_codigo = codigo
             # Round-trip completo, NO un time-to-first-token: por este camino la
             # respuesta llega entera de una vez, asi que este numero incluye
             # toda la generacion (7-27 s en un modelo de razonamiento). Va a
@@ -126,7 +140,7 @@ class Proxy:
             if exito:
                 self._castigos.pop(ruta.clave, None)
                 self.cooldowns.pop(ruta.clave, None)
-                return Respuesta(200, datos, ruta, intentos, razon)
+                return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
                 self._castigar(ruta.clave, ahora)
@@ -142,7 +156,7 @@ class Proxy:
             "detalle": ultimo_error,
             "proxima_liberacion": (min(cooldowns_del_pedido.values())
                                    if cooldowns_del_pedido else None),
-        }}, None, intentos)
+        }}, None, intentos, "", ultimo_codigo)
 
     async def completar_stream(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
                                crudo: bool = False,
