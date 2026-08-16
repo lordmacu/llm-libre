@@ -101,11 +101,22 @@ propio que expone ChatGPT por su flujo anónimo (sin credenciales — `Authoriza
 solo separa sesiones, no autentica), contrato compatible con OpenAI
 (`/v1/chat/completions`, `/v1/models`, `/health`). Chat sin streaming y streaming
 (forma real de OpenAI: `finish_reason` hermano de `delta`, no adentro) **funcionan**.
-**`tools` NO soportado: devuelve HTTP 500**, no un fallo elegante — por eso sus
-modelos se sirven con `tools: false`. `temperature`/`max_tokens`/etc. se aceptan y se
-ignoran. **Filtra el modo "canvas" de ChatGPT al `content`**, con marcas
-`:::palabra{...}` … `:::` que envuelven la respuesta real (no algo para descartar, a
-diferencia de `<think>`) — el gateway las desenvuelve, en bloque y en streaming (§6.1).
+`temperature`/`max_tokens`/etc. se aceptan y se ignoran. **Filtra el modo "canvas" de
+ChatGPT al `content`**, con marcas `:::palabra{...}` … `:::` que envuelven la respuesta
+real (no algo para descartar, a diferencia de `<think>`) — el gateway las desenvuelve,
+en bloque y en streaming (§6.1).
+
+**`tools` (revisado de nuevo en la revisión de la review): ya NO devuelve HTTP 500,
+pero sigue sin soportar function calling.** El usuario reportó "ya tenemos habilitados
+los tools" en el proxy; verificado ejecutándolo: con `tool_choice: "required"` sigue
+devolviendo `tool_calls: None` y prosa. El propio docstring del proxy distingue dos
+cosas — *"Tools avanzados: reservas, shopping, widgets, canvas"* (SÍ soportado) vs.
+*"Function calling / tool_calls en respuesta: no soportado por el backend anónimo"*
+(NO) — y lo que la capacidad `tools` de llm-libre significa es la segunda. `tools:
+false` sigue OBLIGATORIO, y el comportamiento nuevo es **más** peligroso que el 500
+viejo: un 500 fallaba honesto y disparaba failover; devolver prosa en silencio le
+entregaría texto a un cliente agentic que espera una llamada estructurada, sin que nada
+avise del error. Esta declaración es hoy la única barrera.
 
 **Follow-up (mismo día): `/v1/models` pasó a ser dinámico.** El usuario actualizó
 chatgpt-proxy para que consulte el catálogo real de ChatGPT (con caché y TTL,
@@ -165,8 +176,10 @@ proveedores:
     base_url_env: CHATGPT_PROXY_URL   # la direccion real viene del entorno
     base_url: http://127.0.0.1:8888/v1   # default; OJO con el /v1 (ver nota)
     modelos_path: /models
+    desenvuelve_canvas: true   # SOLO chatgpt -- ver la nota debajo
+    # timeout_s: 20             # opcional; default None = el TIMEOUT_S global
     capacidades_por_defecto:
-      tools: false   # OBLIGATORIO -- mandarle tools devuelve HTTP 500
+      tools: false   # OBLIGATORIO -- function calling no soportado (ver §3)
       vision: false
       contexto: 128000
       max_salida: 8192
@@ -204,12 +217,33 @@ que la URL real venga del entorno (con el `base_url` del YAML como default) —
 existe porque `chatgpt-proxy` se despliega en `blog` y su dirección todavía
 no está fija.
 
-**El `/v1` de `base_url` importa.** Las rutas reales de chatgpt-proxy son
-`/v1/chat/completions` y `/v1/models` (verificado contra el código del proxy), no
-`/chat/completions` a secas como Kilo/OpenRouter. `cliente.armar_peticion` siempre
-agrega `/chat/completions` sobre `base_url` sin agregar `/v1` por su cuenta —
-mismo patrón que MiniMax (`base_url: https://api.minimax.io/v1`) — así que
-`base_url`/`CHATGPT_PROXY_URL` tienen que incluir el `/v1` ellos mismos.
+**El `/v1` de `base_url` importa — y desde la revisión, se auto-corrige si falta.**
+Las rutas reales de chatgpt-proxy son `/v1/chat/completions` y `/v1/models`
+(verificado contra el código del proxy), no `/chat/completions` a secas como Kilo/
+OpenRouter. `cliente.armar_peticion` siempre agrega `/chat/completions` sobre
+`base_url` sin agregar `/v1` por su cuenta — mismo patrón que MiniMax (`base_url:
+https://api.minimax.io/v1`) — así que `base_url` tiene que incluir el `/v1` ella
+misma. Esto ya se arregló una vez del lado del YAML (Task 13 original tenía
+`base_url` sin `/v1`); el mismo footgun sobrevivía del lado de `CHATGPT_PROXY_URL`,
+que reemplaza TODO `base_url` y el operador tiene que acordarse de poner el sufijo él
+mismo. `proveedores._resolver_base_url` ahora normaliza: si la variable de entorno no
+termina con el mismo sufijo de ruta que el `base_url` del YAML declara como default,
+se lo agrega automáticamente (con un `log.warning`, para que quede visible). Elegido
+sobre fallar al arrancar porque hay una única interpretación correcta — el sufijo que
+el propio YAML ya declara — así que auto-corregir es más útil que tirar abajo un
+despliegue que ya está corriendo por un typo recuperable.
+
+**`desenvuelve_canvas` y `timeout_s` son declaraciones por proveedor, mismo shape que
+`prioridad`/`capacidades_por_defecto` (revisión de Task 13).** `desenvuelve_canvas`
+(default `False`) decide si `catalogo`/`proxy` desenvuelven las cercas de canvas de
+esa ruta (§6.1) — apagado por defecto porque `:::nota{...}` es también sintaxis
+Docusaurus/MDX estándar, y aplicarlo a ciegas (como hacía la Task 13 original)
+corrompe una respuesta de documentación legítima de cualquier otro proveedor
+(reproducido en vivo contra Kilo). Solo `chatgpt` lo declara en `true`. `timeout_s`
+(default `None` = usa el `TIMEOUT_S` global de `proxy.py`, hoy 90 s) permite acotar el
+peor caso de un proveedor puntual sin bajarle el timeout a todos — se agregó junto con
+el cooldown de fallos duros (§7) por la misma razón: una ruta colgada en una máquina
+saturada (`blog`) es el modo de falla realista.
 
 **Dos filtros en el descubrimiento de `chatgpt`, los dos derivados de la respuesta,
 nunca de una lista de ids cableada:**
@@ -298,15 +332,29 @@ Varios modelos —gratis y de pago— escupen su cadena de pensamiento dentro de
 
 Se puede desactivar por petición con `x_crudo: true`.
 
-**Cercas de canvas (Task 13).** `chatgpt-proxy` filtra el modo "canvas" de ChatGPT al
-`content` con marcas `:::palabra{...atributos...}` … `:::` envolviendo la respuesta.
-**Al revés que `<think>`: el contenido de ADENTRO es la respuesta**, no algo para
-descartar — solo se quitan las dos líneas de marca (apertura y cierre), conservando
-todo lo demás carácter por carácter. Mismo requisito que el recorte de razonamiento: la
-marca puede llegar partida entre chunks en streaming. Una cerca que nunca cierra no
-pierde contenido (solo se descuenta la marca de apertura, ya confirmada); un `:::` que
-no está al inicio de línea, o al que no le sigue una palabra, nunca se confunde con una
-marca real.
+**Cercas de canvas (Task 13, alcance corregido en la revisión).** `chatgpt-proxy`
+filtra el modo "canvas" de ChatGPT al `content` con marcas
+`:::palabra{...atributos...}` … `:::` envolviendo la respuesta. **Al revés que
+`<think>`: el contenido de ADENTRO es la respuesta**, no algo para descartar — solo se
+quitan las dos líneas de marca (apertura y cierre), conservando todo lo demás carácter
+por carácter. Mismo requisito que el recorte de razonamiento: la marca puede llegar
+partida entre chunks en streaming. Una cerca que nunca cierra no pierde contenido
+(solo se descuenta la marca de apertura, ya confirmada); un `:::` que no está al
+inicio de línea, o al que no le sigue una palabra, nunca se confunde con una marca
+real.
+
+**El desenvuelto es POR PROVEEDOR (`Proveedor.desenvuelve_canvas`, §4), no global.**
+La primera versión de Task 13 lo aplicaba a toda respuesta, de cualquier proveedor —
+`recortar()` y `RecortadorStreamCompuesto` lo hacían incondicionalmente. Encontrado en
+la revisión: `:::note` / `:::tip` / `:::warning` es sintaxis Docusaurus/MDX estándar
+para admoniciones, y se reprodujo en vivo contra una ruta de **Kilo**: pedir
+documentación devolvía `":::note\nGuarda el token en el .env.\n:::"`, y el cliente
+recibía la marca arrancada — corrompiendo también un bloque de código que estuviera
+*demostrando* la sintaxis. `recortar(texto, desenvolver_canvas=False)` y
+`RecortadorStreamCompuesto(desenvolver_canvas=False)` ahora saltean el paso de canvas
+por completo si el llamador no lo pide; `proxy.py` lo decide por ruta, leyendo
+`Proveedor.desenvuelve_canvas` de la que está sirviendo el intento. Solo `chatgpt` lo
+declara en `true`.
 
 ### `GET /v1/models`
 
@@ -350,7 +398,16 @@ Por ruta:
 - **`confiabilidad`** (0–1) — EWMA de éxitos, mezclando sondas y tráfico real.
 - **`latencia`** — p50 de time-to-first-token de las últimas N observaciones.
 - **`cooldown`** — una ruta que devolvió 429 queda excluida hasta que expire su castigo
-  (backoff exponencial con tope).
+  (backoff exponencial con tope). **Desde la revisión de Task 13, también una ruta que
+  falla `TOPE_FALLOS_SEGUIDOS` (3) veces SEGUIDAS por cualquier motivo que no sea 429**
+  (500, timeout, error de red, 200 sin contenido usable) — con el MISMO backoff. Antes
+  solo el 429 castigaba: una ruta rota o colgada se seguía probando en cada pedido,
+  adelante de las sanas si tenía mejor `prioridad`, para siempre — con `TIMEOUT_S=90`
+  eso son hasta 5×90s=450s por pedido en la cadena más larga, y `/health` sigue en `ok`
+  mientras quede una ruta viva. `blog` es una máquina saturada: colgado-no-rechazado es
+  el modo de falla realista. Un fallo aislado no castiga (un hiccup no debe sacar una
+  ruta sana de rotación); un éxito limpia el contador. Un proveedor puede declarar su
+  propio `timeout_s` (§4) para acotar el peor caso sin bajarle el timeout a todos.
 
 `puntaje = calidad^wc · confiabilidad^wr · f(latencia)^wl`, con los pesos según el **perfil**
 pedido: `rapido` pondera latencia, `potente` pondera calidad y contexto, `balanceado` (el
@@ -373,6 +430,12 @@ fallos. La clave de orden completa (Task 13) es
 
 Un `model` explícito (un id real, no un alias `auto*`) sigue evitando todo este orden: filtra
 directo a esa ruta, sin mirar prioridad ni puntaje.
+
+Esta clave vive en `router.clave_de_orden`, factorizada (revisión de Task 13) para que
+`GET /v1/ranking` (§6) la reuse en vez de ordenar solo por puntaje: antes podía mostrar
+una ruta arriba de todo mientras `X-Ruta-Usada` decía otra distinta, porque no miraba
+`prioridad`. Ahora cada fila trae `prioridad` y el orden de la respuesta es el orden
+real que usaría el router.
 
 ## 8. Sondeo
 
@@ -459,13 +522,30 @@ desarrollo.
 - **Cercas de canvas (Task 13):** mismo estándar que el recorte de razonamiento — la marca
   partida en cada posición posible entre chunks, una cerca que nunca cierra (no debe
   perder contenido), texto con `:::` que no es una cerca real (no debe tocarse), y
-  contenido normal intacto.
+  contenido normal intacto. Además (revisión de Task 13): una ruta SIN
+  `desenvuelve_canvas` (Kilo) deja `:::note` intacto, en bloque y en streaming; cuatro
+  tests dedicados a mutaciones puntuales del autómata (la marca de cierre se descarta,
+  no se emite; sin el seguimiento de inicio-de-línea se pierde texto de respuesta real;
+  el patrón de apertura exige la línea entera; el de cierre exige la línea exacta), cada
+  uno verificado ejecutando la mutación descrita y confirmando que el test se pone rojo.
 - **Migración de esquema (Task 13):** `rutas.prioridad` verificada contra una base con el
   esquema viejo (sin esa columna) y filas ya adentro — no debe reventar al abrir, la fila
   preexistente migra al default, y la base sigue siendo escribible después.
+- **Cooldown por fallos duros (revisión de Task 13):** N fallos NO-429 seguidos ponen una
+  ruta en cooldown incluso con `prioridad: 0`; un éxito limpia el contador; el camino del
+  429 (backoff exponencial inmediato) se prueba sin tocar, para confirmar que sigue
+  intacto.
+- **Rungs sin pinnear, cerrados en la revisión:** `rutas_fijas` estampando la `prioridad`
+  real del proveedor (no una constante — probado con un YAML sintético y un valor
+  distintivo), y el orden `(prioridad, no-medida)` en `router.clave_de_orden` (no
+  `(no-medida, prioridad)` — el caso que decide el rollout real: el día de un deploy,
+  todo `chatgpt` arranca sin medir mientras Kilo ya carga mediciones de producción).
+  Ambos verificados ejecutando la mutación descrita (intercambiar el orden de la tupla /
+  hardcodear la prioridad) y confirmando rojo.
 - **Integración real:** un puñado marcado para no correr en CI, contra los proveedores vivos
   — incluye `chatgpt-proxy` (Task 13), que se salta limpio si `CHATGPT_PROXY_URL` no está
-  configurada.
+  configurada, y que además (revisión) confirma que el catálogo descubierto no viene
+  vacío ni con alias colados.
 
 ## 13. Fuera de alcance
 

@@ -129,7 +129,7 @@ gasto de pago igual queda registrado y visible por otra vía: consultar
 |---|---|
 | `POST /v1/chat/completions` | El contrato de chat de OpenAI, con `stream: true` opcional y las extensiones `x_*` de arriba |
 | `GET /v1/models` | El catálogo normalizado (formato OpenAI) más los alias `auto*` |
-| `GET /v1/ranking` | Puntaje de cada ruta con sus componentes desglosados y la fecha de su última sonda — para auditar por qué el router eligió lo que eligió |
+| `GET /v1/ranking` | Puntaje de cada ruta (con `prioridad`) y sus componentes desglosados, **ordenado con la misma clave que usa el router** — para auditar por qué el router eligió lo que eligió, sin que la fila de arriba contradiga a `X-Ruta-Usada` |
 | `GET /v1/uso` | Consumo de pago del día para la llave que llama, contra su tope diario |
 | `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. No requiere llave |
 
@@ -140,7 +140,7 @@ Variables de entorno (ver `.env.example`):
 | Variable | Default | Qué es |
 |---|---|---|
 | `LLM_LIBRE_API_KEYS` | *(sin default — obligatoria)* | Llaves que aceptan los clientes, separadas por coma. El proceso **no arranca** si falta o queda vacía: ver más abajo |
-| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`), **incluyendo el `/v1`** (sus rutas reales son `/v1/chat/completions` y `/v1/models`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml` |
+| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml`. Idealmente incluye el `/v1` (sus rutas reales son `/v1/chat/completions` y `/v1/models`), pero **si no lo trae, se agrega solo** — con un aviso en el log — para que un typo del operador no deje cada chat pegando a una URL inexistente |
 | `KILO_API_KEY` | *(sin definir)* | Opcional. **Dejar SIN DEFINIR**, no en blanco — ver nota abajo |
 | `OPENROUTER_API_KEY` | *(sin definir)* | Llave de OpenRouter (su tier gratis sí exige llave para completions, aunque `/models` sea público) |
 | `MINIMAX_API_KEY` | *(sin definir)* | Llave del proveedor de pago (escalón de fallback) |
@@ -184,16 +184,28 @@ sondea aproximadamente una vez al día— vuelve a cero.
   `prioridad: 2`) sigue yendo **siempre al final**, sin importar su
   `prioridad`: ese número ordena dentro de un mismo `tier`, nunca decide
   entre `gratis` y `pago` (ver la nota de vocabulario más arriba).
-- **`chatgpt` no soporta `tools`** (mandárselo devuelve `HTTP 500` en vez de
-  ignorarlo, verificado contra el proxy real): sus modelos se sirven con
-  `tools: false`. Una petición con `tools` (o `auto:tools` /
-  `x_requiere: ["tools"]`) descarta automáticamente esas rutas y cae al
-  siguiente proveedor gratis que sí las soporte (Kilo u OpenRouter); recién
-  si esos también fallan, al escalón de pago.
+- **`chatgpt` se sirve con `tools: false`, y sigue siendo obligatorio.** El
+  backend anónimo dejó de devolver `HTTP 500` al mandarle `tools` (eso
+  cambió), pero sigue sin soportar *function calling*: con
+  `tool_choice: "required"` devuelve `tool_calls: None` y prosa en texto
+  plano. Es "tools avanzados" (reservas, shopping, widgets, canvas) lo que
+  sí soporta, no lo que la capacidad `tools` de este gateway significa. El
+  comportamiento nuevo es **más** peligroso que el 500 viejo — un 500 fallaba
+  honesto y disparaba failover; devolver prosa en silencio le entregaría
+  texto a un cliente agentic que espera una llamada estructurada — así que
+  esta declaración es la única barrera. Una petición con `tools` (o
+  `auto:tools` / `x_requiere: ["tools"]`) descarta automáticamente las rutas
+  de `chatgpt` y cae al siguiente proveedor gratis que sí las soporte (Kilo u
+  OpenRouter); recién si esos también fallan, al escalón de pago.
 - `chatgpt-proxy` filtra el modo "canvas" de ChatGPT al `content`, con marcas
   de la forma `:::palabra{...atributos...}` … `:::`. El gateway las
   desenvuelve (en bloque y en streaming) conservando el texto de adentro —
   a diferencia de `<think>`, ahí ES la respuesta, no algo para descartar.
+  **Es una declaración por proveedor** (`desenvuelve_canvas` en
+  `proveedores.yaml`, apagada por defecto), no algo universal:
+  `:::nota{...}` / `:::tip{...}` es también sintaxis Docusaurus/MDX estándar,
+  y aplicar el desenvuelto a ciegas le arrancaría esas marcas a una respuesta
+  de documentación legítima de Kilo u OpenRouter. Solo `chatgpt` lo declara.
 - **El catálogo de los proveedores gratis se descubre siempre desde su propio
   `/models`, nunca se hardcodea** — Kilo, OpenRouter **y también `chatgpt`**:
   así un modelo que cambia de id, desaparece o aparece se detecta solo, sin
@@ -246,3 +258,15 @@ sondea aproximadamente una vez al día— vuelve a cero.
 - Las rutas de pago siempre van al final de la cadena de intentos, y solo se
   usan si se agotaron las gratis, la llave no superó su tope diario y la
   petición no trae `x_permitir_pago: false`.
+- **Una ruta que falla repetidas veces seguidas (sin ningún éxito en el
+  medio) entra en cooldown, no solo cuando el proveedor devuelve `429`.**
+  Antes, un `500`, un timeout o un error de red no dejaban nunca un
+  cooldown: una ruta rota o **colgada** se seguía probando en cada pedido,
+  adelante de las sanas si tenía mejor `prioridad`, indefinidamente — con
+  el timeout por defecto (90 s) eso son hasta 7,5 minutos por pedido en la
+  cadena más larga, y `/health` sigue en `ok` mientras quede una ruta viva.
+  Un fallo aislado no castiga (evita sacar una ruta sana por un hiccup); al
+  tercer fallo seguido, sí, con el mismo backoff exponencial que ya usa el
+  `429`. Un proveedor puede además declarar su propio `timeout_s` en
+  `proveedores.yaml` (default: el global, 90 s) para acotar el peor caso de
+  uno que se sepa lento, sin bajarle el timeout a todos.
