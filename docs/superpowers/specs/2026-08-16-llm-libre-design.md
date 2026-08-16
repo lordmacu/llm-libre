@@ -279,20 +279,29 @@ sondean** — no tiene sentido gastar dinero puntuando el escape de emergencia.
 
 ## 11. Despliegue
 
-`rsync` + `docker compose up -d --build`, igual que `arkiv-api`:
+**Por Coolify** (ya corre en `blog`, versión 4.1.2, con Traefik de proxy), no por rsync.
+Repo privado `lordmacu/llm-libre` en GitHub; Coolify construye desde el `Dockerfile` de la
+raíz y redespliega en cada push a `main`.
 
-```
-rsync -a --exclude '__pycache__' --exclude '.pytest_cache' --exclude '.venv' \
-  --exclude '.git' --exclude '.env' \
-  src tests Dockerfile docker-compose.yml pyproject.toml README.md blog:~/llm-libre/
-```
+Esto **elimina el problema del `.env`**, que es la razón principal de elegirlo: las
+credenciales viven en la UI de Coolify, no en un archivo del disco. Un `rsync --delete` sin
+`--exclude .env` ya borró las credenciales de producción de `arkiv-api` el 2026-08-11; acá
+ese fallo no puede ocurrir porque no hay archivo que borrar. Es además el patrón que ya usan
+los 7 bots de WhatsApp de la misma máquina.
 
-⚠️ **Excluir `.env` siempre.** Un `rsync --delete` sin ese exclude ya borró las credenciales
-de producción de `arkiv-api` el 2026-08-11.
+Piezas que hay que configurar en la UI:
 
-El archivo SQLite va en un volumen, fuera de lo que toca el rsync.
+- **Port** `8101`, **Build Pack** Dockerfile, **Health Check Path** `/health`
+- **Volumen persistente** montado en `/datos` — sin él el SQLite se borra en cada redeploy
+  y el ranking, que tarda días en construirse, vuelve a cero
+- Variables de entorno, con **`KILO_API_KEY` deliberadamente sin definir**: el tier anónimo
+  necesita que no viaje ninguna cabecera `Authorization`
 
-Python no compila nada, así que no aplica la regla de no compilar en `blog`.
+⚠️ El build corre en `blog`. Es aceptable porque `pip install` de estas cuatro dependencias
+baja wheels y no compila nada — la regla de "no compilar en blog" apunta a Rust, no a esto.
+
+Queda un `docker-compose.yml` en el repo, pero solo para levantarlo en local durante el
+desarrollo.
 
 ## 12. Pruebas
 
