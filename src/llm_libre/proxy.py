@@ -1,3 +1,4 @@
+import json
 import time
 from dataclasses import dataclass
 
@@ -5,7 +6,7 @@ import httpx
 
 from llm_libre.cliente import armar_peticion
 from llm_libre.modelos import Ruta
-from llm_libre.razonamiento import recortar
+from llm_libre.razonamiento import RecortadorStream, recortar
 
 COOLDOWN_BASE_S = 60.0
 COOLDOWN_TOPE_S = 3600.0
@@ -83,6 +84,78 @@ class Proxy:
             "proxima_liberacion": (min(cooldowns_del_pedido.values())
                                    if cooldowns_del_pedido else None),
         }}, None, intentos)
+
+    async def completar_stream(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
+                               crudo: bool = False):
+        """Emite lineas SSE ya recortadas, terminando siempre en `data: [DONE]`.
+
+        Hace failover solo ANTES del primer byte util: una vez que al cliente le
+        llego contenido de una ruta, cambiar de modelo mezclaria dos respuestas
+        distintas en un mismo stream. Por eso una falla de red DESPUES de emitir
+        no reintenta la siguiente ruta: cierra el stream ahi mismo.
+        """
+        for ruta in rutas:
+            proveedor = self.proveedores[ruta.proveedor]
+            url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
+            payload["stream"] = True
+            t0 = time.monotonic()
+            emitido = False  # ya salio algun chunk util hacia el cliente en este intento
+            try:
+                async with self.http.stream("POST", url, headers=cabeceras, json=payload,
+                                            timeout=TIMEOUT_S) as resp:
+                    if resp.status_code != 200:
+                        if resp.status_code == 429:
+                            self._castigar(ruta.clave, ahora)
+                        self.almacen.registrar_evento(ruta.clave, False, 0,
+                                                      resp.status_code, ahora)
+                        continue
+                    self._castigos.pop(ruta.clave, None)
+                    self.cooldowns.pop(ruta.clave, None)
+                    rec = RecortadorStream()
+                    primero = True
+                    async for linea in resp.aiter_lines():
+                        if not linea.startswith("data:"):
+                            continue
+                        carga = linea[5:].strip()
+                        if carga == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(carga)
+                        except json.JSONDecodeError:
+                            continue
+                        delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                        if not crudo and isinstance(delta.get("content"), str):
+                            limpio = rec.alimentar(delta["content"])
+                            # Un chunk de tool_calls (o el de role inicial) suele
+                            # viajar con content="": si solo miramos el contenido
+                            # recortado lo tirariamos igual, perdiendo esa llamada.
+                            otras = {k: v for k, v in delta.items()
+                                    if k != "content" and v}
+                            if not limpio and not otras:
+                                continue    # nada util que mandar en este chunk
+                            delta["content"] = limpio
+                        if primero:
+                            self.almacen.registrar_evento(
+                                ruta.clave, True, int((time.monotonic() - t0) * 1000),
+                                200, ahora)
+                            primero = False
+                        emitido = True
+                        yield f"data: {json.dumps(obj)}\n\n"
+                    resto = rec.cerrar()
+                    if resto:
+                        yield ('data: {"choices":[{"delta":{"content":%s}}]}\n\n'
+                               % json.dumps(resto))
+                    yield "data: [DONE]\n\n"
+                    return
+            except httpx.HTTPError:
+                self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
+                if emitido:
+                    yield "data: [DONE]\n\n"
+                    return
+                continue
+
+        yield 'data: {"error":{"message":"sin rutas disponibles"}}\n\n'
+        yield "data: [DONE]\n\n"
 
     def _castigar(self, clave: str, ahora: float) -> None:
         n = self._castigos.get(clave, 0) + 1
