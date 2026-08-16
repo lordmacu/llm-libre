@@ -140,7 +140,7 @@ Variables de entorno (ver `.env.example`):
 | Variable | Default | Qué es |
 |---|---|---|
 | `LLM_LIBRE_API_KEYS` | *(sin default — obligatoria)* | Llaves que aceptan los clientes, separadas por coma. El proceso **no arranca** si falta o queda vacía: ver más abajo |
-| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml` |
+| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`), **incluyendo el `/v1`** (sus rutas reales son `/v1/chat/completions` y `/v1/models`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml` |
 | `KILO_API_KEY` | *(sin definir)* | Opcional. **Dejar SIN DEFINIR**, no en blanco — ver nota abajo |
 | `OPENROUTER_API_KEY` | *(sin definir)* | Llave de OpenRouter (su tier gratis sí exige llave para completions, aunque `/models` sea público) |
 | `MINIMAX_API_KEY` | *(sin definir)* | Llave del proveedor de pago (escalón de fallback) |
@@ -185,22 +185,36 @@ sondea aproximadamente una vez al día— vuelve a cero.
   `prioridad`: ese número ordena dentro de un mismo `tier`, nunca decide
   entre `gratis` y `pago` (ver la nota de vocabulario más arriba).
 - **`chatgpt` no soporta `tools`** (mandárselo devuelve `HTTP 500` en vez de
-  ignorarlo, verificado contra el proxy real): sus cinco modelos se declaran
-  con `tools: false` en `proveedores.yaml`. Una petición con `tools` (o
-  `auto:tools` / `x_requiere: ["tools"]`) descarta automáticamente esas rutas
-  y cae al siguiente proveedor gratis que sí las soporte (Kilo u OpenRouter);
-  recién si esos también fallan, al escalón de pago.
+  ignorarlo, verificado contra el proxy real): sus modelos se sirven con
+  `tools: false`. Una petición con `tools` (o `auto:tools` /
+  `x_requiere: ["tools"]`) descarta automáticamente esas rutas y cae al
+  siguiente proveedor gratis que sí las soporte (Kilo u OpenRouter); recién
+  si esos también fallan, al escalón de pago.
 - `chatgpt-proxy` filtra el modo "canvas" de ChatGPT al `content`, con marcas
   de la forma `:::palabra{...atributos...}` … `:::`. El gateway las
   desenvuelve (en bloque y en streaming) conservando el texto de adentro —
   a diferencia de `<think>`, ahí ES la respuesta, no algo para descartar.
-- **El catálogo de los proveedores gratis que lo exponen (Kilo, OpenRouter)
-  se descubre siempre desde su propio `/models`, nunca se hardcodea**: así un
-  modelo que cambia de id o desaparece se detecta solo, sin tocar código. La
-  excepción son los proveedores cuyo `/models` no trae metadatos de
-  capacidad — el de pago (MiniMax) y `chatgpt` (su lista es escrita a mano
-  por el propio proxy) — que declaran sus modelos a mano en
-  `proveedores.yaml` (`modelos_fijos`).
+- **El catálogo de los proveedores gratis se descubre siempre desde su propio
+  `/models`, nunca se hardcodea** — Kilo, OpenRouter **y también `chatgpt`**:
+  así un modelo que cambia de id, desaparece o aparece se detecta solo, sin
+  tocar código ni `proveedores.yaml`. Hay tres patrones en el registro, según
+  qué trae el `/models` de cada uno:
+  - Kilo / OpenRouter: ids **y** capacidades, los dos descubiertos.
+  - `minimax` (pago): ni ids ni capacidades — su `/models` real solo trae
+    `id`/`created`/`owned_by` — así que los dos se declaran a mano
+    (`modelos_fijos`).
+  - `chatgpt`: ids **descubiertos** (su `/v1/models` sí es dinámico, con
+    caché y TTL contra el backend real de ChatGPT), pero **capacidades
+    declaradas** (`capacidades_por_defecto`) — su catálogo nunca trae
+    metadatos de capacidad, solo `id`/`description`. Es un mecanismo
+    general, no algo especial de `chatgpt`: cualquier proveedor futuro con
+    un `/models` igual de desnudo lo puede usar sin tocar código.
+  - Dos entradas se filtran del descubrimiento de `chatgpt`, las dos por lo
+    que la propia respuesta dice de sí misma, nunca por una lista de ids:
+    los alias legacy que el proxy agrega (`gpt-4o`, `gpt-4o-mini`, `gpt-4`,
+    `gpt-3.5-turbo`) traen `description: "Alias → <target>"`; y `auto`,
+    reservado por el propio `interpretar_pedido` de llm-libre (colisiona con
+    su alias `auto`), se descarta como id reservado.
 - Cada ruta (proveedor + modelo) se sondea por **salud** cada
   `SONDEO_SALUD_HORAS` (default 5 h) y, de las rutas gratis vivas, por
   **calidad** cada `SONDEO_CALIDAD_CADA_N_CICLOS` ciclos (default 5, o sea

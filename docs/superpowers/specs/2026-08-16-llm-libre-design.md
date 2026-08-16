@@ -102,12 +102,23 @@ solo separa sesiones, no autentica), contrato compatible con OpenAI
 (`/v1/chat/completions`, `/v1/models`, `/health`). Chat sin streaming y streaming
 (forma real de OpenAI: `finish_reason` hermano de `delta`, no adentro) **funcionan**.
 **`tools` NO soportado: devuelve HTTP 500**, no un fallo elegante — por eso sus
-modelos se declaran `tools: false` a mano en `proveedores.yaml`, igual que MiniMax
-(su `/v1/models` tampoco trae metadatos de capacidad). `temperature`/`max_tokens`/etc.
-se aceptan y se ignoran. **Filtra el modo "canvas" de ChatGPT al `content`**, con
-marcas `:::palabra{...}` … `:::` que envuelven la respuesta real (no algo para
-descartar, a diferencia de `<think>`) — el gateway las desenvuelve, en bloque y en
-streaming (§6.1).
+modelos se sirven con `tools: false`. `temperature`/`max_tokens`/etc. se aceptan y se
+ignoran. **Filtra el modo "canvas" de ChatGPT al `content`**, con marcas
+`:::palabra{...}` … `:::` que envuelven la respuesta real (no algo para descartar, a
+diferencia de `<think>`) — el gateway las desenvuelve, en bloque y en streaming (§6.1).
+
+**Follow-up (mismo día): `/v1/models` pasó a ser dinámico.** El usuario actualizó
+chatgpt-proxy para que consulte el catálogo real de ChatGPT (con caché y TTL,
+fallback a la caché vieja si el backend falla, `502` solo si no tiene nada) en vez de
+una lista escrita a mano. Verificado en vivo: 10 entradas, solo con
+`id`/`object`/`created`/`owned_by`/`description` — **sigue sin metadatos de
+capacidad**. 5 son modelos reales (`gpt-5-5`, `gpt-5-6`, `gpt-5-3-mini`,
+`gpt-5-5-mini`, `gpt-5-6-mini`), 4 son alias legacy que el proxy agrega para
+compatibilidad (`description` empieza con `"Alias → <target>"` — p.ej.
+`gpt-4o` → `"Alias → auto"`), y 1 es `auto` (`description: "Auto"`, sin el prefijo de
+alias). Esto cambió el patrón de registro de `chatgpt`: pasa de "ids y capacidades
+declarados a mano" (como MiniMax) a "ids descubiertos, capacidades declaradas" — un
+tercer patrón, ver §4.
 
 ## 4. Arquitectura
 
@@ -129,6 +140,22 @@ se prueba entera sin tocar internet.
 
 ### Registro de proveedores
 
+Tres patrones, todos declarativos — ninguno cablea ids en código:
+
+| Patrón | Ids | Capacidades | Quién |
+|---|---|---|---|
+| Todo descubierto | `/models` | `/models` | Kilo, OpenRouter |
+| Todo declarado | `modelos_fijos` | `modelos_fijos` | MiniMax |
+| Ids descubiertos, capacidades declaradas | `/models` | `capacidades_por_defecto` | chatgpt |
+
+`capacidades_por_defecto` (follow-up de Task 13) es el mecanismo general para el
+tercer patrón: cuando un proveedor lo declara, `catalogo.normalizar` aplica esas
+capacidades a CADA id que descubra y saltea los chequeos de precio/modalidad de
+salida — un proveedor que declara defaults está afirmando lo que su catálogo no
+puede decir. Sigue siendo descubrimiento en el sentido que importa (§1): los IDS se
+leen de `/models`, nunca se cablean. Cualquier proveedor futuro con un catálogo
+igual de desnudo lo usa sin tocar código.
+
 ```yaml
 proveedores:
   - id: chatgpt
@@ -136,11 +163,13 @@ proveedores:
     prioridad: 0                 # antes que todo lo demas gratis
     dialecto: openai
     base_url_env: CHATGPT_PROXY_URL   # la direccion real viene del entorno
-    base_url: http://127.0.0.1:8888   # default si la variable no esta
-    modelos_fijos: [gpt-5-6, gpt-5-5, gpt-5-6-mini, gpt-5-5-mini, gpt-5-3-mini]
-    # tools:false en los cinco -- mandarle tools devuelve HTTP 500, no un
-    # fallo elegante (verificado 2026-08-16). No se declara "auto" (colisiona
-    # con el alias de llm-libre) ni los alias legacy gpt-4o/gpt-4/gpt-3.5.
+    base_url: http://127.0.0.1:8888/v1   # default; OJO con el /v1 (ver nota)
+    modelos_path: /models
+    capacidades_por_defecto:
+      tools: false   # OBLIGATORIO -- mandarle tools devuelve HTTP 500
+      vision: false
+      contexto: 128000
+      max_salida: 8192
   - id: kilo
     tier: gratis
     prioridad: 1
@@ -174,6 +203,28 @@ pago un lugar antes que lo gratis. `base_url_env`, si está declarada, permite
 que la URL real venga del entorno (con el `base_url` del YAML como default) —
 existe porque `chatgpt-proxy` se despliega en `blog` y su dirección todavía
 no está fija.
+
+**El `/v1` de `base_url` importa.** Las rutas reales de chatgpt-proxy son
+`/v1/chat/completions` y `/v1/models` (verificado contra el código del proxy), no
+`/chat/completions` a secas como Kilo/OpenRouter. `cliente.armar_peticion` siempre
+agrega `/chat/completions` sobre `base_url` sin agregar `/v1` por su cuenta —
+mismo patrón que MiniMax (`base_url: https://api.minimax.io/v1`) — así que
+`base_url`/`CHATGPT_PROXY_URL` tienen que incluir el `/v1` ellos mismos.
+
+**Dos filtros en el descubrimiento de `chatgpt`, los dos derivados de la respuesta,
+nunca de una lista de ids cableada:**
+
+1. Los alias legacy (`gpt-4o`, `gpt-4o-mini`, `gpt-4`, `gpt-3.5-turbo`) se
+   autoidentifican: su `description` empieza con `"Alias → <target>"`. Quedárselos
+   crearía una ruta duplicada apuntando al mismo modelo, y el ranking terminaría
+   midiendo — y compitiendo — el mismo modelo consigo mismo bajo dos nombres.
+2. `auto` no se autoidentifica (su `description` es simplemente `"Auto"`), así que
+   se filtra como **id reservado por llm-libre mismo** (`catalogo.IDS_RESERVADOS`):
+   colisiona con el alias `auto` propio de `interpretar_pedido` — una ruta real con
+   ese `modelo_id` literal quedaría inalcanzable, porque pedir `"auto"` siempre
+   resuelve al alias, nunca a una ruta. Es un contrato de nuestra propia
+   nomenclatura, no algo específico de chatgpt: cualquier proveedor futuro que
+   exponga un id `"auto"` chocaría igual.
 
 ## 5. Modelo de datos
 
@@ -393,7 +444,15 @@ desarrollo.
   una ruta de pago con `prioridad: 0` y puntaje perfecto sigue yendo al final contra una
   ruta gratis mediocre, y que un `model` explícito evita el orden por completo.
 - **Normalización de catálogo:** contra JSON reales grabados de Kilo y OpenRouter, incluido
-  el caso `lyria` (precio 0 pero modelo de música → debe descartarse).
+  el caso `lyria` (precio 0 pero modelo de música → debe descartarse). Y (follow-up de
+  Task 13) contra un fixture grabado de `/v1/models` de chatgpt-proxy
+  (`tests/fixtures/chatgpt_models.json`, 10 entradas reales): los 5 ids reales se
+  descubren, los 4 alias legacy y `auto` se descartan, y las `capacidades_por_defecto`
+  se aplican a cada uno. Un segundo fixture con un id que hoy no existe
+  (`chatgpt_models_con_modelo_nuevo.json`) prueba que un modelo nuevo del proxy
+  aparece solo, sin tocar `proveedores.yaml` ni el código. Un proveedor SIN
+  `capacidades_por_defecto` (Kilo/OpenRouter) se prueba con el comportamiento exacto
+  de antes — pricing y modalidad de salida siguen filtrando.
 - **Recorte de razonamiento:** con la etiqueta partida en todas las posiciones posibles
   entre chunks, bloques anidados, y una etiqueta que nunca cierra (no debe tragarse la
   respuesta entera ni colgar el stream).
