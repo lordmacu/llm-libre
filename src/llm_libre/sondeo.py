@@ -19,13 +19,31 @@ RETENCION_DIAS = 30
 
 async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Proveedor],
                                almacen, ahora: float) -> int:
-    """Refresca el catalogo. Si un proveedor falla se conserva lo que ya habia:
-    mejor un catalogo viejo que uno vacio."""
-    descubiertas: list[Ruta] = []
-    fallo = False
+    """Refresca el catalogo, proveedor por proveedor.
+
+    La baja de rutas que ya no aparecen se decide POR PROVEEDOR, no para toda
+    la sincronizacion: cada proveedor que responde bien se persiste (y sus
+    rutas que desaparecieron de SU catalogo se desactivan) en el momento,
+    usando el scope `proveedor=` de Almacen.upsert_rutas -- sin ese scope, un
+    UPDATE de "lo que no se vio se desactiva" no filtrado por proveedor
+    tambien apagaria las rutas de proveedores ajenos a esta pasada (su
+    visto_por_ultima_vez siempre es mas vieja que `ahora`). Que OTRO
+    proveedor este roto o vacio en la misma pasada no debe frenar esa baja: el
+    caso que este proyecto existe para detectar es justo un modelo que
+    desaparecio de su proveedor, y no puede quedar dependiendo de que todos
+    los demas proveedores tengan un dia perfecto.
+
+    Un proveedor que falla (red, status distinto de 200, cuerpo no
+    parseable/con forma inesperada, o un 200 con cero modelos utilizables --
+    mas probable un proveedor roto que un catalogo genuinamente vacio) no se
+    toca en absoluto: mejor conservar lo que ya se sabia de EL que borrarlo.
+    """
+    total = 0
     for p in proveedores:
         if p.modelos_fijos:
-            descubiertas.extend(rutas_fijas(p))
+            rutas = rutas_fijas(p)
+            almacen.upsert_rutas(rutas, ahora, desactivar_faltantes=True, proveedor=p.id)
+            total += len(rutas)
             continue
         if not p.modelos_path:
             continue
@@ -36,10 +54,8 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
             r = await http.get(p.base_url.rstrip("/") + p.modelos_path,
                                headers=cabeceras, timeout=30.0)
         except httpx.HTTPError:
-            fallo = True
             continue
         if r.status_code != 200:
-            fallo = True
             continue
         try:
             nuevas = normalizar(p.id, r.json())
@@ -49,28 +65,17 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
             # a normalizar() iterando algo que no son dicts de modelo
             # (AttributeError/KeyError/TypeError). Un proveedor roto no debe
             # tirar abajo la sincronizacion de los demas.
-            fallo = True
             continue
         if not nuevas:
-            # Un 200 con cero modelos utilizables es mucho mas probablemente un
-            # proveedor roto (o momentaneamente sin catalogo) que la verdad: un
-            # proveedor que normalmente sirve modelos y de golpe no reporta
-            # ninguno no merece borrar lo que ya se sabia de el. Se trata igual
-            # que cualquier otro fallo de ESTE proveedor -- no afecta a los
-            # demas, que se siguen procesando y persistiendo normalmente.
-            fallo = True
+            # Un 200 con cero modelos utilizables no autoriza a apagar lo que
+            # ya se sabia de este proveedor: se trata igual que cualquier otro
+            # fallo de ESTE proveedor puntual, sin afectar a los demas.
             continue
-        descubiertas.extend(nuevas)
-    if fallo and not descubiertas:
-        return 0
-    # Si un proveedor fallo no se desactiva nada (desactivar_faltantes=False):
-    # las rutas descubiertas por los proveedores que SI respondieron son reales
-    # y deben quedar con el `ahora` verdadero en visto_por_ultima_vez -- pisarlo
-    # con 0.0 (como haria pasar `momento=0.0` a upsert_rutas) corromperia esa
-    # marca de tiempo tambien para ellas, no solo para las que faltaron, y esa
-    # marca es justo lo que permite notar despues que un modelo fue renombrado.
-    almacen.upsert_rutas(descubiertas, ahora, desactivar_faltantes=not fallo)
-    return len(descubiertas)
+        # Este proveedor respondio bien: se persiste YA, con su propio scope,
+        # sin esperar a saber que paso con el resto de la lista.
+        almacen.upsert_rutas(nuevas, ahora, desactivar_faltantes=True, proveedor=p.id)
+        total += len(nuevas)
+    return total
 
 
 async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None:

@@ -141,6 +141,76 @@ async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio
     assert "vacio/previa:free" in claves    # el vacio conservo lo que ya tenia
 
 
+async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este_vacio():
+    # Finding 1, caso (c) -- el que distingue un fix real de uno a lo bruto.
+    # kilo tenia una ruta vieja que ya no aparece en su catalogo nuevo; vacio
+    # responde 200 sin modelos. Que vacio este vacio no debe frenar la baja de
+    # kilo/old:free: kilo respondio bien y su propia desaparicion es real.
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("old:free", proveedor="kilo")], momento=50.0)
+    almacen.upsert_rutas([_ruta("previa:free", proveedor="vacio")], momento=50.0)
+
+    def handler(req):
+        if "k.test" in str(req.url):
+            return httpx.Response(200, json=CATALOGO)   # ya no trae old:free, solo x:free
+        return httpx.Response(200, json=CATALOGO_VACIO)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Proveedor("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
+    ]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert claves == {"kilo/x:free", "vacio/previa:free"}
+    assert "kilo/old:free" not in claves    # se desactivo: kilo respondio, y ya no la trae
+
+
+async def test_un_proveedor_sano_no_desactiva_rutas_de_otro_proveedor():
+    # La desactivacion de kilo debe quedar ACOTADA a kilo: una ruta vieja de
+    # "otro" (mucho mas vieja que `ahora`, y "otro" ni siquiera participa de
+    # esta sincronizacion) no debe caer victima del UPDATE de kilo.
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("vieja:free", proveedor="otro")], momento=10.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO)))
+    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert claves == {"kilo/x:free", "otro/vieja:free"}
+
+
+CATALOGO_COMPARTIDO = {"data": [
+    {"id": "shared:free", "pricing": {"prompt": "0"}, "context_length": 1000,
+     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+     "supported_parameters": [], "top_provider": {"max_completion_tokens": 100}}]}
+
+
+async def test_el_mismo_modelo_en_dos_proveedores_el_que_lo_pierde_se_apaga_el_que_lo_tiene_sigue():
+    # Razon de ser de "rutas, no modelos": el mismo modelo_id puede existir en
+    # dos proveedores como dos filas independientes (claves distintas). Si uno
+    # lo deja de ofrecer y el otro lo mantiene, deben tratarse por separado.
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("shared:free", proveedor="kilo")], momento=50.0)
+    almacen.upsert_rutas([_ruta("shared:free", proveedor="otro")], momento=50.0)
+
+    def handler(req):
+        if "k.test" in str(req.url):
+            return httpx.Response(200, json=CATALOGO)          # kilo ya no trae shared:free
+        return httpx.Response(200, json=CATALOGO_COMPARTIDO)   # otro lo sigue trayendo
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Proveedor("otro", "gratis", "openai", "https://o.test", "", "/models", {}, []),
+    ]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert "kilo/shared:free" not in claves   # kilo lo perdio: se apaga
+    assert "otro/shared:free" in claves       # otro lo conserva: sigue activa
+    assert "kilo/x:free" in claves
+
+
 async def test_un_200_con_cuerpo_no_json_se_trata_como_fallo_y_no_frena_a_los_demas():
     # Finding 2: r.json() puede tirar JSONDecodeError (subclase de ValueError)
     # con un cuerpo no-JSON; eso no debe escapar de sincronizar_catalogo ni

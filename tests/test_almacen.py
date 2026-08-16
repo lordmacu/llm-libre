@@ -52,6 +52,32 @@ def test_no_desactiva_nada_cuando_se_pide_conservar(almacen):
     assert fila[0] == 200.0
 
 
+def test_el_scope_de_proveedor_acota_la_baja_a_ese_proveedor(almacen):
+    # kilo y otro tienen cada uno una ruta vieja. Al re-sincronizar SOLO kilo
+    # (con proveedor="kilo"), su ruta vieja se apaga pero la de "otro" -- mas
+    # vieja todavia, y ni siquiera mencionada en esta llamada -- debe
+    # sobrevivir: sin el scope, el UPDATE sin filtrar por proveedor la
+    # habria apagado igual, porque su visto_por_ultima_vez tambien es
+    # anterior al `momento` nuevo.
+    almacen.upsert_rutas([_ruta("vieja:free", proveedor="kilo")], momento=50.0)
+    almacen.upsert_rutas([_ruta("vieja:free", proveedor="otro")], momento=50.0)
+    almacen.upsert_rutas([_ruta("nueva:free", proveedor="kilo")], momento=200.0, proveedor="kilo")
+    activas = {r.clave for r in almacen.rutas_activas()}
+    assert activas == {"kilo/nueva:free", "otro/vieja:free"}
+
+
+def test_el_scope_de_proveedor_no_cambia_el_comportamiento_por_defecto(almacen):
+    # proveedor=None (el default) preserva el comportamiento historico: sin
+    # scope, acota a toda la tabla -- exactamente lo que ya cubre
+    # test_una_ruta_que_desaparece_se_desactiva_pero_no_se_borra. Este test
+    # solo confirma que pasar proveedor=None explicito da lo mismo.
+    almacen.upsert_rutas([_ruta("vieja:free", proveedor="kilo"),
+                          _ruta("otra:free", proveedor="otro")], momento=100.0)
+    almacen.upsert_rutas([_ruta("otra:free", proveedor="otro")], momento=200.0, proveedor=None)
+    activas = {r.clave for r in almacen.rutas_activas()}
+    assert activas == {"otro/otra:free"}   # kilo/vieja:free tambien se apaga, como antes
+
+
 def test_la_calidad_sale_de_la_ultima_sonda_de_calidad(almacen):
     almacen.upsert_rutas([_ruta()], momento=100.0)
     almacen.registrar_sonda("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)

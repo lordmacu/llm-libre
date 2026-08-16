@@ -39,7 +39,8 @@ class Almacen:
         self._con.commit()
 
     def upsert_rutas(self, rutas: list[Ruta], momento: float,
-                     desactivar_faltantes: bool = True) -> None:
+                     desactivar_faltantes: bool = True,
+                     proveedor: str | None = None) -> None:
         for r in rutas:
             c = r.capacidades
             self._con.execute(
@@ -56,9 +57,23 @@ class Almacen:
         # es lo que permite detectar un renombre de modelo. Se puede omitir este
         # paso cuando el llamador solo trae un subconjunto (p.ej. la sincronizacion
         # de un solo proveedor entre varios) y no quiere apagar las rutas de los demas.
+        #
+        # `proveedor`, si se pasa, ACOTA esa desactivacion a las rutas de ese
+        # proveedor: sin esto, un UPDATE sin filtrar por proveedor apagaria
+        # tambien las rutas de proveedores AJENOS a esta llamada (su
+        # visto_por_ultima_vez siempre es mas vieja que `momento`, asi que
+        # caerian igual). Es lo que permite que la sincronizacion de un
+        # proveedor decida SUS bajas sin esperar a saber que paso con los
+        # demas en la misma pasada. None (el default) preserva el
+        # comportamiento historico: acota a nada, o sea a toda la tabla.
         if desactivar_faltantes:
-            self._con.execute(
-                "UPDATE rutas SET activa = 0 WHERE visto_por_ultima_vez < ?", (momento,))
+            if proveedor is not None:
+                self._con.execute(
+                    "UPDATE rutas SET activa = 0 WHERE visto_por_ultima_vez < ? AND proveedor = ?",
+                    (momento, proveedor))
+            else:
+                self._con.execute(
+                    "UPDATE rutas SET activa = 0 WHERE visto_por_ultima_vez < ?", (momento,))
         self._con.commit()
 
     def rutas_activas(self) -> list[Ruta]:
