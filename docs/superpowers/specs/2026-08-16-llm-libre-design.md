@@ -180,6 +180,15 @@ Extensiones opcionales, que un SDK ajeno ignora sin romperse:
 Toda respuesta lleva `X-Ruta-Usada: <proveedor>/<modelo>`, `X-Tier: gratis|pago` y
 `X-Intentos: <n>`. **El fallback de pago nunca es invisible.**
 
+**Excepción, decidida el 2026-08-16:** en streaming esas cabeceras **no van**. Las cabeceras
+HTTP se mandan antes del cuerpo, así que en ese momento todavía no se sabe qué ruta va a
+servir — la cadena de intentos aún no se resolvió. La alternativa sería emitir un evento SSE
+no estándar al principio del flujo, pero eso arriesga romper el parseo de los SDK que este
+contrato existe para complacer, que es peor. El requisito de que el gasto pago no sea
+invisible se cumple igual por dos vías: el consumo **sí** se contabiliza en streaming, y
+`/v1/uso` lo refleja. Un cliente que streamea no sabe por cabecera quién lo atendió; lo sabe
+por `/v1/uso` y por el `model` que vienen en los propios chunks.
+
 ### 6.1 Normalización del razonamiento filtrado
 
 Varios modelos —gratis y de pago— escupen su cadena de pensamiento dentro de `content`
@@ -220,6 +229,15 @@ gratis está caído, dice `degradado`; si no hay nada, `caido`.
 > Esto es lección directa del incidente del gateway de arkiv (2026-08-15): `/v1/health`
 > decía `ok` mientras todos los endpoints autenticados daban 503 durante ~3 horas, porque
 > solo comprobaba que el proceso estuviera arriba. Un health que no puede fallar no sirve.
+
+**Una ruta cuenta como sana si no está en cooldown Y su confiabilidad reciente supera un
+piso.** Las dos condiciones, no una. Mirar solo el cooldown reproduce el mismo incidente
+que motivó el endpoint: los cooldowns se llenan únicamente con 429, así que una ruta que
+devuelve 500 para siempre nunca entra en cooldown y el health la sigue contando como viva.
+Se detectó exactamente así durante la implementación (2026-08-16), con 10 peticiones reales
+fallando y cayendo a pago mientras `/health` decía `ok`. Una ruta sin telemetría todavía
+cuenta como sana: arranca con el valor neutro, y tratar lo desconocido como roto la sacaría
+de rotación antes de haber tenido su primera oportunidad.
 
 ## 7. Ranking y selección
 
