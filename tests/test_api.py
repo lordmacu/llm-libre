@@ -248,6 +248,29 @@ def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
         "chatgpt/gpt-5:free": 0, "kilo/a:free": 100}
 
 
+def test_ranking_manda_al_final_una_ruta_en_cooldown_aunque_puntue_mejor(estado_cliente):
+    # Re-revision: /v1/ranking seguia sin modelar el cooldown, asi que una
+    # ruta castigada -- que el router JAMAS elegiria ahora mismo -- podia
+    # encabezar la tabla igual. en_cooldown_hasta ya estaba en la fila (se
+    # puede diagnosticar), pero el ORDEN tiene que coincidir con el del
+    # router: una ruta en cooldown va al final, sin importar prioridad ni
+    # puntaje.
+    estado, cliente = estado_cliente
+    estado.almacen.upsert_rutas([
+        Ruta("chatgpt", "gpt-5:free", "gratis", Capacidades(True, False, 100000, 4096),
+             prioridad=0),
+    ], 2.0, desactivar_faltantes=False)
+    # chatgpt: la mejor prioridad Y el mejor puntaje -- pero esta castigada.
+    estado.almacen.registrar_sonda("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    estado.almacen.registrar_evento("chatgpt/gpt-5:free", True, 50, 200, 20.0)
+    estado.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
+
+    filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
+    claves = [f["clave"] for f in filas]
+    assert claves[-1] == "chatgpt/gpt-5:free"
+    assert claves[0] == "kilo/a:free"
+
+
 # --- Fix round 1, hallazgo 2 (Critical): el tope de pago diario tambien debe
 #     atar en la rama de streaming, no solo en la sincronica. ---
 

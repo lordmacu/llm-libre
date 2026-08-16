@@ -19,15 +19,29 @@ def compatibles(rutas: list[Ruta], pedido: Pedido) -> list[Ruta]:
     return candidatas
 
 
-def clave_de_orden(r: Ruta, m: Metricas, perfil: str) -> tuple[bool, int, int, float]:
-    """La clave de orden `(tier == "pago", prioridad, no-medida, -puntaje)`,
-    factorizada para que CUALQUIER lugar que quiera mostrar "el orden real
-    del router" (hoy, /v1/ranking) use la MISMA logica en vez de inventar la
-    suya -- /v1/ranking ordenaba antes solo por puntaje, sin `prioridad`, y
-    podia mostrar una ruta arriba de todo mientras `X-Ruta-Usada` decia otra
-    cosa. Ver el docstring de `ordenar` para el porque de cada posicion.
+def clave_de_orden(r: Ruta, m: Metricas, perfil: str,
+                   ahora: float) -> tuple[bool, bool, int, int, float]:
+    """La clave de orden `(en-cooldown, tier == "pago", prioridad, no-medida,
+    -puntaje)`, factorizada para que CUALQUIER lugar que quiera mostrar "el
+    orden real del router" (hoy, /v1/ranking) use la MISMA logica en vez de
+    inventar la suya -- /v1/ranking ordenaba antes solo por puntaje, sin
+    `prioridad`, y podia mostrar una ruta arriba de todo mientras
+    `X-Ruta-Usada` decia otra cosa. Ver el docstring de `ordenar` para el
+    porque de cada posicion.
+
+    `en-cooldown` (m.en_cooldown_hasta > ahora) es el PRIMER criterio,
+    incluso antes de `tier`: una ruta castigada es algo que el router NUNCA
+    va a elegir ahora mismo, sin importar tier/prioridad/puntaje, asi que en
+    cualquier vista del "orden real" tiene que quedar al final de todo. En
+    `ordenar()` esto es un no-op (las rutas en cooldown ya se filtraron
+    ANTES de llegar aca, asi que este primer elemento siempre da False para
+    todo lo que se ordena); es en /v1/ranking -- que muestra TODAS las rutas
+    activas, cooldown incluido, por diagnostico -- donde este criterio hace
+    el trabajo. `ahora` no tiene default a proposito: un default fijo (p.ej.
+    0.0) haria que cualquier `en_cooldown_hasta > 0` -- incluido uno YA
+    vencido hace rato -- se leyera como "todavia castigada" para siempre.
     """
-    return (r.tier == "pago", r.prioridad,
+    return (m.en_cooldown_hasta > ahora, r.tier == "pago", r.prioridad,
             1 if m.calidad_medida_en is None else 0,
             -puntuar(m, perfil))
 
@@ -65,8 +79,8 @@ def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
     disponibles = [r for r in candidatas
                    if metricas.get(r.clave, METRICAS_NEUTRAS).en_cooldown_hasta <= ahora]
 
-    def orden(r: Ruta) -> tuple[bool, int, int, float]:
-        return clave_de_orden(r, metricas.get(r.clave, METRICAS_NEUTRAS), pedido.perfil)
+    def orden(r: Ruta) -> tuple[bool, bool, int, int, float]:
+        return clave_de_orden(r, metricas.get(r.clave, METRICAS_NEUTRAS), pedido.perfil, ahora)
 
     return sorted(disponibles, key=orden)
 

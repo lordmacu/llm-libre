@@ -188,9 +188,12 @@ def crear_app(estado: Estado) -> FastAPI:
         # sort propio por puntaje: este endpoint es para auditar POR QUE el
         # router eligio lo que eligio (README), y antes podia mostrar una
         # ruta arriba de todo mientras X-Ruta-Usada decia otra distinta,
-        # porque no miraba `prioridad`.
+        # porque no miraba `prioridad` ni el cooldown -- una ruta castigada
+        # (que el router jamas elegiria ahora mismo) podia encabezar la
+        # tabla. `en_cooldown_hasta` sigue expuesto por fila para
+        # diagnostico; lo que cambia es el ORDEN.
         activas = sorted(estado.almacen.rutas_activas(),
-                         key=lambda r: clave_de_orden(r, metricas[r.clave], "balanceado"))
+                         key=lambda r: clave_de_orden(r, metricas[r.clave], "balanceado", ahora))
         filas = []
         for r in activas:
             m = metricas[r.clave]
@@ -230,14 +233,20 @@ def crear_app(estado: Estado) -> FastAPI:
     @app.get("/health")
     def health():
         # Honesto: mira si hay una ruta VIVA y servible, no si el proceso esta
-        # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (eso
-        # solo lo dispara un 429, ver Proxy._castigar) Y que su confiabilidad
-        # reciente -- calculada sobre trafico real de eventos ok/fail, no
-        # sobre el cooldown -- no este por el piso. Una ruta que devuelve 500
-        # en cada intento nunca entra en cooldown pero tampoco esta viva; si
-        # solo mirara cooldowns este endpoint diria "ok" con esa ruta muerta,
-        # que es exactamente el incidente que este endpoint existe para
-        # evitar.
+        # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (lo
+        # dispara un 429 de inmediato, o TOPE_FALLOS_SEGUIDOS fallos NO-429
+        # seguidos -- ver Proxy._castigar/_registrar_fallo; un 4xx del
+        # cliente, en cambio, NUNCA cuenta hacia esto, ver
+        # _es_error_del_cliente) Y que su confiabilidad reciente -- calculada
+        # sobre trafico real de eventos ok/fail, no sobre el cooldown -- no
+        # este por el piso. Antes del cooldown de fallos duros (revision de
+        # Task 13), una ruta que devolvia 500 en cada intento nunca entraba
+        # en cooldown pero tampoco estaba viva; si solo mirara cooldowns este
+        # endpoint diria "ok" con esa ruta muerta, que es exactamente el
+        # incidente que este endpoint existe para evitar. Hoy esa misma ruta
+        # SI termina en cooldown a partir del tercer 500 seguido -- pero la
+        # confiabilidad sigue siendo la segunda pata, para cubrir la ventana
+        # antes de que el cooldown se dispare.
         ahora = time.time()
         activas = estado.almacen.rutas_activas()
         metricas = _metricas(estado, ahora)
