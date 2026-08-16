@@ -72,6 +72,13 @@ def test_sin_candidatas_devuelve_lista_vacia():
     assert salida == []
 
 
-def test_una_ruta_sin_metricas_usa_las_neutras_y_no_se_cae():
-    salida = ordenar([r("nueva:free")], {}, Pedido(), ahora=0.0)
-    assert [x.modelo_id for x in salida] == ["nueva:free"]
+def test_una_ruta_sin_metricas_usa_las_neutras_y_no_ceros():
+    # kilo/conocida:free puntua 0.3*0.5*factor_latencia(1500) = 0.075 en balanceado.
+    # kilo/nueva:free (sin metricas) puntua con METRICAS_NEUTRAS (0.6, 0.8, 1500):
+    # 0.6*0.8*factor_latencia(1500) = 0.24, asi que le gana a la conocida y queda primera.
+    # Si el fallback fuera Metricas(0,0,0,0) puntuaria 0 y quedaria de ULTIMA: el orden
+    # se invertiria y este assert fallaria, que es justo lo que este test debe detectar.
+    rutas = [r("conocida:free"), r("nueva:free")]
+    metricas = {"kilo/conocida:free": m(calidad=0.3, confiabilidad=0.5, ttft=1500)}
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["nueva:free", "conocida:free"]
