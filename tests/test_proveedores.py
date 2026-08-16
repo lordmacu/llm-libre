@@ -37,6 +37,7 @@ def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
     assert rutas[0].capacidades.vision is False
     assert rutas[0].capacidades.contexto == 128000
     assert rutas[0].capacidades.max_salida == 32768
+    assert rutas[0].prioridad == 2   # la de minimax en el YAML, no una constante
 
 
 def test_un_proveedor_gratis_no_tiene_modelos_fijos():
@@ -155,3 +156,145 @@ def test_un_proveedor_sin_capacidades_por_defecto_en_el_yaml_queda_en_none(tmp_p
         "    modelos_path: /models\n")
     p = cargar(str(yaml_sin_defaults), {})[0]
     assert p.capacidades_por_defecto is None
+
+
+# --- Revision del follow-up: rungs sin pinnear ---
+#
+# `rutas_fijas` estampando `prioridad=p.prioridad` no tenia NINGUN test que
+# distinguiera "toma la prioridad real del proveedor" de "siempre pone la
+# misma constante" -- inerte hoy porque minimax es el unico modelos_fijos y
+# es de pago, pero el registro invita a futuros proveedores gratis
+# declarados. Se prueba con un YAML sintetico y una prioridad bien
+# distintiva (77) para que ninguna coincidencia con un default (100) o con
+# el minimax real (2) pueda disfrazar una constante hardcodeada.
+
+# --- Hallazgo 1 de la revision: el desenvuelto de canvas era GLOBAL, y
+#     ':::nota{...}' tambien es sintaxis Docusaurus/MDX estandar -- se
+#     verificaba en vivo que una ruta de Kilo perdia esas marcas de
+#     documentacion legitima. Pasa a ser una declaracion POR PROVEEDOR, misma
+#     forma que capacidades_por_defecto: apagada por defecto, prendida solo
+#     para chatgpt. ---
+
+def test_chatgpt_declara_desenvuelve_canvas():
+    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    assert chatgpt.desenvuelve_canvas is True
+
+
+def test_kilo_y_openrouter_no_desenvuelven_canvas():
+    ps = cargar(YAML, {})
+    kilo = next(p for p in ps if p.id == "kilo")
+    orouter = next(p for p in ps if p.id == "openrouter")
+    assert kilo.desenvuelve_canvas is False
+    assert orouter.desenvuelve_canvas is False
+
+
+def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp_path):
+    yaml_sin_canvas = tmp_path / "sin_canvas.yaml"
+    yaml_sin_canvas.write_text(
+        "proveedores:\n"
+        "  - id: suelto\n"
+        "    tier: gratis\n"
+        "    dialecto: openai\n"
+        "    base_url: https://suelto.test\n"
+        "    modelos_path: /models\n")
+    p = cargar(str(yaml_sin_canvas), {})[0]
+    assert p.desenvuelve_canvas is False
+
+
+# --- Hallazgo 2 de la revision (timeout por proveedor): agregado limpio, sin
+#     complicar el diseno -- default None significa "usar el TIMEOUT_S global
+#     de proxy.py", igual que hoy para todo el que no lo declare. ---
+
+def test_un_proveedor_sin_timeout_declarado_queda_en_none(tmp_path):
+    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
+    assert chatgpt.timeout_s is None
+    assert kilo.timeout_s is None
+
+
+def test_un_proveedor_puede_declarar_su_propio_timeout(tmp_path):
+    yaml_con_timeout = tmp_path / "con_timeout.yaml"
+    yaml_con_timeout.write_text(
+        "proveedores:\n"
+        "  - id: lento\n"
+        "    tier: gratis\n"
+        "    dialecto: openai\n"
+        "    base_url: https://lento.test\n"
+        "    modelos_path: /models\n"
+        "    timeout_s: 20\n")
+    p = cargar(str(yaml_con_timeout), {})[0]
+    assert p.timeout_s == 20.0
+
+
+# --- Hallazgo 6 de la revision: CHATGPT_PROXY_URL reemplaza TODO base_url,
+#     asi que el operador tiene que acordarse de poner el /v1 el mismo --
+#     mismo footgun que ya se arreglo del lado del YAML, sobreviviendo del
+#     lado del entorno. Eleccion: NORMALIZAR (agregar el sufijo de ruta que
+#     el YAML ya declara como default, si la variable no lo trae) en vez de
+#     reventar al arrancar -- hay una unica interpretacion correcta (el
+#     sufijo que el propio YAML ya declara), asi que auto-corregir es mas
+#     util que tirar abajo un despliegue que ya esta corriendo por un typo
+#     recuperable. Se loguea igual, para que quede visible en produccion. ---
+
+def test_base_url_env_agrega_el_sufijo_si_la_variable_no_lo_trae():
+    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
+                   if p.id == "chatgpt")
+    assert chatgpt.base_url == "https://blog.test:8888/v1"
+
+
+def test_base_url_env_no_duplica_el_sufijo_si_ya_lo_trae():
+    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
+                   if p.id == "chatgpt")
+    assert chatgpt.base_url == "https://blog.test:8888/v1"
+
+
+def test_base_url_env_con_barra_final_no_duplica_el_sufijo():
+    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/"})
+                   if p.id == "chatgpt")
+    assert chatgpt.base_url == "https://blog.test:8888/v1"
+
+
+def test_base_url_env_loguea_cuando_normaliza(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="llm_libre.proveedores"):
+        cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
+    assert "chatgpt" in caplog.text
+    assert "/v1" in caplog.text
+
+
+def test_base_url_env_sin_sufijo_en_el_default_no_agrega_nada(tmp_path):
+    # kilo (sin base_url_env hoy) no se ve afectado por este mecanismo; un
+    # proveedor CON base_url_env pero cuyo default no tiene ruta (solo
+    # host) tampoco debe agregar nada de la nada.
+    yaml_sin_sufijo = tmp_path / "sin_sufijo.yaml"
+    yaml_sin_sufijo.write_text(
+        "proveedores:\n"
+        "  - id: suelto\n"
+        "    tier: gratis\n"
+        "    dialecto: openai\n"
+        "    base_url_env: SUELTO_URL\n"
+        "    base_url: https://suelto.test\n"
+        "    modelos_path: /models\n")
+    p = cargar(str(yaml_sin_sufijo), {"SUELTO_URL": "https://otra.test"})[0]
+    assert p.base_url == "https://otra.test"
+
+
+def test_rutas_fijas_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_path):
+    yaml_prioridad_rara = tmp_path / "prioridad_rara.yaml"
+    yaml_prioridad_rara.write_text(
+        "proveedores:\n"
+        "  - id: pago_futuro\n"
+        "    tier: pago\n"
+        "    prioridad: 77\n"
+        "    dialecto: openai\n"
+        "    base_url: https://pago-futuro.test\n"
+        "    modelos_fijos:\n"
+        "      - id: modelo-x\n"
+        "        tools: true\n"
+        "        vision: false\n"
+        "        contexto: 1000\n"
+        "        max_salida: 100\n")
+    p = cargar(str(yaml_prioridad_rara), {})[0]
+    rutas = rutas_fijas(p)
+    assert len(rutas) == 1
+    assert rutas[0].prioridad == 77

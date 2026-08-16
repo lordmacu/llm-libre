@@ -25,15 +25,30 @@ proveedores:
     # el /v1 en base_url, cliente.armar_peticion arma una URL de chat
     # invalida. Mismo patron que minimax (base_url: .../v1).
     modelos_path: /models
+    desenvuelve_canvas: true   # ver el hallazgo 1 de la revision en catalogo.py/razonamiento.py:
+                                # es el UNICO proveedor que de verdad filtra el modo canvas al
+                                # content -- ':::nota{...}' tambien es sintaxis Docusaurus/MDX
+                                # legitima, y aplicarla a ciegas le arranca las marcas a Kilo/
+                                # OpenRouter (verificado en vivo).
     capacidades_por_defecto:
       # Su /v1/models SI es dinamico (TTL cache contra el backend real de
       # ChatGPT, con fallback a la cache vieja si falla) pero NUNCA trae
       # metadatos de capacidad -- por eso se declaran una sola vez aca y
       # catalogo.normalizar las aplica a cada id que descubra.
-      # tools:false es OBLIGATORIO -- mandarle tools devuelve HTTP 500, no un
-      # fallo elegante (verificado contra el proxy real, 2026-08-16).
-      # contexto es un piso conservador; el proxy ignora max_tokens de todas
-      # formas (tambien verificado).
+      #
+      # tools:false queda OBLIGATORIO -- releido y confirmado 2026-08-16.
+      # El proxy YA NO devuelve HTTP 500 al mandarle tools (eso cambio), pero
+      # sigue sin soportar function calling: con tool_choice:"required"
+      # devuelve tool_calls:None y prosa en texto plano. Su propio docstring
+      # distingue las dos cosas -- "Tools avanzados: reservas, shopping,
+      # widgets, canvas" (SI soportado) vs "Function calling / tool_calls en
+      # respuesta: no soportado por el backend anonimo" (NO) -- y lo que la
+      # capacidad `tools` de llm-libre significa es function calling, no la
+      # primera. El nuevo comportamiento es MAS peligroso que el 500 viejo:
+      # un 500 fallaba honesto y disparaba failover; devolver prosa en
+      # silencio le entregaria texto a un cliente agentic que espera una
+      # llamada estructurada, sin que nada avise del error. Esta declaracion
+      # es hoy la UNICA barrera que evita eso.
       tools: false
       vision: false
       contexto: 128000
