@@ -355,3 +355,64 @@ async def test_ciclo_no_sondea_calidad_fuera_del_intervalo():
     await ciclo(estado, contador=1)
     tipos = {t for (t,) in almacen._con.execute("SELECT tipo FROM sondas").fetchall()}
     assert tipos == {"salud"}
+
+
+# --- Fix round 3, B4 (Blocking): §8 dice "las rutas de pago NO se sondean".
+#     sondear_calidad ya filtraba por tier; sondear_salud no, y recibe
+#     rutas_activas(), que incluye minimax/MiniMax-M3. Eran ~5 llamadas
+#     facturables por dia, invisibles para sumar_uso_pago, /v1/uso y
+#     TOPE_PAGO_DIARIO. ---
+
+async def test_la_sonda_de_salud_no_gasta_plata_en_las_rutas_de_pago():
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(req)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    p = _proxy(handler)
+    await sondear_salud(p, p.almacen, [_ruta(tier="pago")], ahora=100.0)
+    assert llamadas == []
+    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+
+
+async def test_la_sonda_de_salud_sigue_sondeando_las_gratis_de_la_misma_lista():
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(req)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    p = _proxy(handler)
+    await sondear_salud(p, p.almacen, [_ruta("g:free"), _ruta("P", tier="pago")],
+                        ahora=100.0)
+    assert len(llamadas) == 1
+    claves = [c for (c,) in p.almacen._con.execute("SELECT clave FROM sondas")]
+    assert claves == ["kilo/g:free"]
+
+
+async def test_el_ciclo_completo_no_sondea_la_ruta_de_pago():
+    # El caso real: `ciclo` le pasa rutas_activas() a sondear_salud, y ahi
+    # adentro viene minimax/MiniMax-M3 desde los modelos_fijos del YAML.
+    almacen = _almacen()
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(str(req.url))
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json=CATALOGO)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Proveedor("minimax", "pago", "openai", "https://m.test", "k", "", {},
+                  [{"id": "MiniMax-M3", "tools": True, "vision": False,
+                    "contexto": 128000, "max_salida": 32768}]),
+    ]
+    proxy = Proxy({p.id: p for p in prov}, almacen, http)
+    estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
+                    proveedores=prov, http=http)
+    await ciclo(estado, contador=1)   # contador 1: salud si, calidad no
+    assert {r.clave for r in almacen.rutas_activas()} == {"kilo/x:free", "minimax/MiniMax-M3"}
+    assert not any("m.test" in u for u in llamadas), "se le pego a la ruta de pago"

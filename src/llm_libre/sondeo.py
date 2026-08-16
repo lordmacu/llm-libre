@@ -79,7 +79,12 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
 
 
 async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None:
-    for ruta in rutas:
+    # Igual que sondear_calidad: las rutas de pago NO se sondean (§8 del
+    # diseno). Esta funcion recibe rutas_activas(), que incluye
+    # minimax/MiniMax-M3, y cada pasada le pegaba: ~5 llamadas facturables por
+    # dia que ademas no pasan por sumar_uso_pago, asi que no aparecen ni en
+    # /v1/uso ni contra TOPE_PAGO_DIARIO. Plata real, invisible.
+    for ruta in (r for r in rutas if r.tier == "gratis"):
         t0 = time.monotonic()
         r = await proxy.completar([ruta], dict(PING), ahora)
         ms = int((time.monotonic() - t0) * 1000)
