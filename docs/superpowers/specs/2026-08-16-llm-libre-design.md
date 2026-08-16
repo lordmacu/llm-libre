@@ -78,10 +78,19 @@ Los 7 contenedores de Coolify en `blog` (bots de WhatsApp) usan hoy el **dialect
 (`LLM_BASE_URL=https://api.minimax.io/anthropic`, `LLM_MODEL=MiniMax-M3`), cada uno con su
 propia copia de la clave. **No existe un MiniMax local**: llaman a la nube.
 
-⚠️ **Sin verificar:** que `/v1/chat/completions` de MiniMax soporte `tools` y `stream` con
-la misma fidelidad que OpenAI. Solo se comprobó que la ruta existe y qué auth pide; probarlo
-requiere la clave de pago. **Primer ítem del plan de implementación.** Si resulta incompleto,
-el plan B es escribir el adaptador OpenAI↔Anthropic.
+**El endpoint OpenAI de MiniMax sirve para todo lo que necesitamos** (verificado con la clave
+real): `chat`, `function calling` (devuelve `tool_calls` en formato OpenAI) y `stream` SSE.
+Por lo tanto **no hace falta ningún adaptador Anthropic**: MiniMax entra como un proveedor
+más de dialecto `openai`.
+
+**Varios modelos filtran su razonamiento dentro de `content`.** MiniMax-M3 devuelve
+`<think>...</think>` en línea; `nvidia/nemotron-3.5-lightning:free` responde con
+`"Here's a thinking process: ..."`. Un consumidor que pide "responde solo: hola" recibe el
+monólogo entero. Esto es transversal a proveedores y tiers, así que se resuelve en el
+gateway (§6.1), no en cada app.
+
+Las 7 copias de la clave de MiniMax en los contenedores de Coolify son **idénticas**
+(mismo SHA-256, 125 caracteres), así que una sola sirve para todo.
 
 ## 4. Arquitectura
 
@@ -170,6 +179,24 @@ Extensiones opcionales, que un SDK ajeno ignora sin romperse:
 
 Toda respuesta lleva `X-Ruta-Usada: <proveedor>/<modelo>`, `X-Tier: gratis|pago` y
 `X-Intentos: <n>`. **El fallback de pago nunca es invisible.**
+
+### 6.1 Normalización del razonamiento filtrado
+
+Varios modelos —gratis y de pago— escupen su cadena de pensamiento dentro de `content`
+(§3). El gateway la separa antes de responder:
+
+- Se recorta lo delimitado por etiquetas conocidas (`<think>`, `<thinking>`, `<reasoning>`)
+  y se devuelve en un campo aparte, `x_razonamiento`, para quien lo quiera.
+- El `content` que ve el cliente queda limpio.
+- **En streaming hay que recortar sobre el flujo**, no al final: las etiquetas llegan
+  partidas entre chunks, así que el normalizador mantiene un buffer pequeño y no emite
+  texto hasta poder decidir si está dentro o fuera de un bloque de razonamiento.
+- Los preámbulos en prosa sin etiqueta (`"Here's a thinking process:"`) **no se tocan**:
+  recortarlos requeriría heurísticas frágiles que romperían respuestas legítimas. En su
+  lugar, el caso "respeta el formato pedido" de la batería de calidad (§8) los penaliza,
+  y esos modelos caen solos en el ranking.
+
+Se puede desactivar por petición con `x_crudo: true`.
 
 ### `GET /v1/models`
 
@@ -274,6 +301,9 @@ Python no compila nada, así que no aplica la regla de no compilar en `blog`.
   tools, ruta nueva sin evaluar, tope de pago alcanzado.
 - **Normalización de catálogo:** contra JSON reales grabados de Kilo y OpenRouter, incluido
   el caso `lyria` (precio 0 pero modelo de música → debe descartarse).
+- **Recorte de razonamiento:** con la etiqueta partida en todas las posiciones posibles
+  entre chunks, bloques anidados, y una etiqueta que nunca cierra (no debe tragarse la
+  respuesta entera ni colgar el stream).
 - **Integración real:** un puñado marcado para no correr en CI, contra los proveedores vivos.
 
 ## 13. Fuera de alcance
@@ -292,7 +322,9 @@ Deliberadamente afuera, para no inflar la primera versión:
 
 - **El tier anónimo de Kilo puede cerrarse en cualquier momento.** No hay contrato: es cortesía.
   Mitigación: OpenRouter con clave gratis como segundo proveedor, y el fallback de pago.
-- **`/v1/chat/completions` de MiniMax sin verificar** para tools y streaming (§3).
+- **El recorte de razonamiento en streaming es la pieza más delicada** (§6.1): un buffer mal
+  llevado corta texto legítimo o retiene la respuesta. Necesita pruebas con etiquetas
+  partidas entre chunks.
 - **Sondear consume la cuota que el servicio necesita.** A 5 h son ~100 peticiones/día, pero
   si se sube la cadencia hay que recalcular.
 - **`blog` está saturado** (load ~4x, 2 GB en swap). El servicio es I/O-bound y liviano, pero
