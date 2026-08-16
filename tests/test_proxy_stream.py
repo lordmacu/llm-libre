@@ -315,3 +315,26 @@ async def test_el_camino_streaming_si_escribe_ttft():
     await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0))
     fila = p.almacen._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
     assert fila[0] >= 0 and fila[1] is None
+
+
+async def test_un_chunk_de_solo_espacios_no_se_pierde():
+    # Los deltas de streaming vienen partidos y muchos son " " o "\n" sueltos.
+    # No cuentan como "respuesta util" para decidir el exito, pero SI son texto
+    # del cliente: no se pueden tirar. Se retienen y salen, en orden, junto al
+    # primer chunk con contenido de verdad.
+    p = _proxy(lambda req: httpx.Response(200, content=_sse(" ", "hola", " ", "mundo")))
+    assert await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0)) == " hola mundo"
+
+
+async def test_un_stream_de_puros_espacios_no_es_una_respuesta():
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            return httpx.Response(200, content=_sse(" ", "\n", "  "))
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    assert await _juntar(p.completar_stream([_ruta("a:free"), _ruta("b:free")],
+                                            CUERPO, 0.0)) == "bien"

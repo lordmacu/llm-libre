@@ -228,14 +228,24 @@ class Proxy:
                         if not crudo and isinstance(delta.get("content"), str):
                             delta["content"] = rec.alimentar(delta["content"])
                         contenido = delta.get("content")
+                        # Dos preguntas distintas sobre el mismo chunk:
+                        #  - hay_texto: trae RESPUESTA (algo que no sea espacio
+                        #    en blanco). Es lo que decide si el intento fue un
+                        #    exito -- una respuesta de puros espacios no es una
+                        #    respuesta, igual que en el camino no-streaming.
+                        #  - tiene_contenido: trae texto del cliente, aunque sea
+                        #    un " " suelto. Los deltas vienen muy partidos y esos
+                        #    espacios son parte de la frase: no se pueden tirar.
                         hay_texto = isinstance(contenido, str) and bool(contenido.strip())
+                        tiene_contenido = isinstance(contenido, str) and contenido != ""
                         trozo = f"data: {json.dumps(obj)}\n\n"
                         if not hay_texto and "tool_calls" not in delta:
                             # Nada util TODAVIA. Lo estructural (role,
-                            # finish_reason, razonamiento del proveedor) se
-                            # guarda para soltarlo junto al primer chunk util;
-                            # un chunk que ya no tiene nada mas se descarta.
-                            if not otras:
+                            # finish_reason, razonamiento del proveedor) y los
+                            # espacios sueltos se guardan para soltarlos EN
+                            # ORDEN junto al primer chunk util; un chunk que ya
+                            # no tiene nada adentro se descarta.
+                            if not (tiene_contenido or otras):
                                 continue
                             pendientes.append(trozo)
                             if len(pendientes) > TOPE_PENDIENTES:
