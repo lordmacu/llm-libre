@@ -25,6 +25,17 @@ def _sse(*trozos):
     return "".join(lineas).encode()
 
 
+def _sse_json(*trozos):
+    # Como _sse, pero codificando el content con json.dumps: hace falta para
+    # trozos que traen comillas o saltos de linea de VERDAD (p.ej. una marca
+    # de cerca de canvas), que _sse rompe al interpolarlos crudos dentro del
+    # JSON.
+    lineas = [f'data: {{"choices":[{{"delta":{{"content":{json.dumps(t)}}}}}]}}\n\n'
+             for t in trozos]
+    lineas.append("data: [DONE]\n\n")
+    return "".join(lineas).encode()
+
+
 def _proxy(handler):
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
@@ -82,6 +93,15 @@ async def test_recorta_el_razonamiento_partido_entre_chunks():
 async def test_una_etiqueta_que_nunca_cierra_no_cuelga_el_stream():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("ok", "<think>", "sin cerrar")))
     assert await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0)) == "ok"
+
+
+async def test_desenvuelve_la_cerca_de_canvas_partida_entre_chunks():
+    # chatgpt-proxy (Task 13) filtra el modo canvas de ChatGPT: la marca de
+    # apertura/cierre viaja partida entre chunks igual que <think>, pero acá
+    # el contenido de adentro ES la respuesta -- no se pierde.
+    p = _proxy(lambda req: httpx.Response(
+        200, content=_sse_json(':::writing{title="x"}\n', 'ho', 'la\n', ':::')))
+    assert await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0)) == "hola\n"
 
 
 async def test_hace_failover_si_la_primera_ruta_falla_antes_de_emitir():

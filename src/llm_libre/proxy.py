@@ -8,7 +8,7 @@ import httpx
 
 from llm_libre.cliente import armar_peticion
 from llm_libre.modelos import Ruta
-from llm_libre.razonamiento import RecortadorStream, recortar
+from llm_libre.razonamiento import RecortadorStreamCompuesto, recortar
 
 log = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ class Proxy:
                         self.almacen.registrar_evento(ruta.clave, False, 0,
                                                       resp.status_code, ahora)
                         continue
-                    rec = RecortadorStream()
+                    rec = RecortadorStreamCompuesto()
                     # Chunks recibidos que todavia no llevan nada util. Se
                     # retienen (no se emiten) hasta que llegue el primero que
                     # SI: mientras nada haya salido, el failover sigue siendo

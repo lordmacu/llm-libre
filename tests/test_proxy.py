@@ -94,6 +94,13 @@ async def test_recorta_el_razonamiento_de_la_respuesta():
     assert r.razonamiento == "mmm"
 
 
+async def test_desenvuelve_la_cerca_de_canvas_en_el_camino_no_streaming():
+    cerca = (':::writing{title="x"}\nhola\n:::')
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(cerca)))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.json["choices"][0]["message"]["content"] == "hola\n"
+
+
 async def test_en_modo_crudo_no_toca_el_contenido():
     p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>mmm</think>hola")))
     r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0, crudo=True)
