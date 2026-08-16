@@ -2,12 +2,27 @@ from llm_libre.modelos import METRICAS_NEUTRAS, Metricas, Pedido, Ruta
 from llm_libre.ranking import puntuar
 
 
-def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
-            ahora: float) -> list[Ruta]:
-    """Devuelve la cadena de intentos, mejor primero. Las de pago van siempre al final."""
+def compatibles(rutas: list[Ruta], pedido: Pedido) -> list[Ruta]:
+    """Las rutas que PODRIAN servir este pedido, ignorando si estan disponibles.
+
+    Solo mira lo que el cliente pidio de forma inmutable -- capacidades,
+    contexto, id explicito -- y no el cooldown ni el permiso de pago, que son
+    estados del momento. Existe para separar los dos casos que el §9 del diseno
+    separa y que la api venia mezclando en un 400: si esta lista queda vacia,
+    NINGUNA ruta puede cumplir lo pedido nunca (400, error del cliente); si
+    trae algo pero la cadena de `ordenar` sale vacia, hay rutas que podrian
+    servir y estan caidas o en castigo (503, indisponibilidad).
+    """
     candidatas = [r for r in rutas if _cumple(r, pedido)]
     if pedido.modelo is not None:
         candidatas = [r for r in candidatas if r.modelo_id == pedido.modelo]
+    return candidatas
+
+
+def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
+            ahora: float) -> list[Ruta]:
+    """Devuelve la cadena de intentos, mejor primero. Las de pago van siempre al final."""
+    candidatas = compatibles(rutas, pedido)
     if not pedido.permitir_pago:
         candidatas = [r for r in candidatas if r.tier == "gratis"]
     disponibles = [r for r in candidatas

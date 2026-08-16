@@ -424,3 +424,74 @@ def test_una_ruta_en_cooldown_no_pierde_su_marca_de_calidad_medida(estado_client
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert fila["calidad_medida"] is True
     assert fila["en_cooldown_hasta"] > time.time()
+
+
+# --- Fix round 3, B3 (Blocking): el 503 del §9 se entregaba como 400 en toda
+#     caida. `ordenar` filtra los cooldowns, la lista llega vacia y la api
+#     gritaba "ninguna ruta cumple lo pedido" -- un 400, que todo SDK y toda
+#     capa de alertas leen como "tu peticion esta mal formada": no reintentan
+#     y no despiertan a nadie. Que los tiers gratis rate-limiteen a la vez es
+#     el fallo ESPERADO, no uno raro. ---
+
+def test_todas_las_candidatas_en_cooldown_da_503_no_400(estado_cliente):
+    estado, cliente = estado_cliente
+    hasta = time.time() + 600
+    estado.proxy.cooldowns["kilo/a:free"] = hasta
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": []})
+    assert r.status_code == 503
+    assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(hasta)
+
+
+def test_todas_las_candidatas_en_cooldown_da_503_tambien_en_streaming(estado_cliente):
+    estado, cliente = estado_cliente
+    estado.proxy.cooldowns["kilo/a:free"] = time.time() + 600
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "stream": True})
+    assert r.status_code == 503
+
+
+def test_capacidades_que_nadie_cumple_sigue_siendo_400(estado_cliente):
+    # El otro lado de la moneda: esto SI es culpa del cliente y tiene que
+    # seguir siendo 400, con lo que pidio y cuantas rutas hay.
+    estado, cliente = estado_cliente
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "x_min_contexto": 99999999})
+    assert r.status_code == 400
+    assert r.json()["detail"]["rutas_activas"] == 1
+
+
+def test_el_tope_de_pago_diario_da_503_no_400():
+    # §9: "Llave supero su tope de pago diario -> 503, nunca un cobro
+    # silencioso". Con la gratis en cooldown y el tope agotado, la cadena queda
+    # vacia -- pero la ruta de pago EXISTE y podria servir: es indisponibilidad,
+    # no una peticion mal formada.
+    estado, cliente = _estado_libre_y_pago(
+        tope_pago_diario=1,
+        hacer_resp_free=lambda: httpx.Response(200, json={"choices": [
+            {"message": {"role": "assistant", "content": "hola"}}]}),
+        hacer_resp_paid=lambda: httpx.Response(200, json={"choices": [
+            {"message": {"role": "assistant", "content": "pago"}}]}))
+    estado.almacen.sumar_uso_pago("buena", _hoy())          # tope agotado
+    estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
+
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": []})
+    assert r.status_code == 503
+    assert r.json()["detail"]["tope_pago_alcanzado"] is True
+
+
+def test_el_503_por_indisponibilidad_no_reporta_liberacion_si_no_hay_cooldown():
+    # Solo hay ruta de pago, el cliente la prohibio: no hay nada que esperar,
+    # asi que proxima_liberacion es null en vez de un numero inventado.
+    estado, cliente = _estado_libre_y_pago(
+        tope_pago_diario=9,
+        hacer_resp_free=lambda: httpx.Response(500),
+        hacer_resp_paid=lambda: httpx.Response(500))
+    estado.almacen.upsert_rutas([], 1.0, desactivar_faltantes=False)
+    estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "x_permitir_pago": False})
+    assert r.status_code == 503
+    assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(
+        estado.proxy.cooldowns["free_prov/f:free"])

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from llm_libre.auth import LimitadorPorLlave
 from llm_libre.modelos import METRICAS_NEUTRAS, Pedido
 from llm_libre.ranking import puntuar
-from llm_libre.router import ordenar
+from llm_libre.router import compatibles, ordenar
 
 PERFILES = {"rapido", "balanceado", "potente"}
 ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
@@ -106,12 +106,17 @@ def crear_app(estado: Estado) -> FastAPI:
                 "message": f"el modelo '{pedido.modelo}' ya no existe",
                 "sugerencias": _parecidos(pedido.modelo, activas),
             })
+        tope_alcanzado = False
         if pedido.permitir_pago:
             dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if estado.almacen.uso_pago(llave, dia) >= estado.tope_pago_diario:
                 pedido = replace(pedido, permitir_pago=False)
+                tope_alcanzado = True
         ahora = time.time()
-        rutas = ordenar(activas, _metricas(estado, ahora), pedido, ahora)
+        metricas = _metricas(estado, ahora)
+        rutas = ordenar(activas, metricas, pedido, ahora)
+        if not rutas:
+            _sin_rutas(activas, pedido, metricas, ahora, tope_alcanzado)   # siempre levanta
         return rutas, pedido
 
     @app.post("/v1/chat/completions")
@@ -120,12 +125,6 @@ def crear_app(estado: Estado) -> FastAPI:
         llave = exigir_llave(x_api_key, authorization)
         cuerpo = await request.json()
         rutas, pedido = _rutas_para(cuerpo, llave)
-        if not rutas:
-            raise HTTPException(400, {
-                "message": "ninguna ruta cumple lo pedido",
-                "pedido": pedido.__dict__,
-                "rutas_activas": len(estado.almacen.rutas_activas()),
-            })
         ahora = time.time()
         crudo = bool(cuerpo.get("x_crudo"))
         if cuerpo.get("stream"):
@@ -233,6 +232,49 @@ def crear_app(estado: Estado) -> FastAPI:
                              "gratis_libres": len(gratis)}, status_code=codigo)
 
     return app
+
+
+def _sin_rutas(activas: list, pedido, metricas: dict, ahora: float,
+               tope_alcanzado: bool) -> None:
+    """Levanta el error correcto cuando la cadena de intentos sale vacia.
+
+    El §9 del diseno separa dos situaciones que la version anterior mezclaba en
+    un solo 400:
+
+    - **Ninguna ruta puede cumplir lo pedido** (capacidades, vision, contexto
+      que nadie tiene) -> `400`. Eso si es un error del cliente.
+    - **Hay rutas que podrian servir pero estan todas caidas o en cooldown**
+      (incluido el caso "la llave supero su tope de pago diario") -> `503`,
+      con `proxima_liberacion`.
+
+    Por que importa: `ordenar` filtra los cooldowns, asi que en CUALQUIER
+    apagon de los tiers gratis -- el fallo esperado, no uno raro -- la lista
+    llegaba vacia y salia un 400. Todo SDK y toda capa de alertas leen 400 como
+    "tu peticion esta mal formada": no reintentan y no despiertan a nadie.
+
+    `x_permitir_pago: false` NO se considera aca: es una politica del que
+    llama, no una capacidad que falte en el pozo. Un cliente que prohibe el
+    pago y se queda sin rutas gratis vivas esta en el caso de
+    indisponibilidad (503, reintentable), no en el de peticion invalida.
+    """
+    compat = compatibles(activas, pedido)
+    if not compat:
+        raise HTTPException(400, {
+            "message": "ninguna ruta cumple lo pedido",
+            "pedido": pedido.__dict__,
+            "rutas_activas": len(activas),
+        })
+    liberaciones = [metricas[r.clave].en_cooldown_hasta for r in compat
+                    if r.clave in metricas and metricas[r.clave].en_cooldown_hasta > ahora]
+    raise HTTPException(503, {
+        "message": "todas las rutas que podrian servir estan caidas o en cooldown",
+        "pedido": pedido.__dict__,
+        "rutas_compatibles": len(compat),
+        # Cuando se libera la PRIMERA de ellas. None = ninguna esta en castigo
+        # (estan descartadas por otra razon, p.ej. el tope de pago).
+        "proxima_liberacion": min(liberaciones) if liberaciones else None,
+        "tope_pago_alcanzado": tope_alcanzado,
+    })
 
 
 def _parecidos(pedido: str, activas: list) -> list[str]:
