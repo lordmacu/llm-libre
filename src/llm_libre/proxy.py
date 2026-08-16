@@ -99,7 +99,22 @@ class Proxy:
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
             payload["stream"] = True
             t0 = time.monotonic()
-            emitido = False  # ya salio algun chunk util hacia el cliente en este intento
+            emitido = False          # ya salio algun chunk util hacia el cliente
+            evento_registrado = False  # ya se conto la telemetria de este intento
+
+            def _registrar_exito_una_vez() -> None:
+                # Exactamente un evento por intento, nunca cero ni dos: se
+                # dispara la primera vez que hay algo util que mandar (asi el
+                # ttft mide el primer token real, no el cierre del stream) o,
+                # si nunca hubo nada util, al terminar el intento igual (mas
+                # abajo) para no desaparecer de la historia de la ruta.
+                nonlocal evento_registrado
+                if not evento_registrado:
+                    self.almacen.registrar_evento(
+                        ruta.clave, True, int((time.monotonic() - t0) * 1000),
+                        200, ahora)
+                    evento_registrado = True
+
             try:
                 async with self.http.stream("POST", url, headers=cabeceras, json=payload,
                                             timeout=TIMEOUT_S) as resp:
@@ -112,7 +127,6 @@ class Proxy:
                     self._castigos.pop(ruta.clave, None)
                     self.cooldowns.pop(ruta.clave, None)
                     rec = RecortadorStream()
-                    primero = True
                     async for linea in resp.aiter_lines():
                         if not linea.startswith("data:"):
                             continue
@@ -127,28 +141,34 @@ class Proxy:
                         if not crudo and isinstance(delta.get("content"), str):
                             limpio = rec.alimentar(delta["content"])
                             # Un chunk de tool_calls (o el de role inicial) suele
-                            # viajar con content="": si solo miramos el contenido
-                            # recortado lo tirariamos igual, perdiendo esa llamada.
-                            otras = {k: v for k, v in delta.items()
-                                    if k != "content" and v}
+                            # viajar con content="": miramos la PRESENCIA de otras
+                            # claves, no su valor, porque algo como "tool_calls": []
+                            # (valor falsy pero presente) igual es util para el
+                            # cliente y no se puede tirar junto con el contenido.
+                            otras = {k: v for k, v in delta.items() if k != "content"}
                             if not limpio and not otras:
                                 continue    # nada util que mandar en este chunk
                             delta["content"] = limpio
-                        if primero:
-                            self.almacen.registrar_evento(
-                                ruta.clave, True, int((time.monotonic() - t0) * 1000),
-                                200, ahora)
-                            primero = False
+                        _registrar_exito_una_vez()
                         emitido = True
                         yield f"data: {json.dumps(obj)}\n\n"
                     resto = rec.cerrar()
                     if resto:
+                        _registrar_exito_una_vez()
+                        emitido = True
                         yield ('data: {"choices":[{"delta":{"content":%s}}]}\n\n'
                                % json.dumps(resto))
+                    # La conexion funciono (200, stream leido sin excepcion) aunque
+                    # nunca hubiera nada util que mandar (p.ej. todo era
+                    # razonamiento filtrado): sigue siendo un intento exitoso a
+                    # nivel HTTP, y sin este registro la ruta desaparece por
+                    # completo de su propia historia de confiabilidad.
+                    _registrar_exito_una_vez()
                     yield "data: [DONE]\n\n"
                     return
             except httpx.HTTPError:
-                self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
+                if not evento_registrado:
+                    self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
                 if emitido:
                     yield "data: [DONE]\n\n"
                     return
