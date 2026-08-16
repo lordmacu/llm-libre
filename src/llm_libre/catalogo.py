@@ -1,4 +1,59 @@
+import logging
+import re
+
 from llm_libre.modelos import Capacidades, Ruta
+
+log = logging.getLogger(__name__)
+
+# Senales de que un modelo, aunque sea gratis y devuelva texto, NO es un modelo
+# de chat de proposito general y no tiene nada que hacer en la rotacion de
+# `auto`. Se leen de los campos `name` y `description` que el PROPIO proveedor
+# publica en /models -- campos que este normalizador venia descartando.
+#
+# Esto sigue siendo DESCUBRIMIENTO, no ids cableados, y la distincion es la
+# premisa entera del proyecto (§1 del diseno: "el catalogo se descubre desde
+# /models, siempre"): una lista negra de ids se pudriria exactamente igual que
+# la lista de ids cableados que este gateway existe para reemplazar, mientras
+# que un guardrail nuevo que aparezca manana con otro nombre se va a seguir
+# describiendo a si mismo como guardrail.
+#
+# Por que importa: en una instalacion nueva TODAS las rutas arrancan con la
+# calidad neutra, asi que hasta la primera bateria el unico discriminador es la
+# latencia -- y lo mas rapido del pozo gratis es
+# `nvidia/nemotron-3.5-content-safety:free`, un clasificador que contesta
+# "User Safety: safe" a cualquier cosa. Quedaba #1 en `auto`.
+_ESPECIALIDAD = (
+    r"guardrail",
+    r"content safety",
+    r"\bmoderation\b",
+    r"\bmoderates\b",
+    r"\bclassifier\b",
+    r"\breranker\b", r"\bre-ranker\b", r"\breranking\b",
+    r"embeddings? model", r"text embeddings?\b",
+    r"speech[- ]to[- ]text", r"text[- ]to[- ]speech",
+)
+
+# Meta-routers (`kilo-auto/free`, `openrouter/free`): no son un modelo, son un
+# sorteo entre otros modelos. Puntuarlos mide una ruleta -- su calidad y su
+# latencia son las de quien haya salido esa vez -- y ademas tapan que ruta
+# sirvio de verdad, que es justo lo que `X-Ruta-Usada` promete. Se descartan
+# por el mismo medio que todo lo demas: lo que ELLOS dicen de si mismos
+# ("rotates through available free models", "a router that selects free models
+# at random"), no por su id.
+_META_ROUTER = (
+    r"\bmodels? router\b",
+    r"\bis a router\b",
+    r"rotates through",
+    r"\brouter\b.{0,60}\bselects\b",
+    r"selects .{0,40}\bmodels\b.{0,20}at random",
+)
+
+_DESCARTAR = re.compile("|".join(_ESPECIALIDAD + _META_ROUTER), re.IGNORECASE)
+
+
+def es_de_especialidad(m: dict) -> bool:
+    """True si el proveedor describe este modelo como algo que no es chat general."""
+    return _DESCARTAR.search(f"{m.get('name') or ''} {m.get('description') or ''}") is not None
 
 
 def normalizar(proveedor: str, datos: dict | list) -> list[Ruta]:
@@ -6,7 +61,22 @@ def normalizar(proveedor: str, datos: dict | list) -> list[Ruta]:
     items = datos.get("data", datos) if isinstance(datos, dict) else datos
     rutas: list[Ruta] = []
     for m in items:
+        # Una entrada sin `id` (o que ni siquiera es un dict) reventaba con
+        # KeyError/AttributeError; sondeo.py se lo tragaba y el catalogo ENTERO
+        # de ese proveedor quedaba congelado para siempre, sin una linea de log
+        # que lo dijera. Se omite la entrada rota y se deja constancia.
+        if not isinstance(m, dict):
+            log.warning("catalogo %s: entrada que no es un objeto, se omite: %.120r",
+                        proveedor, m)
+            continue
+        if not m.get("id"):
+            log.warning("catalogo %s: entrada sin 'id', se omite: %.120r", proveedor, m)
+            continue
         if not _es_gratis(m):
+            continue
+        if es_de_especialidad(m):
+            log.info("catalogo %s: %s se descarta, el proveedor no lo describe como "
+                     "un modelo de chat general", proveedor, m["id"])
             continue
         arch = m.get("architecture") or {}
         # Exigir salida SOLO texto: los modelos de musica (lyria) tambien traen
