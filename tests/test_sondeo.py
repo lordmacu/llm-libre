@@ -55,6 +55,17 @@ async def test_sincronizar_agrega_los_modelos_fijos_de_pago():
     assert rutas[0].tier == "pago"
 
 
+async def test_sincronizar_propaga_la_prioridad_del_proveedor_a_las_rutas_descubiertas():
+    almacen = _almacen()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO)))
+    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
+                      prioridad=1)]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    rutas = almacen.rutas_activas()
+    assert rutas[0].prioridad == 1
+
+
 async def test_un_proveedor_caido_no_borra_el_catalogo_de_los_demas():
     almacen = _almacen()
     almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)

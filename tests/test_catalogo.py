@@ -32,6 +32,25 @@ def test_descarta_modelos_gratis_que_no_devuelven_solo_texto():
     assert normalizar("kilo", datos) == []
 
 
+def test_normalizar_estampa_la_prioridad_del_proveedor():
+    datos = {"data": [
+        {"id": "sin/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+         "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+         "supported_parameters": ["max_tokens"]},
+    ]}
+    rutas = normalizar("kilo", datos, prioridad=1)
+    assert rutas[0].prioridad == 1
+
+
+def test_normalizar_sin_prioridad_declarada_usa_el_default_cien():
+    datos = {"data": [
+        {"id": "sin/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+         "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+         "supported_parameters": ["max_tokens"]},
+    ]}
+    assert normalizar("kilo", datos)[0].prioridad == 100
+
+
 def test_acepta_entrada_multimodal_mientras_la_salida_sea_texto():
     datos = {"data": [
         {"id": "nvidia/nemotron-omni:free", "pricing": {"prompt": "0"},

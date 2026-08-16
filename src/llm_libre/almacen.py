@@ -8,7 +8,8 @@ CREATE TABLE IF NOT EXISTS rutas (
     clave TEXT PRIMARY KEY, proveedor TEXT NOT NULL, modelo_id TEXT NOT NULL,
     tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
     contexto INTEGER NOT NULL, max_salida INTEGER NOT NULL,
-    visto_por_ultima_vez REAL NOT NULL, activa INTEGER NOT NULL DEFAULT 1);
+    visto_por_ultima_vez REAL NOT NULL, activa INTEGER NOT NULL DEFAULT 1,
+    prioridad INTEGER NOT NULL DEFAULT 100);
 
 CREATE TABLE IF NOT EXISTS sondas (
     clave TEXT NOT NULL, tipo TEXT NOT NULL, momento REAL NOT NULL,
@@ -63,10 +64,17 @@ class Almacen:
     def _migrar(self) -> None:
         """`CREATE TABLE IF NOT EXISTS` no agrega columnas a una tabla que ya
         existe: una base viva (la del volumen de /datos, que a proposito
-        sobrevive a los redeploys) se quedaria sin `eventos.latencia_ms`."""
-        columnas = {f[1] for f in self._con.execute("PRAGMA table_info(eventos)")}
-        if "latencia_ms" not in columnas:
+        sobrevive a los redeploys) se quedaria sin `eventos.latencia_ms` --
+        o, desde Task 13, sin `rutas.prioridad`. Mismo patron para las dos:
+        detectar la columna faltante y agregarla con un default que no
+        rompa las filas que ya existen."""
+        columnas_eventos = {f[1] for f in self._con.execute("PRAGMA table_info(eventos)")}
+        if "latencia_ms" not in columnas_eventos:
             self._con.execute("ALTER TABLE eventos ADD COLUMN latencia_ms INTEGER")
+        columnas_rutas = {f[1] for f in self._con.execute("PRAGMA table_info(rutas)")}
+        if "prioridad" not in columnas_rutas:
+            self._con.execute(
+                "ALTER TABLE rutas ADD COLUMN prioridad INTEGER NOT NULL DEFAULT 100")
 
     def upsert_rutas(self, rutas: list[Ruta], momento: float,
                      desactivar_faltantes: bool = True,
@@ -75,14 +83,15 @@ class Almacen:
             c = r.capacidades
             self._con.execute(
                 """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
-                       contexto, max_salida, visto_por_ultima_vez, activa)
-                   VALUES (?,?,?,?,?,?,?,?,?,1)
+                       contexto, max_salida, visto_por_ultima_vez, activa, prioridad)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,?)
                    ON CONFLICT(clave) DO UPDATE SET
                        tools=excluded.tools, vision=excluded.vision,
                        contexto=excluded.contexto, max_salida=excluded.max_salida,
-                       visto_por_ultima_vez=excluded.visto_por_ultima_vez, activa=1""",
+                       visto_por_ultima_vez=excluded.visto_por_ultima_vez, activa=1,
+                       prioridad=excluded.prioridad""",
                 (r.clave, r.proveedor, r.modelo_id, r.tier, int(c.tools), int(c.vision),
-                 c.contexto, c.max_salida, momento))
+                 c.contexto, c.max_salida, momento, r.prioridad))
         # Lo que no se vio en esta pasada se desactiva, no se borra: el historico
         # es lo que permite detectar un renombre de modelo. Se puede omitir este
         # paso cuando el llamador solo trae un subconjunto (p.ej. la sincronizacion
@@ -108,10 +117,11 @@ class Almacen:
 
     def rutas_activas(self) -> list[Ruta]:
         filas = self._con.execute(
-            """SELECT proveedor, modelo_id, tier, tools, vision, contexto, max_salida
+            """SELECT proveedor, modelo_id, tier, tools, vision, contexto, max_salida,
+                      prioridad
                FROM rutas WHERE activa = 1 ORDER BY clave""").fetchall()
-        return [Ruta(p, m, t, Capacidades(bool(to), bool(vi), cx, ms))
-                for p, m, t, to, vi, cx, ms in filas]
+        return [Ruta(p, m, t, Capacidades(bool(to), bool(vi), cx, ms), prioridad=pr)
+                for p, m, t, to, vi, cx, ms, pr in filas]
 
     def registrar_sonda(self, clave: str, tipo: str, ok: bool, latencia_ms: int,
                         ttft_ms: int, codigo_http: int, casos_pasados: int,

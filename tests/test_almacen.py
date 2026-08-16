@@ -1,12 +1,15 @@
+import sqlite3
+
 import pytest
 
 from llm_libre.almacen import Almacen
 from llm_libre.modelos import Capacidades, Ruta
 
 
-def _ruta(modelo="a:free", proveedor="kilo", tools=True):
+def _ruta(modelo="a:free", proveedor="kilo", tools=True, prioridad=100):
     return Ruta(proveedor, modelo, "gratis",
-                Capacidades(tools=tools, vision=False, contexto=1000, max_salida=100))
+                Capacidades(tools=tools, vision=False, contexto=1000, max_salida=100),
+                prioridad=prioridad)
 
 
 @pytest.fixture
@@ -166,3 +169,92 @@ def test_sin_ninguna_observacion_de_ttft_se_usa_el_neutro(almacen):
     m = almacen.metricas()["kilo/a:free"]
     assert m.ttft_p50_ms == 1500.0
     assert m.latencia_p50_ms is None
+
+
+# --- Task 13: `prioridad` persiste y una base vieja migra sin perder datos. ---
+
+def test_upsert_rutas_persiste_la_prioridad(almacen):
+    almacen.upsert_rutas([_ruta("chatgpt:free", proveedor="chatgpt", prioridad=0)],
+                         momento=100.0)
+    activas = almacen.rutas_activas()
+    assert len(activas) == 1
+    assert activas[0].prioridad == 0
+
+
+def test_upsert_rutas_sin_prioridad_declarada_persiste_el_default_cien(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    assert almacen.rutas_activas()[0].prioridad == 100
+
+
+def test_resincronizar_actualiza_la_prioridad_de_una_ruta_existente(almacen):
+    # Un cambio de `prioridad` en el YAML (p.ej. subir a un proveedor de
+    # lugar) tiene que propagarse en la proxima sincronizacion, no quedar
+    # pegado al valor con el que la ruta se vio por primera vez.
+    almacen.upsert_rutas([_ruta("a:free", prioridad=1)], momento=100.0)
+    almacen.upsert_rutas([_ruta("a:free", prioridad=0)], momento=200.0)
+    assert almacen.rutas_activas()[0].prioridad == 0
+
+
+# `_migrar()` ya tiene un caso (eventos.latencia_ms, ver el comentario de
+# cabecera de almacen.py) que agrega una columna a una tabla que YA existe con
+# `ALTER TABLE ... ADD COLUMN` -- porque `CREATE TABLE IF NOT EXISTS` no toca
+# una tabla existente. Este test reproduce el mismo riesgo para `rutas.
+# prioridad`: la tabla `rutas` de produccion (el volumen de /datos) existe
+# desde ANTES de esta feature y ya tiene filas. Si la migracion no fuera
+# idempotente y compatible con datos existentes, un redeploy contra esa base
+# reventaria al arrancar (o silenciosamente perderia la columna).
+_ESQUEMA_VIEJO_SIN_PRIORIDAD = """
+CREATE TABLE rutas (
+    clave TEXT PRIMARY KEY, proveedor TEXT NOT NULL, modelo_id TEXT NOT NULL,
+    tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
+    contexto INTEGER NOT NULL, max_salida INTEGER NOT NULL,
+    visto_por_ultima_vez REAL NOT NULL, activa INTEGER NOT NULL DEFAULT 1);
+"""
+
+
+def test_migra_una_base_vieja_con_filas_sin_perder_datos(tmp_path):
+    ruta_db = str(tmp_path / "vieja.sqlite3")
+    # Simula la base de produccion: esquema PRE-prioridad, con una fila real
+    # adentro (visto_por_ultima_vez, activa -- todo lo que la version vieja
+    # del codigo ya escribia).
+    con = sqlite3.connect(ruta_db)
+    con.executescript(_ESQUEMA_VIEJO_SIN_PRIORIDAD)
+    con.execute(
+        """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
+               contexto, max_salida, visto_por_ultima_vez, activa)
+           VALUES ('kilo/vieja:free','kilo','vieja:free','gratis',1,0,1000,100,50.0,1)""")
+    con.commit()
+    con.close()
+
+    # Abrir con el codigo NUEVO no debe reventar (ALTER TABLE, no CREATE).
+    almacen = Almacen(ruta_db)
+    almacen.crear_esquema()
+
+    activas = almacen.rutas_activas()
+    assert len(activas) == 1
+    assert activas[0].clave == "kilo/vieja:free"
+    # La fila preexistente, sin ninguna prioridad en el momento en que se
+    # escribio, migra al default (100), no a NULL ni a un valor inventado.
+    assert activas[0].prioridad == 100
+
+    # Y la base migrada sigue siendo escribible: una sincronizacion nueva
+    # puede declarar prioridad para esa misma ruta o para una nueva.
+    almacen.upsert_rutas([_ruta("vieja:free", proveedor="kilo", prioridad=0)], momento=200.0)
+    almacen.upsert_rutas([_ruta("nueva:free", proveedor="chatgpt", prioridad=0)],
+                         momento=200.0, desactivar_faltantes=False)
+    activas = {r.clave: r.prioridad for r in almacen.rutas_activas()}
+    assert activas == {"kilo/vieja:free": 0, "chatgpt/nueva:free": 0}
+
+
+def test_migrar_una_base_vieja_es_idempotente(tmp_path):
+    # Abrir la base migrada una SEGUNDA vez (el redeploy siguiente) no debe
+    # reventar con "duplicate column name".
+    ruta_db = str(tmp_path / "vieja2.sqlite3")
+    con = sqlite3.connect(ruta_db)
+    con.executescript(_ESQUEMA_VIEJO_SIN_PRIORIDAD)
+    con.close()
+
+    Almacen(ruta_db).crear_esquema()
+    otra_vez = Almacen(ruta_db)
+    otra_vez.crear_esquema()   # no debe reventar
+    assert otra_vez.rutas_activas() == []

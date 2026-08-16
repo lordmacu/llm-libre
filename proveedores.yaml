@@ -1,9 +1,61 @@
 # Registro de proveedores. Los gratis descubren su catalogo desde modelos_path;
-# los de pago declaran sus modelos y capacidades a mano, porque el /v1/models de
-# MiniMax solo devuelve id/created/owned_by, sin metadatos de capacidad.
+# los de pago (y chatgpt, que no expone metadatos de capacidad) declaran sus
+# modelos y capacidades a mano.
+#
+# `prioridad` es un concepto DISTINTO de `tier`: ordena a mano quien se prueba
+# primero (nunca mezclar los dos). Default 100 si no se declara. NO rompe el
+# invariante de que las rutas de pago van siempre al final: eso lo decide
+# `tier`, no `prioridad` (ver router.ordenar).
 proveedores:
+  - id: chatgpt
+    tier: gratis          # no cuesta plata: NO consume el tope de pago
+    prioridad: 0           # antes que todo lo demas
+    dialecto: openai
+    base_url_env: CHATGPT_PROXY_URL   # la URL real se define en el entorno;
+    base_url: http://127.0.0.1:8888   # este es solo el default si la variable no esta
+    modelos_fijos:
+      # Declarados a mano: su /v1/models no trae metadatos de capacidad (es
+      # una lista escrita a mano por el propio proxy).
+      # tools:false es OBLIGATORIO -- mandarle tools devuelve HTTP 500, no un
+      # fallo elegante (verificado contra el proxy real, 2026-08-16).
+      # contexto es un piso conservador; el proxy ignora max_tokens de todas
+      # formas (tambien verificado).
+      #
+      # NO se declara el modelo "auto" que el proxy expone: colisionaria con
+      # el alias "auto" de llm-libre en interpretar_pedido y quedaria
+      # inalcanzable.
+      # NO se declaran los alias legacy (gpt-4o, gpt-4o-mini, gpt-4,
+      # gpt-3.5-turbo): son alias de estos mismos modelos y crearian rutas
+      # duplicadas.
+      - id: gpt-5-6
+        tools: false
+        vision: false
+        contexto: 128000
+        max_salida: 8192
+      - id: gpt-5-5
+        tools: false
+        vision: false
+        contexto: 128000
+        max_salida: 8192
+      - id: gpt-5-6-mini
+        tools: false
+        vision: false
+        contexto: 128000
+        max_salida: 8192
+      - id: gpt-5-5-mini
+        tools: false
+        vision: false
+        contexto: 128000
+        max_salida: 8192
+      - id: gpt-5-3-mini
+        tools: false
+        vision: false
+        contexto: 128000
+        max_salida: 8192
+
   - id: kilo
     tier: gratis
+    prioridad: 1
     dialecto: openai
     base_url: https://api.kilo.ai/api/gateway
     clave_env: KILO_API_KEY          # OPCIONAL: sin clave el tier anonimo funciona igual
@@ -11,6 +63,7 @@ proveedores:
 
   - id: openrouter
     tier: gratis
+    prioridad: 1
     dialecto: openai
     base_url: https://openrouter.ai/api/v1
     clave_env: OPENROUTER_API_KEY
@@ -21,6 +74,7 @@ proveedores:
 
   - id: minimax
     tier: pago
+    prioridad: 2
     dialecto: openai
     base_url: https://api.minimax.io/v1
     clave_env: MINIMAX_API_KEY

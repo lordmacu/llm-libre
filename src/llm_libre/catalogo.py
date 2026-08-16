@@ -56,8 +56,13 @@ def es_de_especialidad(m: dict) -> bool:
     return _DESCARTAR.search(f"{m.get('name') or ''} {m.get('description') or ''}") is not None
 
 
-def normalizar(proveedor: str, datos: dict | list) -> list[Ruta]:
-    """Convierte la respuesta de /models en rutas gratis utilizables para chat."""
+def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100) -> list[Ruta]:
+    """Convierte la respuesta de /models en rutas gratis utilizables para chat.
+
+    `prioridad` es la del PROVEEDOR (ver Proveedor.prioridad), no algo que
+    /models pueda traer: se estampa igual en cada ruta descubierta para que
+    el router las ordene sin tener que volver a consultar el registro.
+    """
     items = datos.get("data", datos) if isinstance(datos, dict) else datos
     rutas: list[Ruta] = []
     for m in items:
@@ -96,6 +101,7 @@ def normalizar(proveedor: str, datos: dict | list) -> list[Ruta]:
                 contexto=int(m.get("context_length") or top.get("context_length") or 0),
                 max_salida=int(top.get("max_completion_tokens") or 0),
             ),
+            prioridad=prioridad,
         ))
     return rutas
 
