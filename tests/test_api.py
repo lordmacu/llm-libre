@@ -212,8 +212,40 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
 
 def test_ranking_desglosa_los_componentes(cliente):
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    for campo in ("clave", "puntaje", "calidad", "confiabilidad", "ttft_p50_ms", "tier"):
+    for campo in ("clave", "puntaje", "calidad", "confiabilidad", "ttft_p50_ms", "tier",
+                 "prioridad"):
         assert campo in fila
+
+
+# --- Hallazgo 3 de la revision de Task 13: /v1/ranking ordenaba SOLO por
+#     puntaje y no traia `prioridad`, asi que podia mostrar kilo/k:free
+#     arriba de todo mientras X-Ruta-Usada decia chatgpt/gpt-5-0 -- el
+#     endpoint que el README describe como el lugar para auditar POR QUE el
+#     router eligio lo que eligio dejaba de explicarlo. Ahora ordena con la
+#     MISMA clave que router.ordenar (via router.clave_de_orden). ---
+
+def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
+    estado, cliente = estado_cliente
+    estado.almacen.upsert_rutas([
+        Ruta("chatgpt", "gpt-5:free", "gratis", Capacidades(True, False, 100000, 4096),
+             prioridad=0),
+    ], 2.0, desactivar_faltantes=False)
+    # chatgpt: prioridad maxima (0) pero puntaje MALO.
+    estado.almacen.registrar_sonda("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
+    estado.almacen.registrar_evento("chatgpt/gpt-5:free", False, 0, 500, 20.0)
+    # kilo/a:free (prioridad 100, el default de la fixture): puntaje MEJOR.
+    estado.almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    estado.almacen.registrar_evento("kilo/a:free", True, 50, 200, 20.0)
+
+    filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
+    claves = [f["clave"] for f in filas]
+    puntajes = {f["clave"]: f["puntaje"] for f in filas}
+    # Confirma que de verdad puntua peor -- si no, el test no prueba nada.
+    assert puntajes["chatgpt/gpt-5:free"] < puntajes["kilo/a:free"]
+    # Y aun asi va primero: la prioridad manda, como en el router de verdad.
+    assert claves[0] == "chatgpt/gpt-5:free"
+    assert {f["clave"]: f["prioridad"] for f in filas} == {
+        "chatgpt/gpt-5:free": 0, "kilo/a:free": 100}
 
 
 # --- Fix round 1, hallazgo 2 (Critical): el tope de pago diario tambien debe

@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from llm_libre.auth import LimitadorPorLlave
 from llm_libre.modelos import METRICAS_NEUTRAS, Pedido
 from llm_libre.ranking import puntuar
-from llm_libre.router import compatibles, ordenar
+from llm_libre.router import clave_de_orden, compatibles, ordenar
 
 PERFILES = {"rapido", "balanceado", "potente"}
 ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
@@ -183,11 +183,19 @@ def crear_app(estado: Estado) -> FastAPI:
         exigir_llave(x_api_key, authorization)
         ahora = time.time()
         metricas = _metricas(estado, ahora)
+        # Ordenado con la MISMA clave que usa router.ordenar (perfil
+        # "balanceado", el que tambien usa el puntaje de cada fila) -- no un
+        # sort propio por puntaje: este endpoint es para auditar POR QUE el
+        # router eligio lo que eligio (README), y antes podia mostrar una
+        # ruta arriba de todo mientras X-Ruta-Usada decia otra distinta,
+        # porque no miraba `prioridad`.
+        activas = sorted(estado.almacen.rutas_activas(),
+                         key=lambda r: clave_de_orden(r, metricas[r.clave], "balanceado"))
         filas = []
-        for r in estado.almacen.rutas_activas():
+        for r in activas:
             m = metricas[r.clave]
             medida = m.calidad_medida_en is not None
-            filas.append({"clave": r.clave, "tier": r.tier,
+            filas.append({"clave": r.clave, "tier": r.tier, "prioridad": r.prioridad,
                           "puntaje": round(puntuar(m, "balanceado"), 4),
                           # "nunca medida" se dice, no se disfraza: mostrar el
                           # neutro en `calidad` como si alguien lo hubiera
@@ -210,7 +218,6 @@ def crear_app(estado: Estado) -> FastAPI:
                           "en_cooldown_hasta": m.en_cooldown_hasta,
                           "tools": r.capacidades.tools, "vision": r.capacidades.vision,
                           "contexto": r.capacidades.contexto})
-        filas.sort(key=lambda f: -f["puntaje"])
         return {"rutas": filas}
 
     @app.get("/v1/uso")

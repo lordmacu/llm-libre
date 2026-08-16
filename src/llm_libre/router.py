@@ -19,11 +19,25 @@ def compatibles(rutas: list[Ruta], pedido: Pedido) -> list[Ruta]:
     return candidatas
 
 
+def clave_de_orden(r: Ruta, m: Metricas, perfil: str) -> tuple[bool, int, int, float]:
+    """La clave de orden `(tier == "pago", prioridad, no-medida, -puntaje)`,
+    factorizada para que CUALQUIER lugar que quiera mostrar "el orden real
+    del router" (hoy, /v1/ranking) use la MISMA logica en vez de inventar la
+    suya -- /v1/ranking ordenaba antes solo por puntaje, sin `prioridad`, y
+    podia mostrar una ruta arriba de todo mientras `X-Ruta-Usada` decia otra
+    cosa. Ver el docstring de `ordenar` para el porque de cada posicion.
+    """
+    return (r.tier == "pago", r.prioridad,
+            1 if m.calidad_medida_en is None else 0,
+            -puntuar(m, perfil))
+
+
 def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
             ahora: float) -> list[Ruta]:
     """Devuelve la cadena de intentos, mejor primero.
 
-    Orden: `(tier == "pago", prioridad, no-medida, -puntaje)`.
+    Orden: `(tier == "pago", prioridad, no-medida, -puntaje)` (ver
+    `clave_de_orden`).
 
     INVARIANTE que nada de lo que sigue puede romper: las rutas de PAGO van
     siempre al final, sin importar su `prioridad` ni su puntaje. Por eso
@@ -39,6 +53,11 @@ def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
     a este cambio sigue intacto: una ruta nunca sondeada por la bateria de
     calidad (calidad_medida_en is None) va despues de una con medicion real,
     y recien ahi decide el puntaje.
+
+    El filtro de cooldown (mas abajo) va ANTES de mirar cualquiera de estos
+    criterios: una ruta persistentemente rota o colgada no puede quedar
+    primera solo por tener la prioridad mas alta (ver Proxy._registrar_fallo,
+    que ahora tambien castiga fallos duros seguidos, no solo 429).
     """
     candidatas = compatibles(rutas, pedido)
     if not pedido.permitir_pago:
@@ -47,10 +66,7 @@ def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
                    if metricas.get(r.clave, METRICAS_NEUTRAS).en_cooldown_hasta <= ahora]
 
     def orden(r: Ruta) -> tuple[bool, int, int, float]:
-        m = metricas.get(r.clave, METRICAS_NEUTRAS)
-        return (r.tier == "pago", r.prioridad,
-                1 if m.calidad_medida_en is None else 0,
-                -puntuar(m, pedido.perfil))
+        return clave_de_orden(r, metricas.get(r.clave, METRICAS_NEUTRAS), pedido.perfil)
 
     return sorted(disponibles, key=orden)
 

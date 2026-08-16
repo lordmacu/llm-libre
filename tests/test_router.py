@@ -158,6 +158,49 @@ def test_la_prioridad_no_rompe_el_invariante_de_pago_al_final():
     assert [x.modelo_id for x in salida] == ["mediocre:free", "MiniMax-M3"]
 
 
+# --- Hallazgo 2 de la revision de Task 13: `prioridad` no tenia escape para
+#     una ruta persistentemente rota -- con chatgpt en prioridad 0, ordenar()
+#     la seguia poniendo primero SIEMPRE, sin mirar su salud, mientras el
+#     cooldown (que ahora tambien cubre fallos duros seguidos, no solo 429,
+#     ver proxy.Proxy._registrar_fallo) sea la UNICA salida de esa trampa: se
+#     filtra ANTES de que la prioridad importe. ---
+
+# --- Hallazgo 5 de la revision: `prioridad` y "nunca medida" en la clave de
+#     orden se podian intercambiar de posicion sin que ningun test existente
+#     lo notara -- justo el rung que decide el rollout real: en un deploy
+#     nuevo, TODAS las rutas de chatgpt arrancan sin medir mientras Kilo ya
+#     carga mediciones de la base de produccion. Si el orden fuera
+#     (no-medida, prioridad) en vez de (prioridad, no-medida), Kilo (medido)
+#     le ganaria a chatgpt (prioridad 0, sin medir) el dia del deploy -- lo
+#     opuesto de lo que prioridad:0 promete. ---
+
+def test_la_prioridad_decide_antes_que_medida_vs_no_medida():
+    # chatgpt: prioridad 0 (la mejor) pero NUNCA MEDIDO (calidad_medida_en
+    # None, el estado real el dia de un deploy). kilo: prioridad 1 (peor)
+    # pero CON medicion real -- el estado real de una base de produccion ya
+    # rodando. Si el orden fuera (no-medida, prioridad), kilo ganaria.
+    rutas = [_rp("chatgpt:free", 0, proveedor="chatgpt"), _rp("normal:free", 1)]
+    metricas = {
+        "chatgpt/chatgpt:free": m(medida_en=None),
+        "kilo/normal:free": m(medida_en=1000.0),
+    }
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["chatgpt:free", "normal:free"]
+
+
+def test_una_ruta_en_cooldown_se_salta_aunque_tenga_la_maxima_prioridad():
+    rutas = [_rp("chatgpt:free", 0, proveedor="chatgpt"), _rp("normal:free", 1)]
+    metricas = {
+        # chatgpt tiene la mejor prioridad Y el mejor puntaje -- y aun asi no
+        # puede ganar mientras este en cooldown.
+        "chatgpt/chatgpt:free": m(calidad=0.99, confiabilidad=0.99, ttft=50,
+                                  cooldown=500.0),
+        "kilo/normal:free": m(calidad=0.2, confiabilidad=0.3, ttft=5000),
+    }
+    salida = ordenar(rutas, metricas, Pedido(), ahora=100.0)
+    assert [x.modelo_id for x in salida] == ["normal:free"]
+
+
 def test_un_modelo_explicito_se_sirve_aunque_no_sea_el_de_mayor_prioridad():
     # "Elegir modelo a mano ya funciona y debe seguir igual" (brief, punto 4):
     # pedir un id real evita el ordenamiento por completo, prioridad incluida.
