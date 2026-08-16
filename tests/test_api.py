@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from llm_libre.almacen import Almacen
 from llm_libre.api import Estado, crear_app, interpretar_pedido
+from llm_libre.auth import LimitadorPorLlave
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.proveedores import Proveedor
 from llm_libre.proxy import Proxy
@@ -314,3 +315,71 @@ def test_streaming_pago_cuenta_una_sola_vez_no_por_chunk():
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
     assert estado.almacen.uso_pago("buena", dia) == 1
+
+
+# --- Fix round 2 (final), cambio 1: `exigir_llave` acepta la llave tambien
+#     por `Authorization: Bearer <llave>`, no solo por `X-API-Key`. Es lo que
+#     permite que `OpenAI(base_url=..., api_key="<llave>")` autentique sin
+#     configuracion extra -- la promesa central del contrato ("cambia solo
+#     base_url"), que antes de este cambio era falsa: el SDK manda la llave
+#     via `Authorization`, y el gateway solo leia `X-API-Key`. `X-API-Key`
+#     sigue existiendo (la usa `arkiv-api`, el gateway hermano) y sigue
+#     ganando si ambas cabeceras llegan juntas.
+
+def test_autoriza_con_bearer_sin_x_api_key(cliente):
+    r = cliente.post("/v1/chat/completions", headers={"Authorization": "Bearer buena"},
+                     json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "hola"
+
+
+def test_bearer_con_llave_mala_sigue_dando_401(cliente):
+    r = cliente.post("/v1/chat/completions", headers={"Authorization": "Bearer mala"},
+                     json={"model": "auto", "messages": []})
+    assert r.status_code == 401
+
+
+def test_x_api_key_sola_sigue_funcionando_igual_que_antes(cliente):
+    r = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
+    assert r.status_code == 200
+
+
+def test_si_llegan_las_dos_y_no_coinciden_gana_x_api_key(cliente):
+    # X-API-Key trae la buena; Authorization trae una llave que ni siquiera
+    # existe. Si Authorization ganara, esto seria 401 -- confirma la
+    # precedencia declarada.
+    r = cliente.get("/v1/models", headers={
+        "X-API-Key": "buena", "Authorization": "Bearer ni-existe"})
+    assert r.status_code == 200
+
+
+def test_authorization_malformado_no_revienta_y_da_401(cliente):
+    # Ninguna de estas formas rotas debe tirar una excepcion sin atrapar: se
+    # tratan igual que "no se mando ninguna llave".
+    for cabecera in ("buena", "Bearer", "Bearer   ", "Basic buena", "buena sin bearer"):
+        r = cliente.get("/v1/models", headers={"Authorization": cabecera})
+        assert r.status_code == 401, cabecera
+
+
+def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    almacen.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
+    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
+                    llaves={"buena"}, tope_pago_diario=200,
+                    limitador=LimitadorPorLlave(2))
+    cliente = TestClient(crear_app(estado))
+
+    r1 = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
+    r2 = cliente.get("/v1/models", headers={"Authorization": "Bearer buena"})
+    r3 = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
+    assert r1.status_code == 200 and r2.status_code == 200
+    # El limite (2/min) ya se agoto entre las dos peticiones anteriores, sin
+    # importar que cada una uso una cabecera distinta: es la misma llave
+    # resuelta, asi que cuenta contra el mismo contador.
+    assert r3.status_code == 429

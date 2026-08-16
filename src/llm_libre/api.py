@@ -63,10 +63,33 @@ class Estado:
     http: object = None                                # cliente httpx compartido
 
 
+def _resolver_llave(x_api_key: str | None, authorization: str | None) -> str | None:
+    """Acepta la llave por `X-API-Key` (convencion que ya usa `arkiv-api`,
+    el gateway hermano) o por `Authorization: Bearer <llave>` (lo que manda
+    sin configuracion extra CUALQUIER SDK de OpenAI via su parametro
+    `api_key` -- que es, literalmente, la promesa central de este contrato:
+    "cambia solo base_url"). Si llegan las dos, `X-API-Key` gana: es la
+    convencion mas explicita y la que ya usan los llamadores existentes.
+
+    Un `Authorization` que no trae el prefijo `Bearer ` (u otra forma
+    malformada) no resuelve ninguna llave -- ni revienta ni intenta
+    adivinar, simplemente cae al mismo 401 que una llave ausente.
+    """
+    if x_api_key:
+        return x_api_key
+    if not authorization:
+        return None
+    partes = authorization.split(None, 1)
+    if len(partes) != 2 or partes[0].lower() != "bearer":
+        return None
+    return partes[1].strip() or None
+
+
 def crear_app(estado: Estado) -> FastAPI:
     app = FastAPI(title="llm-libre")
 
-    def exigir_llave(llave: str | None) -> str:
+    def exigir_llave(x_api_key: str | None, authorization: str | None = None) -> str:
+        llave = _resolver_llave(x_api_key, authorization)
         if not llave or llave not in estado.llaves:
             raise HTTPException(401, "llave invalida")
         if not estado.limitador.permitir(llave, time.time()):
@@ -92,8 +115,9 @@ def crear_app(estado: Estado) -> FastAPI:
         return rutas, pedido
 
     @app.post("/v1/chat/completions")
-    async def completions(request: Request, x_api_key: str | None = Header(None)):
-        llave = exigir_llave(x_api_key)
+    async def completions(request: Request, x_api_key: str | None = Header(None),
+                          authorization: str | None = Header(None)):
+        llave = exigir_llave(x_api_key, authorization)
         cuerpo = await request.json()
         rutas, pedido = _rutas_para(cuerpo, llave)
         if not rutas:
@@ -132,16 +156,16 @@ def crear_app(estado: Estado) -> FastAPI:
         return JSONResponse(r.json, status_code=r.estado, headers=cabeceras)
 
     @app.get("/v1/models")
-    def modelos(x_api_key: str | None = Header(None)):
-        exigir_llave(x_api_key)
+    def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
+        exigir_llave(x_api_key, authorization)
         datos = [{"id": r.modelo_id, "object": "model", "owned_by": r.proveedor}
                  for r in estado.almacen.rutas_activas()]
         datos += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIAS]
         return {"object": "list", "data": datos}
 
     @app.get("/v1/ranking")
-    def ranking(x_api_key: str | None = Header(None)):
-        exigir_llave(x_api_key)
+    def ranking(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
+        exigir_llave(x_api_key, authorization)
         ahora = time.time()
         metricas = _metricas(estado, ahora)
         filas = []
@@ -159,8 +183,8 @@ def crear_app(estado: Estado) -> FastAPI:
         return {"rutas": filas}
 
     @app.get("/v1/uso")
-    def uso(x_api_key: str | None = Header(None)):
-        llave = exigir_llave(x_api_key)
+    def uso(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
+        llave = exigir_llave(x_api_key, authorization)
         dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return {"dia": dia, "pago_hoy": estado.almacen.uso_pago(llave, dia),
                 "tope": estado.tope_pago_diario}

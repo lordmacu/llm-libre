@@ -17,8 +17,7 @@ from openai import OpenAI
 
 client = OpenAI(
     base_url="https://<dominio>/v1",
-    api_key="no-se-usa",  # el SDK exige un valor no vacio; llm-libre no lo lee
-    default_headers={"X-API-Key": "<una-de-las-LLM_LIBRE_API_KEYS>"},
+    api_key="<una-de-las-LLM_LIBRE_API_KEYS>",
 )
 
 resp = client.chat.completions.create(
@@ -37,10 +36,15 @@ curl -s -H "X-API-Key: <una-de-las-LLM_LIBRE_API_KEYS>" \
   https://<dominio>/v1/chat/completions
 ```
 
-`base_url` siempre termina en `/v1`. La llave va en la cabecera `X-API-Key`,
-**no** en `Authorization`: `llm-libre` no lee `Authorization` en absoluto, así
-que el parámetro `api_key` del SDK de OpenAI no autentica nada por sí solo
-— por eso el snippet la manda aparte, vía `default_headers`.
+`base_url` siempre termina en `/v1`. La llave se acepta por **cualquiera**
+de dos cabeceras:
+
+- `Authorization: Bearer <llave>` — la que manda, sin configuración extra,
+  el parámetro `api_key` de cualquier SDK de OpenAI. Es la que usa el
+  snippet de arriba.
+- `X-API-Key: <llave>` — la convención que ya usa `arkiv-api`, el gateway
+  hermano. Sigue siendo válida para quien ya la usaba, y **gana** si una
+  petición llega con las dos cabeceras a la vez.
 
 ## Alias `auto*`
 

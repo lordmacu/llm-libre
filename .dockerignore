@@ -3,7 +3,7 @@ venv/
 .git/
 datos/
 .env
-__pycache__/
+**/__pycache__/
 .pytest_cache/
 *.sqlite3
 *.egg-info/
