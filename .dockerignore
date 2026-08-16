@@ -1,0 +1,11 @@
+venv/
+.venv/
+.git/
+datos/
+.env
+__pycache__/
+.pytest_cache/
+*.sqlite3
+*.egg-info/
+.superpowers/
+docs/

@@ -21,13 +21,33 @@ def crear_estado() -> Estado:
     """Arma el Estado real del proceso: carga los proveedores desde el YAML +
     entorno, abre la DB SQLite (creando el esquema si falta) y comparte UN
     solo cliente httpx entre el proxy y el planificador de sondeo.
+
+    Valida `LLM_LIBRE_API_KEYS` ANTES de tocar disco o red, y a proposito
+    revienta fuerte (excepcion sin atrapar, el proceso no arranca) si no hay
+    ninguna llave configurada. Sin esta llamada, un operador que se olvida
+    esa variable (p.ej. en la UI de Coolify) obtiene un contenedor que
+    arranca normal, `/health` que sigue diciendo "ok" (no depende de las
+    llaves) y CADA peticion a /v1/* devolviendo 401 -- indistinguible en los
+    logs de "este cliente mando una llave equivocada". Es la misma clase de
+    fallo que /health honesto (Task 9) ya existe para evitar del lado de las
+    rutas; esto la cierra del lado de la autenticacion: mejor un proceso que
+    no arranca con una razon clara que uno que parece sano y rechaza a todo
+    el mundo en silencio.
     """
+    llaves = {k.strip() for k in os.getenv("LLM_LIBRE_API_KEYS", "").split(",") if k.strip()}
+    if not llaves:
+        raise RuntimeError(
+            "LLM_LIBRE_API_KEYS no esta definida (o esta vacia): sin al menos "
+            "una llave el servicio arrancaria pero rechazaria el 100% de las "
+            "peticiones a /v1/* con 401 para cualquier llamador, mientras "
+            "/health seguiria informando 'ok'. Definila con al menos una "
+            "llave, separadas por coma si son varias -- por ejemplo: "
+            "LLM_LIBRE_API_KEYS=una-llave-larga-y-secreta")
     proveedores = cargar(YAML, dict(os.environ))
     almacen = Almacen(RUTA_DB)
     almacen.crear_esquema()
     http = httpx.AsyncClient()
     proxy = Proxy({p.id: p for p in proveedores}, almacen, http)
-    llaves = {k.strip() for k in os.getenv("LLM_LIBRE_API_KEYS", "").split(",") if k.strip()}
     estado = Estado(almacen=almacen, proxy=proxy, llaves=llaves,
                     tope_pago_diario=int(os.getenv("TOPE_PAGO_DIARIO", "200")),
                     limitador=LimitadorPorLlave(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
