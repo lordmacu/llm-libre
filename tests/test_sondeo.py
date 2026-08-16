@@ -66,6 +66,27 @@ async def test_sincronizar_propaga_la_prioridad_del_proveedor_a_las_rutas_descub
     assert rutas[0].prioridad == 1
 
 
+async def test_sincronizar_propaga_las_capacidades_por_defecto_del_proveedor():
+    # Simula chatgpt-proxy: /models trae ids pero NINGUN metadato de
+    # capacidad -- sincronizar_catalogo tiene que aplicar las capacidades
+    # declaradas del proveedor a cada id descubierto, tools:false incluido.
+    almacen = _almacen()
+    catalogo_desnudo = {"data": [
+        {"id": "gpt-5-3-mini", "object": "model", "description": "GPT-5.3 Mini"},
+    ]}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=catalogo_desnudo)))
+    prov = [Proveedor("chatgpt", "gratis", "openai", "https://cg.test", "", "/models", {}, [],
+                      prioridad=0,
+                      capacidades_por_defecto=Capacidades(False, False, 128000, 8192))]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    rutas = almacen.rutas_activas()
+    assert [r.clave for r in rutas] == ["chatgpt/gpt-5-3-mini"]
+    assert rutas[0].capacidades.tools is False
+    assert rutas[0].capacidades.contexto == 128000
+    assert rutas[0].prioridad == 0
+
+
 async def test_un_proveedor_caido_no_borra_el_catalogo_de_los_demas():
     almacen = _almacen()
     almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)

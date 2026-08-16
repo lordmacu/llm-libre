@@ -1,6 +1,13 @@
-# Registro de proveedores. Los gratis descubren su catalogo desde modelos_path;
-# los de pago (y chatgpt, que no expone metadatos de capacidad) declaran sus
-# modelos y capacidades a mano.
+# Registro de proveedores. Tres patrones distintos, los tres declarativos:
+#   - Kilo / OpenRouter: ids Y capacidades DESCUBIERTOS desde modelos_path.
+#   - MiniMax: ids Y capacidades DECLARADOS a mano (modelos_fijos) -- su
+#     /models real no trae metadatos de capacidad.
+#   - chatgpt: ids DESCUBIERTOS desde modelos_path, capacidades DECLARADAS
+#     una sola vez para todos (capacidades_por_defecto) -- su /models SI es
+#     dinamico (con cache y TTL), pero solo trae
+#     id/object/created/owned_by/description, nunca pricing ni modalidades.
+#     Es un mecanismo general: cualquier proveedor futuro con un catalogo
+#     igual de desnudo lo puede usar sin tocar codigo.
 #
 # `prioridad` es un concepto DISTINTO de `tier`: ordena a mano quien se prueba
 # primero (nunca mezclar los dos). Default 100 si no se declara. NO rompe el
@@ -12,46 +19,31 @@ proveedores:
     prioridad: 0           # antes que todo lo demas
     dialecto: openai
     base_url_env: CHATGPT_PROXY_URL   # la URL real se define en el entorno;
-    base_url: http://127.0.0.1:8888   # este es solo el default si la variable no esta
-    modelos_fijos:
-      # Declarados a mano: su /v1/models no trae metadatos de capacidad (es
-      # una lista escrita a mano por el propio proxy).
+    base_url: http://127.0.0.1:8888/v1   # default si la variable no esta.
+    # OJO con el /v1: las rutas reales del proxy son /v1/chat/completions y
+    # /v1/models (no /chat/completions a secas, como Kilo/OpenRouter) -- sin
+    # el /v1 en base_url, cliente.armar_peticion arma una URL de chat
+    # invalida. Mismo patron que minimax (base_url: .../v1).
+    modelos_path: /models
+    capacidades_por_defecto:
+      # Su /v1/models SI es dinamico (TTL cache contra el backend real de
+      # ChatGPT, con fallback a la cache vieja si falla) pero NUNCA trae
+      # metadatos de capacidad -- por eso se declaran una sola vez aca y
+      # catalogo.normalizar las aplica a cada id que descubra.
       # tools:false es OBLIGATORIO -- mandarle tools devuelve HTTP 500, no un
       # fallo elegante (verificado contra el proxy real, 2026-08-16).
       # contexto es un piso conservador; el proxy ignora max_tokens de todas
       # formas (tambien verificado).
-      #
-      # NO se declara el modelo "auto" que el proxy expone: colisionaria con
-      # el alias "auto" de llm-libre en interpretar_pedido y quedaria
-      # inalcanzable.
-      # NO se declaran los alias legacy (gpt-4o, gpt-4o-mini, gpt-4,
-      # gpt-3.5-turbo): son alias de estos mismos modelos y crearian rutas
-      # duplicadas.
-      - id: gpt-5-6
-        tools: false
-        vision: false
-        contexto: 128000
-        max_salida: 8192
-      - id: gpt-5-5
-        tools: false
-        vision: false
-        contexto: 128000
-        max_salida: 8192
-      - id: gpt-5-6-mini
-        tools: false
-        vision: false
-        contexto: 128000
-        max_salida: 8192
-      - id: gpt-5-5-mini
-        tools: false
-        vision: false
-        contexto: 128000
-        max_salida: 8192
-      - id: gpt-5-3-mini
-        tools: false
-        vision: false
-        contexto: 128000
-        max_salida: 8192
+      tools: false
+      vision: false
+      contexto: 128000
+      max_salida: 8192
+    # Los alias legacy (gpt-4o, gpt-4o-mini, gpt-4, gpt-3.5-turbo) y el id
+    # "auto" que el propio /v1/models expone NO se filtran aca: se
+    # autoidentifican (description empieza con "Alias →") o son un id
+    # reservado del gateway (colisiona con el alias "auto" de
+    # interpretar_pedido), y catalogo.normalizar los descarta en tiempo de
+    # descubrimiento -- ver IDS_RESERVADOS y _es_alias en catalogo.py.
 
   - id: kilo
     tier: gratis

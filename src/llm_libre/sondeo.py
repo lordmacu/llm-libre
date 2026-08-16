@@ -89,7 +89,7 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
                         p.id, p.modelos_path, r.status_code)
             continue
         try:
-            nuevas = normalizar(p.id, r.json(), p.prioridad)
+            nuevas = normalizar(p.id, r.json(), p.prioridad, p.capacidades_por_defecto)
         except (ValueError, TypeError, AttributeError, KeyError) as e:
             # Cuerpo no-JSON (ValueError/JSONDecodeError) o JSON de una forma
             # inesperada -- p.ej. un error de auth disfrazado de 200, que deja

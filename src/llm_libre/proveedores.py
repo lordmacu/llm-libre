@@ -20,6 +20,16 @@ class Proveedor:
     # de mirar puntaje. Default 100 para que un proveedor que no lo declara
     # quede ultimo entre sus pares. Ver el comentario largo en modelos.Ruta.
     prioridad: int = 100
+    # Un TERCER patron de registro, junto a "todo descubierto" (Kilo/
+    # OpenRouter, via modelos_path) y "todo declarado" (MiniMax, via
+    # modelos_fijos): un proveedor cuyo /models trae IDS pero NINGUN metadato
+    # de capacidad (chatgpt-proxy). None => modo normal (capacidades se
+    # descubren desde /models, como siempre). Si esta declarado, catalogo.
+    # normalizar aplica estas capacidades a CADA id que descubra y saltea los
+    # chequeos de precio/modalidad -- pero los IDS siguen viniendo de
+    # /models, nunca de aca: sigue siendo descubrimiento, no una lista
+    # cableada con otro nombre.
+    capacidades_por_defecto: Capacidades | None = None
 
 
 def _resolver_base_url(p: dict, entorno: dict) -> str:
@@ -36,6 +46,14 @@ def _resolver_base_url(p: dict, entorno: dict) -> str:
     return p["base_url"]
 
 
+def _capacidades_por_defecto(p: dict) -> Capacidades | None:
+    datos = p.get("capacidades_por_defecto")
+    if not datos:
+        return None
+    return Capacidades(tools=bool(datos["tools"]), vision=bool(datos["vision"]),
+                       contexto=int(datos["contexto"]), max_salida=int(datos["max_salida"]))
+
+
 def cargar(ruta_yaml: str, entorno: dict) -> list[Proveedor]:
     with open(ruta_yaml, encoding="utf-8") as f:
         datos = yaml.safe_load(f)
@@ -47,6 +65,7 @@ def cargar(ruta_yaml: str, entorno: dict) -> list[Proveedor]:
         cabeceras_extra=p.get("cabeceras_extra", {}) or {},
         modelos_fijos=p.get("modelos_fijos", []) or [],
         prioridad=int(p.get("prioridad", 100)),
+        capacidades_por_defecto=_capacidades_por_defecto(p),
     ) for p in datos["proveedores"]]
 
 
