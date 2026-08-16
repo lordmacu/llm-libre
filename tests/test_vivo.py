@@ -53,6 +53,42 @@ async def test_chatgpt_proxy_responde_un_chat_real_si_esta_configurado():
     assert all(x.capacidades.tools is False for x in rutas)
 
 
+async def test_chatgpt_proxy_no_hace_function_calling_de_verdad():
+    # El hecho que sostiene tools:false en proveedores.yaml: el usuario
+    # reporto "ya tenemos los tools habilitados" y esto se verifico
+    # ejecutando (no releyendo) -- el proxy ya NO devuelve HTTP 500 al
+    # mandarle tools, pero con tool_choice:"required" sigue devolviendo
+    # tool_calls:None y prosa. Hasta ahora ese hecho solo se habia
+    # verificado a mano; este test lo deja ejecutable contra el proxy real,
+    # asi no se desactualiza en silencio si el backend cambia de
+    # comportamiento.
+    url = os.getenv("CHATGPT_PROXY_URL")
+    if not url:
+        pytest.skip("CHATGPT_PROXY_URL no esta configurada")
+    from llm_libre.bateria import HERRAMIENTA
+    from llm_libre.proveedores import cargar
+
+    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": url}) if p.id == "chatgpt")
+
+    async with httpx.AsyncClient(timeout=60) as c:
+        r = await c.post(chatgpt.base_url.rstrip("/") + "/chat/completions",
+                         json={"model": "gpt-5-3-mini",
+                               "messages": [{"role": "user",
+                                            "content": "Que clima hace en Bogota?"}],
+                               "tools": [HERRAMIENTA], "tool_choice": "required"})
+    # Mandarle tools ya no revienta (eso cambio, y esta bien): lo que se
+    # verifica es que la RESPUESTA sigue sin ser function calling de
+    # verdad -- si esto alguna vez empieza a devolver tool_calls, hay que
+    # revisar si tools:false sigue siendo necesario.
+    assert r.status_code == 200, "chatgpt-proxy revento al mandarle tools (volvio el 500 viejo?)"
+    msg = r.json()["choices"][0]["message"]
+    assert not msg.get("tool_calls"), (
+        "chatgpt-proxy devolvio tool_calls: si esto paso, el backend anonimo "
+        "empezo a soportar function calling de verdad y tools:false en "
+        "proveedores.yaml deberia reconsiderarse")
+    assert isinstance(msg.get("content"), str) and msg["content"].strip()
+
+
 async def test_kilo_sigue_aceptando_peticiones_anonimas():
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post("https://api.kilo.ai/api/gateway/chat/completions",
