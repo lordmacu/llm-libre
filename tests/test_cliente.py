@@ -55,3 +55,32 @@ def test_cuerpo_es_copia_somera_no_muta_original():
     # (b) Las estructuras anidadas se comparten intencionalmente (identidad)
     assert devuelto["messages"] is original["messages"]
     assert devuelto["messages"] is messages
+
+
+# --- Fix round 3, I6: las extensiones del gateway no viajan al proveedor.
+#     Kilo las tolera; un servidor mas estricto no tiene por que, y el caso mas
+#     feo es que `x_permitir_pago: false` -- el campo cuyo trabajo es EVITAR
+#     gasto -- sea justo el que haga que el fallback de pago rechace la
+#     peticion. ---
+
+def test_no_reenvia_las_extensiones_del_gateway_al_proveedor():
+    original = {"model": "auto", "messages": [], "x_requiere": ["tools"],
+                "x_min_contexto": 100000, "x_permitir_pago": False, "x_crudo": True}
+    _, _, cuerpo = armar_peticion(_prov(), original, modelo_real="real")
+    assert "x_requiere" not in cuerpo
+    assert "x_min_contexto" not in cuerpo
+    assert "x_permitir_pago" not in cuerpo
+    assert "x_crudo" not in cuerpo
+    assert cuerpo["model"] == "real" and "messages" in cuerpo
+    # Y el original no se toca: la cadena de failover lo vuelve a usar.
+    assert "x_permitir_pago" in original
+
+
+def test_deja_pasar_cualquier_otro_campo_desconocido():
+    # Solo se sacan las extensiones que son de ESTE gateway. Lo que el cliente
+    # mande para el proveedor (parametros nuevos de la api de turno) sigue
+    # viajando: el contrato es passthrough.
+    _, _, cuerpo = armar_peticion(_prov(), {"model": "x", "reasoning": {"enabled": False},
+                                            "provider": {"sort": "throughput"}})
+    assert cuerpo["reasoning"] == {"enabled": False}
+    assert cuerpo["provider"] == {"sort": "throughput"}

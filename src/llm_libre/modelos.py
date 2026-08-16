@@ -7,6 +7,16 @@ CONFIABILIDAD_NEUTRA = 0.8
 TTFT_NEUTRO_MS = 1500.0
 
 
+# Las extensiones propias de ESTE gateway (§6 del diseno). Se interpretan aca y
+# NO se reenvian al proveedor: son vocabulario interno, y un servidor estricto
+# puede rechazar un cuerpo con campos que no conoce. El caso mas feo es
+# `x_permitir_pago: false`, el campo cuyo trabajo es evitar gasto, siendo justo
+# el que haga que el escalon de pago rechace la peticion.
+EXTENSIONES_GATEWAY = frozenset({
+    "x_requiere", "x_min_contexto", "x_permitir_pago", "x_crudo",
+})
+
+
 @dataclass(frozen=True)
 class Capacidades:
     tools: bool
