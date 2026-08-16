@@ -119,3 +119,57 @@ async def test_registra_un_evento_por_intento():
     await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
     filas = p.almacen._con.execute("SELECT clave, ok FROM eventos").fetchall()
     assert filas == [("kilo/a:free", 1)]
+
+
+async def test_un_200_con_cuerpo_invalido_no_revienta_y_cae_a_503():
+    p = _proxy(lambda req: httpx.Response(200, content=b"not json{{{"))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.estado == 503
+    # No es rate-limit: la ruta rota no debe quedar castigada.
+    assert "kilo/a:free" not in p.cooldowns
+
+
+async def test_un_200_con_cuerpo_invalido_pasa_a_la_siguiente_ruta():
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(req.url)
+        if len(llamadas) == 1:
+            return httpx.Response(200, content=b"not json{{{")
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
+    assert r.estado == 200
+    assert r.ruta.modelo_id == "b:free"
+    assert r.intentos == 2
+
+
+async def test_proxima_liberacion_no_incluye_cooldowns_de_otro_pedido():
+    import json as jsonlib
+
+    def handler(req):
+        modelo = jsonlib.loads(req.content)["model"]
+        return httpx.Response(429) if modelo == "z:free" else httpx.Response(500)
+
+    p = _proxy(handler)
+    # Un pedido anterior, por rutas totalmente distintas, castiga a z:free.
+    await p.completar([_ruta("z:free")], CUERPO, ahora=0.0)
+    assert p.cooldowns["kilo/z:free"] > 0.0
+
+    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=10.0)
+    assert r.estado == 503
+    assert r.json["error"]["proxima_liberacion"] is None
+
+
+async def test_proxima_liberacion_reporta_la_mas_cercana_de_esta_cadena():
+    p = _proxy(lambda req: httpx.Response(429))
+    # kilo/a:free ya trae un 429 previo, asi que en la proxima ronda su cooldown
+    # crece mas que el de kilo/b:free, que apenas cae por primera vez.
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    primero_de_a = p.cooldowns["kilo/a:free"]
+
+    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=primero_de_a)
+    assert r.estado == 503
+    assert p.cooldowns["kilo/b:free"] < p.cooldowns["kilo/a:free"]
+    assert r.json["error"]["proxima_liberacion"] == p.cooldowns["kilo/b:free"]

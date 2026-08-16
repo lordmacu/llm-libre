@@ -33,6 +33,7 @@ class Proxy:
                         crudo: bool = False) -> Respuesta:
         intentos = 0
         ultimo_error = None
+        claves_del_pedido = {ruta.clave for ruta in rutas}
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
@@ -45,12 +46,25 @@ class Proxy:
             except httpx.HTTPError as e:
                 codigo, resp, ultimo_error = 0, None, str(e)
             ttft = int((time.monotonic() - t0) * 1000)
-            self.almacen.registrar_evento(ruta.clave, codigo == 200, ttft, codigo, ahora)
 
+            # Un 200 con cuerpo no parseable (p.ej. una pagina de mantenimiento
+            # HTML servida con status 200) no es un exito: se trata como intento
+            # fallido, sin excepcion escapando y sin castigo (no es rate-limit,
+            # esta rota).
+            datos = None
             if codigo == 200:
+                try:
+                    datos = resp.json()
+                except ValueError:
+                    datos = None
+                    ultimo_error = "200 con cuerpo no-JSON"
+
+            exito = codigo == 200 and datos is not None
+            self.almacen.registrar_evento(ruta.clave, exito, ttft, codigo, ahora)
+
+            if exito:
                 self._castigos.pop(ruta.clave, None)
                 self.cooldowns.pop(ruta.clave, None)
-                datos = resp.json()
                 razon = "" if crudo else self._limpiar(datos)
                 return Respuesta(200, datos, ruta, intentos, razon)
 
@@ -58,10 +72,16 @@ class Proxy:
                 self._castigar(ruta.clave, ahora)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
 
+        # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
+        # mas alla de una sola llamada y puede tener castigadas rutas ajenas a
+        # esta cadena, cuyo vencimiento no le sirve de nada al que esta pidiendo.
+        cooldowns_del_pedido = {c: v for c, v in self.cooldowns.items()
+                                if c in claves_del_pedido}
         return Respuesta(503, {"error": {
             "message": "sin rutas disponibles",
             "detalle": ultimo_error,
-            "proxima_liberacion": min(self.cooldowns.values()) if self.cooldowns else None,
+            "proxima_liberacion": (min(cooldowns_del_pedido.values())
+                                   if cooldowns_del_pedido else None),
         }}, None, intentos)
 
     def _castigar(self, clave: str, ahora: float) -> None:
