@@ -145,6 +145,90 @@ async def test_un_200_con_cuerpo_invalido_pasa_a_la_siguiente_ruta():
     assert r.intentos == 2
 
 
+# --- Fix round 3, B1 (Blocking): un 200 que no trae respuesta adentro no es un
+#     exito. La mayoria de los modelos gratis son de razonamiento: se gastan el
+#     presupuesto pensando y devuelven 200 con finish_reason "length" y
+#     "content": null. Contarlo como exito SUBE la confiabilidad de esa ruta,
+#     deja /health en "ok" y no hace failover: el cliente recibe una respuesta
+#     vacia como si fuera la respuesta. ---
+
+def _vacia(finish="length"):
+    """El 200 real que devuelve un modelo de razonamiento que se quedo sin
+    presupuesto: content null, sin tool_calls."""
+    return {"choices": [{"message": {"role": "assistant", "content": None},
+                         "finish_reason": finish}]}
+
+
+async def test_un_200_sin_contenido_no_cuenta_como_exito():
+    p = _proxy(lambda req: httpx.Response(200, json=_vacia()))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.estado == 503
+    assert r.ruta is None
+    # No es rate-limit: la ruta no debe quedar castigada, igual que con un
+    # cuerpo no-JSON.
+    assert "kilo/a:free" not in p.cooldowns
+
+
+async def test_un_200_sin_contenido_pasa_a_la_siguiente_ruta():
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(req.url)
+        if len(llamadas) == 1:
+            return httpx.Response(200, json=_vacia())
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
+    assert r.estado == 200
+    assert r.ruta.modelo_id == "b:free"
+    assert r.intentos == 2
+
+
+async def test_un_200_sin_contenido_se_registra_como_evento_fallido():
+    # El corazon del hallazgo: si esto se registra con ok=1, la ruta que
+    # devuelve vacio SUBE su confiabilidad cada vez que falla.
+    p = _proxy(lambda req: httpx.Response(200, json=_vacia()))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    filas = p.almacen._con.execute("SELECT clave, ok FROM eventos").fetchall()
+    assert filas == [("kilo/a:free", 0)]
+
+
+async def test_un_200_con_contenido_en_blanco_tampoco_cuenta_como_exito():
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("   \n ")))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.estado == 503
+
+
+async def test_un_200_con_solo_tool_calls_sigue_siendo_exito():
+    # Caso legitimo que NO debe romperse: una respuesta de function calling
+    # trae content null y toda la carga util en tool_calls.
+    datos = {"choices": [{"message": {
+        "role": "assistant", "content": None,
+        "tool_calls": [{"id": "call_1", "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{}"}}]}}]}
+    p = _proxy(lambda req: httpx.Response(200, json=datos))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.estado == 200
+    assert r.ruta.modelo_id == "a:free"
+
+
+async def test_un_200_que_es_todo_razonamiento_no_cuenta_como_exito():
+    # Lo que el cliente ve es lo que decide: si tras recortar el <think> no
+    # queda nada, la ruta no respondio nada.
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>pienso y pienso</think>")))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.estado == 503
+
+
+async def test_en_modo_crudo_un_200_de_puro_razonamiento_sigue_siendo_exito():
+    # Con x_crudo el cliente pidio el contenido tal cual: ahi SI hay respuesta.
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>pienso</think>")))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0, crudo=True)
+    assert r.estado == 200
+    assert r.json["choices"][0]["message"]["content"] == "<think>pienso</think>"
+
+
 async def test_proxima_liberacion_no_incluye_cooldowns_de_otro_pedido():
     import json as jsonlib
 

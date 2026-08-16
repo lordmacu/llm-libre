@@ -13,6 +13,46 @@ COOLDOWN_BASE_S = 60.0
 COOLDOWN_TOPE_S = 3600.0
 TIMEOUT_S = 90.0
 
+# Cuantos chunks sin nada util (role inicial, finish_reason, razonamiento
+# filtrado) se retienen antes de soltarlos. Existe para que un stream que
+# TODAVIA no entrego contenido pueda hacer failover limpio -- si esos chunks ya
+# hubieran salido, cambiar de ruta mezclaria dos respuestas. Un stream que solo
+# escupe razonamiento puede ser larguisimo, asi que la retencion tiene tope.
+TOPE_PENDIENTES = 64
+
+
+def hay_respuesta(datos: dict) -> bool:
+    """True si un 200 trae algo que el cliente pueda usar como respuesta.
+
+    La mayoria de los modelos gratis son de razonamiento: se gastan el
+    presupuesto de la completion pensando y devuelven `200` con
+    `finish_reason: "length"` y `"content": null`. Sin este chequeo eso se
+    registra como EXITO, con lo cual la ruta que falla SUBE su confiabilidad,
+    `/health` la sigue contando viva y el cliente recibe la respuesta vacia en
+    vez de un failover.
+
+    `tool_calls` cuenta como respuesta: una llamada a herramienta legitima
+    viaja con `content: null` y toda la carga util ahi. Se exige por VERDAD del
+    valor (no por presencia) porque en el mensaje FINAL de una respuesta no
+    streaming, `tool_calls: []` significa literalmente "no llame a ninguna
+    herramienta" -- al reves que en los deltas de streaming, donde la presencia
+    de la clave ya es senal.
+    """
+    if not isinstance(datos, dict):
+        return False
+    for eleccion in datos.get("choices") or []:
+        if not isinstance(eleccion, dict):
+            continue
+        msg = eleccion.get("message") or {}
+        if not isinstance(msg, dict):
+            continue
+        contenido = msg.get("content")
+        if isinstance(contenido, str) and contenido.strip():
+            return True
+        if msg.get("tool_calls"):
+            return True
+    return False
+
 
 @dataclass
 class Respuesta:
@@ -61,13 +101,25 @@ class Proxy:
                     datos = None
                     ultimo_error = "200 con cuerpo no-JSON"
 
+            # Mismo lugar y mismo trato que el guard de arriba: un 200 que no
+            # trae respuesta adentro tampoco es un exito. El recorte del
+            # razonamiento va ANTES de decidirlo porque lo que cuenta es lo que
+            # el cliente va a ver: si tras sacar el <think> no queda nada, esa
+            # ruta no respondio (salvo en modo crudo, donde el texto crudo ES
+            # la respuesta pedida).
+            razon = ""
+            if datos is not None:
+                razon = "" if crudo else self._limpiar(datos)
+                if not hay_respuesta(datos):
+                    datos = None
+                    ultimo_error = "200 sin contenido ni tool_calls"
+
             exito = codigo == 200 and datos is not None
             self.almacen.registrar_evento(ruta.clave, exito, ttft, codigo, ahora)
 
             if exito:
                 self._castigos.pop(ruta.clave, None)
                 self.cooldowns.pop(ruta.clave, None)
-                razon = "" if crudo else self._limpiar(datos)
                 return Respuesta(200, datos, ruta, intentos, razon)
 
             if codigo == 429:
@@ -112,21 +164,26 @@ class Proxy:
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
             payload["stream"] = True
             t0 = time.monotonic()
-            emitido = False          # ya salio algun chunk util hacia el cliente
+            emitido = False          # ya salio algun chunk hacia el cliente
+            util = False             # ...y al menos uno traia contenido o tool_calls
             evento_registrado = False  # ya se conto la telemetria de este intento
 
             def _registrar_exito_una_vez() -> None:
                 # Exactamente un evento por intento, nunca cero ni dos: se
-                # dispara la primera vez que hay algo util que mandar (asi el
-                # ttft mide el primer token real, no el cierre del stream) o,
-                # si nunca hubo nada util, al terminar el intento igual (mas
-                # abajo) para no desaparecer de la historia de la ruta.
+                # dispara la primera vez que hay algo UTIL que mandar (asi el
+                # ttft mide el primer token real, no el cierre del stream). Si
+                # nunca hubo nada util el intento se cierra abajo con un evento
+                # FALLIDO, no con este: un 200 que no entrega contenido ni
+                # tool_calls no sirvio a nadie, y contarlo como exito le sube
+                # la confiabilidad a la ruta que acaba de fallar.
                 nonlocal evento_registrado
                 if not evento_registrado:
                     self.almacen.registrar_evento(
                         ruta.clave, True, int((time.monotonic() - t0) * 1000),
                         200, ahora)
                     evento_registrado = True
+                    self._castigos.pop(ruta.clave, None)
+                    self.cooldowns.pop(ruta.clave, None)
                     if en_ruta_comprometida is not None:
                         en_ruta_comprometida(ruta)
 
@@ -139,9 +196,12 @@ class Proxy:
                         self.almacen.registrar_evento(ruta.clave, False, 0,
                                                       resp.status_code, ahora)
                         continue
-                    self._castigos.pop(ruta.clave, None)
-                    self.cooldowns.pop(ruta.clave, None)
                     rec = RecortadorStream()
+                    # Chunks recibidos que todavia no llevan nada util. Se
+                    # retienen (no se emiten) hasta que llegue el primero que
+                    # SI: mientras nada haya salido, el failover sigue siendo
+                    # limpio. Ver TOPE_PENDIENTES.
+                    pendientes: list[str] = []
                     async for linea in resp.aiter_lines():
                         if not linea.startswith("data:"):
                             continue
@@ -153,32 +213,71 @@ class Proxy:
                         except json.JSONDecodeError:
                             continue
                         delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                        # Un chunk de tool_calls (o el de role inicial) suele
+                        # viajar con content="": miramos la PRESENCIA de otras
+                        # claves, no su valor, porque algo como "tool_calls": []
+                        # (valor falsy pero presente) igual es util para el
+                        # cliente y no se puede tirar junto con el contenido.
+                        otras = {k: v for k, v in delta.items() if k != "content"}
                         if not crudo and isinstance(delta.get("content"), str):
-                            limpio = rec.alimentar(delta["content"])
-                            # Un chunk de tool_calls (o el de role inicial) suele
-                            # viajar con content="": miramos la PRESENCIA de otras
-                            # claves, no su valor, porque algo como "tool_calls": []
-                            # (valor falsy pero presente) igual es util para el
-                            # cliente y no se puede tirar junto con el contenido.
-                            otras = {k: v for k, v in delta.items() if k != "content"}
-                            if not limpio and not otras:
-                                continue    # nada util que mandar en este chunk
-                            delta["content"] = limpio
+                            delta["content"] = rec.alimentar(delta["content"])
+                        contenido = delta.get("content")
+                        hay_texto = isinstance(contenido, str) and bool(contenido.strip())
+                        trozo = f"data: {json.dumps(obj)}\n\n"
+                        if not hay_texto and "tool_calls" not in delta:
+                            # Nada util TODAVIA. Lo estructural (role,
+                            # finish_reason, razonamiento del proveedor) se
+                            # guarda para soltarlo junto al primer chunk util;
+                            # un chunk que ya no tiene nada mas se descarta.
+                            if not otras:
+                                continue
+                            pendientes.append(trozo)
+                            if len(pendientes) > TOPE_PENDIENTES:
+                                # Retener sin limite un stream que solo escupe
+                                # razonamiento seria una fuga de memoria: se
+                                # sueltan (se pierde el failover limpio) pero
+                                # el intento sigue contando como fallido si
+                                # nunca llega contenido de verdad.
+                                for p in pendientes:
+                                    yield p
+                                pendientes.clear()
+                                emitido = True
+                            continue
                         _registrar_exito_una_vez()
+                        util = True
+                        for p in pendientes:
+                            yield p
+                        pendientes.clear()
                         emitido = True
-                        yield f"data: {json.dumps(obj)}\n\n"
+                        yield trozo
                     resto = rec.cerrar()
-                    if resto:
+                    if resto.strip():
                         _registrar_exito_una_vez()
+                        util = True
+                        for p in pendientes:
+                            yield p
+                        pendientes.clear()
                         emitido = True
                         yield ('data: {"choices":[{"delta":{"content":%s}}]}\n\n'
                                % json.dumps(resto))
-                    # La conexion funciono (200, stream leido sin excepcion) aunque
-                    # nunca hubiera nada util que mandar (p.ej. todo era
-                    # razonamiento filtrado): sigue siendo un intento exitoso a
-                    # nivel HTTP, y sin este registro la ruta desaparece por
-                    # completo de su propia historia de confiabilidad.
-                    _registrar_exito_una_vez()
+                    if not util:
+                        # 200 que nunca entrego contenido ni tool_calls: el
+                        # mismo agujero que arriba, del lado del streaming. La
+                        # conexion funciono a nivel HTTP, pero el cliente se
+                        # queda sin respuesta -- se registra como intento
+                        # FALLIDO y se cae a la siguiente ruta.
+                        if not evento_registrado:
+                            self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
+                            evento_registrado = True
+                        if emitido:
+                            # Ya se solto lo retenido (ver TOPE_PENDIENTES): no
+                            # se puede empalmar otra ruta encima sin mezclar
+                            # dos respuestas.
+                            yield "data: [DONE]\n\n"
+                            return
+                        continue
+                    for p in pendientes:     # p.ej. el chunk final de finish_reason
+                        yield p
                     yield "data: [DONE]\n\n"
                     return
             except httpx.HTTPError:

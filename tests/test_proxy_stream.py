@@ -131,13 +131,19 @@ async def test_no_descarta_un_chunk_de_tool_calls_con_contenido_vacio():
 
 
 async def test_no_descarta_un_chunk_con_finish_reason_y_contenido_vacio():
-    cuerpo = (b'data: {"choices":[{"delta":{"content":"","finish_reason":"stop"}}]}\n\n'
+    # El chunk final de un stream normal trae content vacio y solo
+    # finish_reason: no debe perderse. (Fix round 3, B1: antes este test
+    # mandaba SOLO ese chunk, un stream sin ninguna respuesta adentro, que hoy
+    # cuenta como intento fallido -- por eso ahora va precedido de contenido
+    # real, que es la forma en que el caso ocurre de verdad.)
+    cuerpo = (b'data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'
+             b'data: {"choices":[{"delta":{"content":"","finish_reason":"stop"}}]}\n\n'
              b'data: [DONE]\n\n')
     p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
     lineas = [l async for l in p.completar_stream([_ruta()], CUERPO, 0.0)]
     utiles = [l for l in lineas if "[DONE]" not in l]
-    assert len(utiles) == 1
-    obj = json.loads(utiles[0][len("data: "):])
+    assert len(utiles) == 2
+    obj = json.loads(utiles[-1][len("data: "):])
     assert obj["choices"][0]["delta"]["finish_reason"] == "stop"
 
 
@@ -178,15 +184,84 @@ async def test_no_descarta_un_chunk_con_tool_calls_vacio_pero_presente():
     assert obj["choices"][0]["delta"]["tool_calls"] == []
 
 
-async def test_stream_de_puro_razonamiento_registra_un_evento_exitoso():
-    # Ningun chunk sobrevive al filtro (todo es <think>...</think> cerrado, sin
-    # tool_calls/finish_reason/role) asi que el `if not evento_registrado` de
-    # dentro del bucle nunca se dispara. Igual debe quedar UN evento con ok=1:
-    # la llamada HTTP si funciono.
+async def test_stream_de_puro_razonamiento_registra_un_evento_fallido():
+    # Fix round 3, B1 (Blocking). Este test afirmaba lo contrario: que un
+    # stream que no entrega NADA util igual cuenta como exito porque "la
+    # llamada HTTP si funciono". Eso es justo el agujero: el cliente se queda
+    # sin respuesta mientras la confiabilidad de la ruta SUBE, /health sigue en
+    # "ok" y no hay failover. Lo que cuenta como exito es haber entregado
+    # contenido o tool_calls, no haber recibido un 200.
     p = _proxy(lambda req: httpx.Response(
         200, content=_sse("<think>solo razonamiento</think>")))
     texto = await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0))
     assert texto == ""
+    filas = p.almacen._con.execute("SELECT ok FROM eventos").fetchall()
+    assert filas == [(0,)]
+
+
+async def test_un_stream_sin_contenido_util_hace_failover():
+    # El 200 vacio de un modelo de razonamiento en streaming: chunks de role y
+    # de finish_reason, ni una letra de contenido. Debe caer a la ruta
+    # siguiente, no cerrarse con [DONE] como si hubiera respondido.
+    llamadas = []
+    vacio = (b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
+             b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+             b'data: [DONE]\n\n')
+
+    def handler(req):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            return httpx.Response(200, content=vacio)
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    texto = await _juntar(p.completar_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
+    assert texto == "bien"
+    assert len(llamadas) == 2
+
+
+async def test_un_stream_sin_contenido_util_registra_fallo_en_esa_ruta():
+    vacio = (b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
+             b'data: [DONE]\n\n')
+
+    def handler(req):
+        if "a:free" in req.content.decode():
+            return httpx.Response(200, content=vacio)
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    await _juntar(p.completar_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
+    filas = p.almacen._con.execute(
+        "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
+    assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
+
+
+async def test_un_stream_de_solo_tool_calls_sigue_contando_como_exito():
+    # Caso legitimo que NO debe romperse: un stream de function calling puede
+    # no traer ni una letra de content.
+    cuerpo = (b'data: {"choices":[{"delta":{"role":"assistant","content":"",'
+              b'"tool_calls":[{"index":0,"id":"c1","function":{"name":"buscar"}}]}}]}\n\n'
+              b'data: [DONE]\n\n')
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(1)
+        return httpx.Response(200, content=cuerpo)
+
+    p = _proxy(handler)
+    lineas = [l async for l in p.completar_stream([_ruta("a:free"), _ruta("b:free")],
+                                                  CUERPO, 0.0)]
+    assert len(llamadas) == 1          # no hubo failover
+    assert any("buscar" in l for l in lineas)
+    filas = p.almacen._con.execute("SELECT ok FROM eventos").fetchall()
+    assert filas == [(1,)]
+
+
+async def test_un_stream_crudo_de_puro_razonamiento_sigue_siendo_exito():
+    # Con x_crudo el cliente pidio el texto tal cual: el <think> ES la respuesta.
+    p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>")))
+    texto = await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0, crudo=True))
+    assert texto == "<think>mmm</think>"
     filas = p.almacen._con.execute("SELECT ok FROM eventos").fetchall()
     assert filas == [(1,)]
 
