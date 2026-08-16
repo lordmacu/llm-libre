@@ -136,15 +136,21 @@ async def test_no_descarta_un_chunk_con_finish_reason_y_contenido_vacio():
     # mandaba SOLO ese chunk, un stream sin ninguna respuesta adentro, que hoy
     # cuenta como intento fallido -- por eso ahora va precedido de contenido
     # real, que es la forma en que el caso ocurre de verdad.)
-    cuerpo = (b'data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'
-             b'data: {"choices":[{"delta":{"content":"","finish_reason":"stop"}}]}\n\n'
+    #
+    # Fix round 4, N2: ademas usaba una forma que el protocolo real de OpenAI
+    # NO produce -- `finish_reason` DENTRO del delta. En el protocolo real es
+    # HERMANO de `delta`, y con esa forma el chunk se estaba perdiendo. Por eso
+    # el bug paso desapercibido: el unico test que lo cubria no usaba la forma
+    # de verdad. Ahora si.
+    cuerpo = (b'data: {"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
+             b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
              b'data: [DONE]\n\n')
     p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
     lineas = [l async for l in p.completar_stream([_ruta()], CUERPO, 0.0)]
     utiles = [l for l in lineas if "[DONE]" not in l]
     assert len(utiles) == 2
     obj = json.loads(utiles[-1][len("data: "):])
-    assert obj["choices"][0]["delta"]["finish_reason"] == "stop"
+    assert obj["choices"][0]["finish_reason"] == "stop"   # hermano de delta
 
 
 async def test_no_hace_failover_si_la_conexion_se_corta_despues_de_emitir():
@@ -338,3 +344,68 @@ async def test_un_stream_de_puros_espacios_no_es_una_respuesta():
     p = _proxy(handler)
     assert await _juntar(p.completar_stream([_ruta("a:free"), _ruta("b:free")],
                                             CUERPO, 0.0)) == "bien"
+
+
+# --- Fix round 4, N2: el guard de "chunk sin nada util" solo miraba dentro de
+#     `delta`. En el protocolo real de OpenAI, `finish_reason` es HERMANO de
+#     `delta` y el chunk de `usage` viene con `choices: []`, asi que los dos
+#     se estaban descartando en silencio. No mordia con Kilo ni OpenRouter
+#     porque ambos meten `role` en cada delta, pero si muerde con cualquier
+#     proveedor estricto -- el dialecto OpenAI de MiniMax, o los Groq/Cerebras
+#     que el diseno planea sumar. Perdida silenciosa de datos en un contrato
+#     cuya premisa entera es "cambia solo base_url". ---
+
+SOBRE = '"id":"c1","object":"chat.completion.chunk","created":1,"model":"m"'
+
+
+async def test_no_pierde_el_chunk_final_real_de_openai():
+    cuerpo = (b'data: {' + SOBRE.encode() +
+              b',"choices":[{"index":0,"delta":{"role":"assistant","content":"hola"}}]}\n\n'
+              b'data: {' + SOBRE.encode() +
+              b',"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+              b'data: [DONE]\n\n')
+    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
+    lineas = [l async for l in p.completar_stream([_ruta()], CUERPO, 0.0)]
+    assert any('"finish_reason": "stop"' in l or '"finish_reason":"stop"' in l
+               for l in lineas), "se perdio el chunk de finish_reason"
+
+
+async def test_no_pierde_el_chunk_de_usage():
+    # stream_options.include_usage manda un chunk final con choices vacio.
+    cuerpo = (b'data: {' + SOBRE.encode() +
+              b',"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
+              b'data: {' + SOBRE.encode() +
+              b',"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,'
+              b'"total_tokens":4}}\n\n'
+              b'data: [DONE]\n\n')
+    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
+    lineas = [l async for l in p.completar_stream([_ruta()], CUERPO, 0.0)]
+    assert any("total_tokens" in l for l in lineas), "se perdio el chunk de usage"
+
+
+async def test_el_sobre_repetido_no_convierte_en_util_a_un_chunk_de_razonamiento():
+    # La contracara: si "trae algo mas que content" se midiera sobre el chunk
+    # entero, las claves de sobre (id/object/created/model/index) -- que se
+    # repiten IDENTICAS en cada chunk -- harian que todo chunk de razonamiento
+    # ya recortado pareciera util. El stream de puro razonamiento dejaria de
+    # hacer failover (regresion de B1) y el buffer se llenaria al pedo.
+    razonar = b"".join(
+        b'data: {' + SOBRE.encode() +
+        b',"choices":[{"index":0,"delta":{"content":"' + t + b'"}}]}\n\n'
+        for t in (b"<think>", b"pienso ", b"y pienso", b"</think>"))
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            return httpx.Response(200, content=razonar + b"data: [DONE]\n\n")
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    texto = await _juntar(p.completar_stream([_ruta("a:free"), _ruta("b:free")],
+                                             CUERPO, 0.0))
+    assert texto == "bien"
+    assert len(llamadas) == 2
+    filas = p.almacen._con.execute(
+        "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
+    assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]

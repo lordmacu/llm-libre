@@ -20,6 +20,28 @@ TIMEOUT_S = 90.0
 # escupe razonamiento puede ser larguisimo, asi que la retencion tiene tope.
 TOPE_PENDIENTES = 64
 
+# Claves de SOBRE de un chunk SSE: las que se repiten identicas (o triviales) en
+# cada chunk del stream y no aportan informacion propia. Existen para poder
+# preguntar "aparte del texto, este chunk trae algo?" mirando el chunk ENTERO
+# sin que el sobre conteste que si siempre.
+#
+# Hace falta mirar el chunk entero porque en el protocolo real de OpenAI
+# `finish_reason` es HERMANO de `delta`, no una clave adentro, y el chunk de
+# `usage` (stream_options.include_usage) llega con `choices: []`. Un guard que
+# solo mirara `delta` los descarta a los dos en silencio -- que es perdida de
+# datos en un contrato cuya premisa es "cambia solo base_url". No mordia con
+# Kilo ni OpenRouter porque ambos mandan `role` en cada delta, pero si muerde
+# con un proveedor estricto (el dialecto OpenAI de MiniMax, o los Groq/Cerebras
+# que el diseno planea sumar).
+#
+# Y hace falta EXCLUIR el sobre porque, si contara, cada chunk de razonamiento
+# ya recortado pareceria util por traer `id`/`model`/`index`: el stream de puro
+# razonamiento dejaria de hacer failover (regresion del fix B1) y la retencion
+# se llenaria de basura.
+_SOBRE_CHUNK = frozenset({"id", "object", "created", "model",
+                          "system_fingerprint", "service_tier"})
+_SOBRE_ELECCION = frozenset({"index"})
+
 
 def hay_respuesta(datos: dict) -> bool:
     """True si un 200 trae algo que el cliente pueda usar como respuesta.
@@ -232,13 +254,26 @@ class Proxy:
                             obj = json.loads(carga)
                         except json.JSONDecodeError:
                             continue
-                        delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                        eleccion = (obj.get("choices") or [{}])[0]
+                        if not isinstance(eleccion, dict):
+                            eleccion = {}
+                        delta = eleccion.get("delta") or {}
                         # Un chunk de tool_calls (o el de role inicial) suele
                         # viajar con content="": miramos la PRESENCIA de otras
                         # claves, no su valor, porque algo como "tool_calls": []
                         # (valor falsy pero presente) igual es util para el
                         # cliente y no se puede tirar junto con el contenido.
-                        otras = {k: v for k, v in delta.items() if k != "content"}
+                        #
+                        # Se mira el chunk ENTERO, en sus tres niveles, salteando
+                        # las claves de sobre (ver _SOBRE_CHUNK/_SOBRE_ELECCION):
+                        # `finish_reason` vive al lado de `delta` y `usage` al
+                        # nivel superior, y mirando solo `delta` los dos se
+                        # perdian.
+                        otras = ({k for k in delta if k != "content"}
+                                 | {k for k in eleccion
+                                    if k != "delta" and k not in _SOBRE_ELECCION}
+                                 | {k for k in obj
+                                    if k != "choices" and k not in _SOBRE_CHUNK})
                         if not crudo and isinstance(delta.get("content"), str):
                             delta["content"] = rec.alimentar(delta["content"])
                         contenido = delta.get("content")
