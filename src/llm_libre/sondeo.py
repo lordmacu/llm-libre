@@ -35,12 +35,32 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
         try:
             r = await http.get(p.base_url.rstrip("/") + p.modelos_path,
                                headers=cabeceras, timeout=30.0)
-            if r.status_code != 200:
-                fallo = True
-                continue
-            descubiertas.extend(normalizar(p.id, r.json()))
         except httpx.HTTPError:
             fallo = True
+            continue
+        if r.status_code != 200:
+            fallo = True
+            continue
+        try:
+            nuevas = normalizar(p.id, r.json())
+        except (ValueError, TypeError, AttributeError, KeyError):
+            # Cuerpo no-JSON (ValueError/JSONDecodeError) o JSON de una forma
+            # inesperada -- p.ej. un error de auth disfrazado de 200, que deja
+            # a normalizar() iterando algo que no son dicts de modelo
+            # (AttributeError/KeyError/TypeError). Un proveedor roto no debe
+            # tirar abajo la sincronizacion de los demas.
+            fallo = True
+            continue
+        if not nuevas:
+            # Un 200 con cero modelos utilizables es mucho mas probablemente un
+            # proveedor roto (o momentaneamente sin catalogo) que la verdad: un
+            # proveedor que normalmente sirve modelos y de golpe no reporta
+            # ninguno no merece borrar lo que ya se sabia de el. Se trata igual
+            # que cualquier otro fallo de ESTE proveedor -- no afecta a los
+            # demas, que se siguen procesando y persistiendo normalmente.
+            fallo = True
+            continue
+        descubiertas.extend(nuevas)
     if fallo and not descubiertas:
         return 0
     # Si un proveedor fallo no se desactiva nada (desactivar_faltantes=False):

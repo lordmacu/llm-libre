@@ -1,4 +1,6 @@
 import json
+import re
+import unicodedata
 from dataclasses import dataclass
 from typing import Callable
 
@@ -42,6 +44,12 @@ def _ok_json(r: dict) -> bool:
     return isinstance(obj, dict) and {"ciudad", "pais"} <= set(obj)
 
 
+def _sin_acentos(s: str) -> str:
+    # NFKD separa cada letra acentuada en (letra base, marca combinante);
+    # descartar las marcas deja "Bogota" y "Bogotá" iguales para comparar.
+    return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
 def _ok_tools(r: dict) -> bool:
     llamadas = _tool_calls(r)
     if not llamadas:
@@ -50,14 +58,20 @@ def _ok_tools(r: dict) -> bool:
     if f.get("name") != "get_weather":
         return False
     try:
-        return "bogota" in json.loads(f.get("arguments") or "{}").get("city", "").lower()
+        ciudad = json.loads(f.get("arguments") or "{}").get("city", "")
     except (json.JSONDecodeError, ValueError):
         return False
+    return "bogota" in _sin_acentos(ciudad).lower()
+
+
+# Palabras funcionales del espanol, exigidas como palabra COMPLETA (\b...\b):
+# un chequeo por subcadena (el que habia antes) deja pasar ingles como
+# "The buses arrive at noon." porque "buses " contiene la subcadena "es ".
+_PALABRAS_ESPANOL = re.compile(r"\b(el|la|es|un|una)\b", re.IGNORECASE)
 
 
 def _ok_espanol(r: dict) -> bool:
-    t = _texto(r).lower()
-    return any(p in t for p in ("el ", "la ", "es ", "un ", "una "))
+    return _PALABRAS_ESPANOL.search(_texto(r)) is not None
 
 
 def _usuario(texto: str) -> list:

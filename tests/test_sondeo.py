@@ -88,6 +88,125 @@ async def test_un_fallo_parcial_no_corrompe_el_visto_por_ultima_vez_de_lo_que_si
     assert fila[0] == 100.0
 
 
+CATALOGO_VACIO = {"data": []}
+
+# Un 200 real, pero cuyo unico modelo es de pago: normalizar() lo filtra y el
+# resultado utilizable tambien queda en cero, aunque la respuesta "tenga data".
+CATALOGO_TODO_FILTRADO = {"data": [
+    {"id": "pago:model", "pricing": {"prompt": "0.002"}, "context_length": 1000,
+     "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+     "supported_parameters": [], "top_provider": {"max_completion_tokens": 100}}]}
+
+
+async def test_un_200_con_data_vacia_no_borra_las_rutas_previas():
+    # Finding 1: un 200 con cero modelos utilizables es mas probablemente un
+    # proveedor roto que un catalogo genuinamente vacio -- no debe autorizar
+    # el UPDATE que desactiva todo lo que ya se conocia de el.
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO_VACIO)))
+    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    assert [r.clave for r in almacen.rutas_activas()] == ["kilo/previa:free"]
+
+
+async def test_un_200_cuyos_modelos_quedan_todos_filtrados_no_borra_las_rutas_previas():
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO_TODO_FILTRADO)))
+    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    assert [r.clave for r in almacen.rutas_activas()] == ["kilo/previa:free"]
+
+
+async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio():
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free", proveedor="vacio")], momento=50.0)
+
+    def handler(req):
+        if "k.test" in str(req.url):
+            return httpx.Response(200, json=CATALOGO)
+        return httpx.Response(200, json=CATALOGO_VACIO)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Proveedor("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
+    ]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert "kilo/x:free" in claves          # el proveedor que si respondio se actualizo
+    assert "vacio/previa:free" in claves    # el vacio conservo lo que ya tenia
+
+
+async def test_un_200_con_cuerpo_no_json_se_trata_como_fallo_y_no_frena_a_los_demas():
+    # Finding 2: r.json() puede tirar JSONDecodeError (subclase de ValueError)
+    # con un cuerpo no-JSON; eso no debe escapar de sincronizar_catalogo ni
+    # frenar el procesamiento de los proveedores que vienen despues.
+    almacen = _almacen()
+
+    def handler(req):
+        if "roto.test" in str(req.url):
+            return httpx.Response(200, text="esto no es json")
+        return httpx.Response(200, json=CATALOGO)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+    ]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
+
+
+async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_demas():
+    # JSON valido pero de una forma que normalizar() no espera (p.ej. un error
+    # de autenticacion servido con status 200): dispara AttributeError dentro
+    # de normalizar(), no un httpx.HTTPError.
+    almacen = _almacen()
+
+    def handler(req):
+        if "roto.test" in str(req.url):
+            return httpx.Response(200, json={"error": "unauthorized"})
+        return httpx.Response(200, json=CATALOGO)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+    ]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
+
+
+async def test_sincronizar_catalogo_no_deja_escapar_la_excepcion_de_un_proveedor_roto():
+    # Dos formas distintas de "proveedor roto" (cuerpo no-JSON y JSON con forma
+    # inesperada) conviviendo con uno sano: si la excepcion escapara, este
+    # await ni siquiera terminaria y la prueba fallaria por un error de
+    # coleccion, no por un assert.
+    almacen = _almacen()
+
+    def handler(req):
+        url = str(req.url)
+        if "nojson.test" in url:
+            return httpx.Response(200, text="<html>not json</html>")
+        if "raro.test" in url:
+            return httpx.Response(200, json={"error": "unauthorized"})
+        return httpx.Response(200, json=CATALOGO)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [
+        Proveedor("nojson", "gratis", "openai", "https://nojson.test", "", "/models", {}, []),
+        Proveedor("raro", "gratis", "openai", "https://raro.test", "", "/models", {}, []),
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+    ]
+    total = await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    assert total == 1
+    assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
+
+
 async def test_la_sonda_de_salud_registra_exito():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "ok"}}]}))

@@ -43,5 +43,29 @@ def test_el_caso_de_tools_exige_la_llamada_correcta():
     assert caso.verificar(_respuesta("el clima esta lindo")) is False
 
 
+def test_el_caso_de_tools_acepta_bogota_con_tilde():
+    # "Bogotá" con tilde es la ortografia correcta en espanol; un modelo que la
+    # usa no debe ser castigado frente a uno que responde "Bogota" sin tilde.
+    caso = next(c for c in CASOS if c.nombre == "tools")
+    con_tilde = {"choices": [{"message": {"tool_calls": [
+        {"function": {"name": "get_weather", "arguments": '{"city":"Bogotá"}'}}]}}]}
+    assert caso.verificar(con_tilde) is True
+
+
+def test_el_caso_de_espanol_exige_palabras_completas_no_subcadenas():
+    caso = next(c for c in CASOS if c.nombre == "espanol")
+    # Espanol real: debe pasar.
+    assert caso.verificar(_respuesta("El mar es azul y tranquilo.")) is True
+    assert caso.verificar(_respuesta("Una casa grande junto a la playa.")) is True
+    # Ingles real: debe fallar. Estas dos frases contienen, como SUBCADENA (no
+    # como palabra completa), una de las palabras funcionales del espanol que
+    # se busca -- "buses " contiene "es ", "fun today" contiene "un " -- que es
+    # exactamente el chequeo ingenuo que este caso tenia antes. Si el chequeo
+    # vuelve a ser por subcadena, estas dos aserciones fallan.
+    assert caso.verificar(_respuesta("The buses arrive at noon.")) is False
+    assert caso.verificar(_respuesta("We had so much fun today.")) is False
+    assert caso.verificar(_respuesta("The weather is nice today.")) is False
+
+
 def test_evaluar_cuenta_los_casos_pasados():
     assert evaluar([True, False, True]) == (2, 3)
