@@ -13,8 +13,8 @@ from llm_libre.proxy import Proxy
 CUERPO = {"model": "auto", "messages": [], "stream": True}
 
 
-def _ruta(modelo="a:free"):
-    return Ruta("kilo", modelo, "gratis", Capacidades(True, False, 100000, 4096))
+def _ruta(modelo="a:free", proveedor="kilo"):
+    return Ruta(proveedor, modelo, "gratis", Capacidades(True, False, 100000, 4096))
 
 
 def _sse(*trozos):
@@ -36,10 +36,15 @@ def _sse_json(*trozos):
     return "".join(lineas).encode()
 
 
-def _proxy(handler):
+def _proxy(handler, canvas=frozenset()):
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {
+        "kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
+                          desenvuelve_canvas="kilo" in canvas),
+        "chatgpt": Proveedor("chatgpt", "gratis", "openai", "https://cg.test", "", "/models",
+                             {}, [], desenvuelve_canvas="chatgpt" in canvas),
+    }
     return Proxy(prov, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
@@ -98,10 +103,26 @@ async def test_una_etiqueta_que_nunca_cierra_no_cuelga_el_stream():
 async def test_desenvuelve_la_cerca_de_canvas_partida_entre_chunks():
     # chatgpt-proxy (Task 13) filtra el modo canvas de ChatGPT: la marca de
     # apertura/cierre viaja partida entre chunks igual que <think>, pero acá
-    # el contenido de adentro ES la respuesta -- no se pierde.
+    # el contenido de adentro ES la respuesta -- no se pierde. Solo pasa
+    # porque la ruta es de "chatgpt" (canvas={"chatgpt"}, ver el hallazgo 1
+    # de la revision mas abajo).
     p = _proxy(lambda req: httpx.Response(
-        200, content=_sse_json(':::writing{title="x"}\n', 'ho', 'la\n', ':::')))
-    assert await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0)) == "hola\n"
+        200, content=_sse_json(':::writing{title="x"}\n', 'ho', 'la\n', ':::')),
+        canvas={"chatgpt"})
+    texto = await _juntar(p.completar_stream([_ruta(proveedor="chatgpt")], CUERPO, 0.0))
+    assert texto == "hola\n"
+
+
+# --- Hallazgo 1 de la revision: mismo caso, pero en streaming y con una ruta
+#     SIN desenvuelve_canvas (kilo, el default) -- las marcas de
+#     documentacion Docusaurus/MDX deben sobrevivir intactas, partidas entre
+#     chunks incluido. ---
+
+async def test_un_proveedor_sin_desenvuelve_canvas_no_toca_marcas_en_streaming():
+    p = _proxy(lambda req: httpx.Response(
+        200, content=_sse_json(":::note\n", "Guarda el ", "token en el .env.\n", ":::")))
+    texto = await _juntar(p.completar_stream([_ruta(proveedor="kilo")], CUERPO, 0.0))
+    assert texto == ":::note\nGuarda el token en el .env.\n:::"
 
 
 async def test_hace_failover_si_la_primera_ruta_falla_antes_de_emitir():
@@ -466,3 +487,41 @@ async def test_avisa_cuando_la_retencion_se_desborda(caplog):
     with caplog.at_level(logging.INFO, logger="llm_libre.proxy"):
         [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, 0.0)]
     assert "kilo/a:free" in caplog.text
+
+
+# --- Hallazgo 2 de la revision (streaming): el mismo mecanismo de cooldown
+#     por fallos duros seguidos, probado sobre los TRES caminos de falla de
+#     completar_stream (status != 200, stream sin contenido util, error de
+#     red). ---
+
+async def test_n_status_no_200_seguidos_en_streaming_pone_la_ruta_en_cooldown():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    p = _proxy(lambda req: httpx.Response(500))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
+    assert p.cooldowns["kilo/a:free"] > float(TOPE_FALLOS_SEGUIDOS - 1)
+
+
+async def test_n_streams_sin_contenido_util_seguidos_pone_la_ruta_en_cooldown():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
+    p = _proxy(lambda req: httpx.Response(200, content=vacio))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
+    assert p.cooldowns["kilo/a:free"] > float(TOPE_FALLOS_SEGUIDOS - 1)
+
+
+async def test_un_exito_en_streaming_limpia_los_fallos_duros_seguidos():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    estado = {"n": 0}
+
+    def handler(req):
+        estado["n"] += 1
+        if estado["n"] <= TOPE_FALLOS_SEGUIDOS - 1:
+            return httpx.Response(500)
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
+    assert "kilo/a:free" not in p.cooldowns

@@ -85,18 +85,29 @@ def test_quita_la_cerca_de_canvas_conservando_el_contenido():
     assert quitar_cercas_canvas(_CERCA) == _CONTENIDO
 
 
-def test_recortar_tambien_desenvuelve_la_cerca_de_canvas():
+def test_recortar_desenvuelve_la_cerca_solo_si_el_llamador_lo_pide():
     # recortar() (el punto de entrada del camino no-streaming) debe hacer las
-    # dos cosas: seguir recortando <think> Y desenvolver la cerca de canvas.
-    limpio, razon = recortar("<think>pienso</think>" + _CERCA)
+    # dos cosas cuando desenvolver_canvas=True: seguir recortando <think> Y
+    # desenvolver la cerca de canvas.
+    limpio, razon = recortar("<think>pienso</think>" + _CERCA, desenvolver_canvas=True)
     assert limpio == _CONTENIDO
     assert razon == "pienso"
 
 
 def test_una_cerca_de_canvas_sin_nada_alrededor_queda_vacia_de_marcas():
-    limpio, razon = recortar(_CERCA)
+    limpio, razon = recortar(_CERCA, desenvolver_canvas=True)
     assert limpio == _CONTENIDO
     assert razon == ""
+
+
+def test_recortar_por_defecto_no_toca_las_cercas():
+    # El default (desenvolver_canvas=False) es a proposito: ':::nota{...}'
+    # tambien es sintaxis Docusaurus/MDX estandar. Un proveedor que no
+    # declara desenvuelve_canvas (Kilo, OpenRouter) no debe perder esas
+    # marcas -- <think> SI se sigue recortando siempre, es ortogonal.
+    limpio, razon = recortar("<think>pienso</think>" + _CERCA)
+    assert limpio == _CERCA
+    assert razon == "pienso"
 
 
 def test_contenido_normal_sin_cerca_no_se_toca():
@@ -156,15 +167,81 @@ def test_streaming_de_una_cerca_que_nunca_cierra_no_pierde_contenido():
         assert salida == esperado, f"fallo cortando en {corte}"
 
 
-def test_recortador_stream_compuesto_encadena_think_y_canvas_en_streaming():
+# --- Hallazgo 4 de la revision de Task 13: cuatro mutaciones del automata de
+#     canvas sobrevivian la suite entera. Cada una es un cambio de
+#     comportamiento real, verificado ejecutando la mutacion a mano contra
+#     estos tests exactos (no una suposicion). ---
+
+def test_cerrar_descarta_la_marca_de_cierre_no_la_emite():
+    # Toda cerca de este archivo termina en ':::' SIN salto de linea final,
+    # asi que la marca de cierre real solo la consume cerrar() (nunca el
+    # bucle principal de alimentar(), que solo actua sobre lineas completas
+    # con '\n'). Si cerrar() emitiera `resto` en vez de "" al confirmar el
+    # cierre, la cerca quedaria con un ':::' colgando al final.
+    salida = quitar_cercas_canvas(_CERCA)
+    assert salida == _CONTENIDO
+    assert not salida.endswith(":::")
+
+
+def test_sin_seguimiento_de_inicio_de_linea_no_se_pierde_texto_de_respuesta():
+    # ':::' incrustado a mitad de una linea (no al inicio) NUNCA es una
+    # marca. Sin el seguimiento de "ya se descarto esta linea"
+    # (_en_inicio_de_linea), un ':' aislado que llega justo despues de un
+    # flush se re-evalua como si fuera un inicio de linea nuevo, y
+    # "a:::b" tragaria su propio final como si fuera una apertura -- la
+    # perdida silenciosa de texto que esta area existe para evitar.
+    entrada = "el rango a:::b\nsigue\n"
+    rec = RecortadorCercaCanvas()
+    salida = "".join(rec.alimentar(c) for c in entrada) + rec.cerrar()
+    assert salida == entrada
+
+
+def test_el_patron_de_apertura_exige_que_toda_la_linea_sea_la_marca():
+    # ":::nota" es un prefijo valido, pero "esto no es cerca" arruina el
+    # resto de la linea: la marca de apertura exige la LINEA ENTERA, no un
+    # prefijo. Si el patron se aflojara (p.ej. dejara de anclar el final),
+    # esta linea se tragaria entera en vez de conservarse.
+    entrada = ":::nota esto no es cerca\nsegunda linea\n"
+    assert quitar_cercas_canvas(entrada) == entrada
+
+
+def test_el_patron_de_cierre_exige_la_linea_exacta_no_cualquier_triple_dos_puntos():
+    # Una linea ":::otro" DENTRO de una cerca abierta no es el cierre -- el
+    # cierre es EXACTAMENTE ':::' sola. Si el patron de cierre se aflojara
+    # (p.ej. aceptara cualquier linea que empiece con ':::'), esta cerca se
+    # cortaria antes de tiempo y "resto real" quedaria AFUERA, tratado como
+    # si nunca hubiera estado adentro (en este caso ademas se perderia,
+    # porque quedaria como una linea de apertura invalida).
+    entrada = (':::writing{title="x"}\n'
+              'primera linea\n'
+              ':::otro\n'
+              'resto real\n'
+              ':::')
+    esperado = 'primera linea\n:::otro\nresto real\n'
+    assert quitar_cercas_canvas(entrada) == esperado
+
+
+def test_recortador_stream_compuesto_encadena_think_y_canvas_cuando_se_pide():
     # El camino de streaming de verdad (proxy.py) usa un solo objeto: primero
     # se descarta el razonamiento, despues se desenvuelve la cerca sobre lo
-    # que YA es contenido visible.
+    # que YA es contenido visible -- pero solo si el proveedor de la ruta lo
+    # declara (desenvolver_canvas=True).
+    entrada = "<think>mmm</think>" + _CERCA
+    rec = RecortadorStreamCompuesto(desenvolver_canvas=True)
+    salida = ""
+    for corte in range(0, len(entrada), 3):
+        salida += rec.alimentar(entrada[corte:corte + 3])
+    salida += rec.cerrar()
+    assert salida == _CONTENIDO
+    assert rec.razonamiento == "mmm"
+
+
+def test_recortador_stream_compuesto_por_defecto_no_toca_las_cercas():
     entrada = "<think>mmm</think>" + _CERCA
     rec = RecortadorStreamCompuesto()
     salida = ""
     for corte in range(0, len(entrada), 3):
         salida += rec.alimentar(entrada[corte:corte + 3])
     salida += rec.cerrar()
-    assert salida == _CONTENIDO
+    assert salida == _CERCA
     assert rec.razonamiento == "mmm"

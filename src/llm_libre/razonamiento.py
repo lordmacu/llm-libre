@@ -48,10 +48,19 @@ class RecortadorStream:
         return resto
 
 
-def recortar(texto: str) -> tuple[str, str]:
+def recortar(texto: str, desenvolver_canvas: bool = False) -> tuple[str, str]:
+    """`desenvolver_canvas` (default False) es DECISION DEL PROVEEDOR
+    (Proveedor.desenvuelve_canvas), no algo universal: ':::nota{...}' es
+    tambien sintaxis Docusaurus/MDX estandar (admoniciones), y aplicarla a
+    ciegas le arranca las marcas a un Kilo/OpenRouter que este citando o
+    generando esa sintaxis a proposito -- lo que paso antes de este arreglo.
+    Solo un proveedor que de verdad filtra el modo canvas (chatgpt-proxy)
+    debe pasar True aca."""
     rec = RecortadorStream()
     limpio = rec.alimentar(texto) + rec.cerrar()
-    return quitar_cercas_canvas(limpio), rec.razonamiento
+    if desenvolver_canvas:
+        limpio = quitar_cercas_canvas(limpio)
+    return limpio, rec.razonamiento
 
 
 def _primera(s: str, etiquetas: tuple[str, ...]) -> tuple[int, str]:
@@ -209,18 +218,30 @@ class RecortadorStreamCompuesto:
     RecortadorCercaCanvas (cercas de canvas, se conserva el interior) para
     que el productor de streaming (proxy.py) hable con un solo objeto. El
     orden importa: primero se recorta el razonamiento, despues se
-    desenvuelve la cerca sobre lo que YA es contenido visible."""
+    desenvuelve la cerca sobre lo que YA es contenido visible.
 
-    def __init__(self) -> None:
+    `desenvolver_canvas` (default False, ver el mismo argumento en
+    `recortar()`) es DECISION DEL PROVEEDOR de la ruta que esta sirviendo
+    este stream -- proxy.py lo pasa desde Proveedor.desenvuelve_canvas. Con
+    False, el paso de canvas se salta por completo: ni siquiera se
+    instancia RecortadorCercaCanvas, para que quede claro por lectura que
+    esta rama no le hace nada a ':::' -- sintaxis Docusaurus/MDX legitima en
+    cualquier proveedor que no sea chatgpt-proxy."""
+
+    def __init__(self, desenvolver_canvas: bool = False) -> None:
         self._pensamiento = RecortadorStream()
-        self._canvas = RecortadorCercaCanvas()
+        self._canvas = RecortadorCercaCanvas() if desenvolver_canvas else None
 
     @property
     def razonamiento(self) -> str:
         return self._pensamiento.razonamiento
 
     def alimentar(self, delta: str) -> str:
-        return self._canvas.alimentar(self._pensamiento.alimentar(delta))
+        salida = self._pensamiento.alimentar(delta)
+        return self._canvas.alimentar(salida) if self._canvas is not None else salida
 
     def cerrar(self) -> str:
-        return self._canvas.alimentar(self._pensamiento.cerrar()) + self._canvas.cerrar()
+        resto = self._pensamiento.cerrar()
+        if self._canvas is None:
+            return resto
+        return self._canvas.alimentar(resto) + self._canvas.cerrar()

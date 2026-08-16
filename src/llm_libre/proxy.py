@@ -16,6 +16,23 @@ COOLDOWN_BASE_S = 60.0
 COOLDOWN_TOPE_S = 3600.0
 TIMEOUT_S = 90.0
 
+# Revision de Task 13, hallazgo 2. Solo un 429 castigaba (con backoff
+# exponencial, ver _castigar): un 500, un timeout o un error de red no
+# dejaban NUNCA un cooldown, asi que una ruta persistentemente rota o
+# COLGADA se seguia probando en cada pedido, adelante de rutas sanas segun
+# su prioridad, para siempre -- con TIMEOUT_S=90 eso son hasta 5*90s=450s
+# por pedido en la cadena mas larga, y /health sigue en "ok" mientras haya
+# UNA ruta viva. `blog` es una maquina saturada: colgado-no-rechazado es el
+# modo de falla realista, no un 500 limpio.
+#
+# Un hiccup aislado no debe sacar una ruta sana de rotacion -- por eso el
+# castigo no es INMEDIATO como el del 429 (que si es una senal inequivoca:
+# el proveedor esta pidiendo que se lo deje de llamar). Recien al superar
+# TOPE_FALLOS_SEGUIDOS fallos NO-429 SEGUIDOS (sin ningun exito en el medio)
+# se aplica el MISMO backoff exponencial que ya usa el 429 (comparten
+# _castigos/_castigar): la diferencia es CUANDO se dispara, no cuanto dura.
+TOPE_FALLOS_SEGUIDOS = 3
+
 # Cuantos chunks sin nada util (role inicial, finish_reason, razonamiento
 # filtrado) se retienen antes de soltarlos. Existe para que un stream que
 # TODAVIA no entrego contenido pueda hacer failover limpio -- si esos chunks ya
@@ -44,6 +61,14 @@ TOPE_PENDIENTES = 64
 _SOBRE_CHUNK = frozenset({"id", "object", "created", "model",
                           "system_fingerprint", "service_tier"})
 _SOBRE_ELECCION = frozenset({"index"})
+
+
+def _timeout_de(proveedor) -> float:
+    """`Proveedor.timeout_s` (default None) permite acotar el peor caso de UN
+    proveedor puntual -- p.ej. uno que puede colgarse -- sin bajarle el
+    timeout a todos. None (el default, y el comportamiento de siempre para
+    quien no lo declare) usa el TIMEOUT_S global."""
+    return proveedor.timeout_s if proveedor.timeout_s is not None else TIMEOUT_S
 
 
 def hay_respuesta(datos: dict) -> bool:
@@ -107,6 +132,7 @@ class Proxy:
         self.http = cliente_http
         self.cooldowns: dict[str, float] = {}
         self._castigos: dict[str, int] = {}
+        self._fallos_seguidos: dict[str, int] = {}
 
     async def completar(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
                         crudo: bool = False) -> Respuesta:
@@ -121,7 +147,7 @@ class Proxy:
             t0 = time.monotonic()
             try:
                 resp = await self.http.post(url, headers=cabeceras, json=payload,
-                                            timeout=TIMEOUT_S)
+                                            timeout=_timeout_de(proveedor))
                 codigo = resp.status_code
             except httpx.HTTPError as e:
                 codigo, resp, ultimo_error = 0, None, str(e)
@@ -162,7 +188,7 @@ class Proxy:
             # la respuesta pedida).
             razon = ""
             if datos is not None:
-                razon = "" if crudo else self._limpiar(datos)
+                razon = "" if crudo else self._limpiar(datos, proveedor.desenvuelve_canvas)
                 if not hay_respuesta(datos):
                     datos = None
                     ultimo_error = "200 sin contenido ni tool_calls"
@@ -172,12 +198,13 @@ class Proxy:
                                           latencia_ms=latencia)
 
             if exito:
-                self._castigos.pop(ruta.clave, None)
-                self.cooldowns.pop(ruta.clave, None)
+                self._limpiar_castigo(ruta.clave)
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
                 self._castigar(ruta.clave, ahora)
+            else:
+                self._registrar_fallo(ruta.clave, ahora)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
 
         # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
@@ -236,8 +263,7 @@ class Proxy:
                         ruta.clave, True, int((time.monotonic() - t0) * 1000),
                         200, ahora)
                     evento_registrado = True
-                    self._castigos.pop(ruta.clave, None)
-                    self.cooldowns.pop(ruta.clave, None)
+                    self._limpiar_castigo(ruta.clave)
                     if en_ruta_comprometida is not None:
                         en_ruta_comprometida(ruta)
 
@@ -247,10 +273,12 @@ class Proxy:
                     if resp.status_code != 200:
                         if resp.status_code == 429:
                             self._castigar(ruta.clave, ahora)
+                        else:
+                            self._registrar_fallo(ruta.clave, ahora)
                         self.almacen.registrar_evento(ruta.clave, False, 0,
                                                       resp.status_code, ahora)
                         continue
-                    rec = RecortadorStreamCompuesto()
+                    rec = RecortadorStreamCompuesto(desenvolver_canvas=proveedor.desenvuelve_canvas)
                     # Chunks recibidos que todavia no llevan nada util. Se
                     # retienen (no se emiten) hasta que llegue el primero que
                     # SI: mientras nada haya salido, el failover sigue siendo
@@ -350,6 +378,7 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
+                            self._registrar_fallo(ruta.clave, ahora)
                         if pendientes:
                             # Lo retenido se va a la basura junto con el intento.
                             # Es lo correcto (nada de eso llego al cliente, asi
@@ -373,6 +402,7 @@ class Proxy:
             except httpx.HTTPError:
                 if not evento_registrado:
                     self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
+                    self._registrar_fallo(ruta.clave, ahora)
                 if emitido:
                     yield "data: [DONE]\n\n"
                     return
@@ -386,14 +416,36 @@ class Proxy:
         self._castigos[clave] = n
         self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_TOPE_S)
 
+    def _limpiar_castigo(self, clave: str) -> None:
+        """Un exito borra TODO rastro de castigo previo -- 429 y fallos duros
+        por igual. Factorizado para que completar() y completar_stream()
+        (con su _registrar_exito_una_vez) no puedan desincronizarse en
+        cuales de los tres diccionarios limpian."""
+        self._castigos.pop(clave, None)
+        self.cooldowns.pop(clave, None)
+        self._fallos_seguidos.pop(clave, None)
+
+    def _registrar_fallo(self, clave: str, ahora: float) -> None:
+        """Cuenta un intento fallido que NO fue un 429 (ese ya castiga solo,
+        ver _castigar). Un hiccup aislado no saca a una ruta sana de la
+        rotacion: recien al llegar a TOPE_FALLOS_SEGUIDOS fallos SEGUIDOS
+        (sin exito en el medio) se la castiga -- y el contador se reinicia
+        para exigir otra racha completa antes de volver a castigar."""
+        n = self._fallos_seguidos.get(clave, 0) + 1
+        if n >= TOPE_FALLOS_SEGUIDOS:
+            self._castigar(clave, ahora)
+            self._fallos_seguidos.pop(clave, None)
+        else:
+            self._fallos_seguidos[clave] = n
+
     @staticmethod
-    def _limpiar(datos: dict) -> str:
+    def _limpiar(datos: dict, desenvolver_canvas: bool) -> str:
         razon_total = ""
         for eleccion in datos.get("choices", []):
             msg = eleccion.get("message") or {}
             contenido = msg.get("content")
             if isinstance(contenido, str):
-                limpio, razon = recortar(contenido)
+                limpio, razon = recortar(contenido, desenvolver_canvas)
                 msg["content"] = limpio
                 razon_total += razon
         return razon_total

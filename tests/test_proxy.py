@@ -4,7 +4,7 @@ import pytest
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.almacen import Almacen
 from llm_libre.proveedores import Proveedor
-from llm_libre.proxy import Proxy
+from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS, Proxy
 
 CUERPO = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
@@ -13,19 +13,21 @@ def _ruta(modelo, proveedor="kilo", tier="gratis"):
     return Ruta(proveedor, modelo, tier, Capacidades(True, False, 100000, 4096))
 
 
-def _prov(pid="kilo", tier="gratis"):
-    return Proveedor(pid, tier, "openai", f"https://{pid}.test", "", "/models", {}, [])
+def _prov(pid="kilo", tier="gratis", desenvuelve_canvas=False):
+    return Proveedor(pid, tier, "openai", f"https://{pid}.test", "", "/models", {}, [],
+                     desenvuelve_canvas=desenvuelve_canvas)
 
 
 def _ok(contenido="hola"):
     return {"choices": [{"message": {"role": "assistant", "content": contenido}}]}
 
 
-def _proxy(handler, proveedores=("kilo",)):
+def _proxy(handler, proveedores=("kilo",), canvas=frozenset()):
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
     cliente = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return Proxy({p: _prov(p) for p in proveedores}, almacen, cliente)
+    return Proxy({p: _prov(p, desenvuelve_canvas=p in canvas) for p in proveedores},
+                 almacen, cliente)
 
 
 async def test_devuelve_la_primera_ruta_que_responde():
@@ -95,10 +97,27 @@ async def test_recorta_el_razonamiento_de_la_respuesta():
 
 
 async def test_desenvuelve_la_cerca_de_canvas_en_el_camino_no_streaming():
+    # Solo un proveedor que declara desenvuelve_canvas=True (chatgpt-proxy)
+    # la desenvuelve -- ver el hallazgo 1 de la revision, mas abajo.
     cerca = (':::writing{title="x"}\nhola\n:::')
-    p = _proxy(lambda req: httpx.Response(200, json=_ok(cerca)))
-    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(cerca)),
+              proveedores=("chatgpt",), canvas={"chatgpt"})
+    r = await p.completar([_ruta("a:free", proveedor="chatgpt")], CUERPO, ahora=0.0)
     assert r.json["choices"][0]["message"]["content"] == "hola\n"
+
+
+# --- Hallazgo 1 de la revision de Task 13: el desenvuelto de canvas era
+#     GLOBAL, pero ':::nota{...}' / ':::tip{...}' tambien es sintaxis
+#     Docusaurus/MDX estandar -- se reprodujo en vivo contra una ruta de
+#     Kilo pidiendo documentacion. Un proveedor que NO declara
+#     desenvuelve_canvas (Kilo, OpenRouter, MiniMax) tiene que dejar esas
+#     marcas intactas. ---
+
+async def test_un_proveedor_sin_desenvuelve_canvas_no_toca_las_marcas_docusaurus():
+    nota = ":::note\nGuarda el token en el .env.\n:::"
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(nota)))   # kilo, sin canvas={}
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.json["choices"][0]["message"]["content"] == nota
 
 
 async def test_en_modo_crudo_no_toca_el_contenido():
@@ -305,3 +324,118 @@ async def test_un_200_con_json_que_no_es_objeto_pasa_a_la_siguiente_ruta():
     p = _proxy(handler)
     r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
     assert r.estado == 200 and r.ruta.modelo_id == "b:free"
+
+
+# --- Hallazgo 2 de la revision de Task 13: solo un 429 castiga (con backoff
+#     exponencial). Todo lo demas -- 500, timeout, error de red, 200 sin
+#     contenido -- no dejaba NUNCA cooldown, y con TIMEOUT_S=90 una ruta
+#     colgada (verificado: `blog` es una maquina saturada) le cuesta al
+#     cliente hasta 5*90s=450s por pedido, indefinidamente, mientras /health
+#     sigue en "ok" porque otra ruta esta viva. Un hiccup aislado no debe
+#     sacar una ruta sana de la rotacion -- por eso recien despues de
+#     TOPE_FALLOS_SEGUIDOS fallos SEGUIDOS (sin exito en el medio) se
+#     castiga, con el MISMO backoff que ya usa el 429 (_castigar). El 429
+#     sigue intacto: castiga en el PRIMER golpe, no despues de N. ---
+
+async def test_menos_de_n_fallos_duros_no_castiga():
+    p = _proxy(lambda req: httpx.Response(500))
+    for i in range(TOPE_FALLOS_SEGUIDOS - 1):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" not in p.cooldowns
+
+
+async def test_n_fallos_duros_seguidos_pone_la_ruta_en_cooldown():
+    p = _proxy(lambda req: httpx.Response(500))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert p.cooldowns["kilo/a:free"] > float(TOPE_FALLOS_SEGUIDOS - 1)
+
+
+async def test_una_ruta_en_cooldown_por_fallos_duros_se_salta_en_el_siguiente_pedido():
+    p = _proxy(lambda req: httpx.Response(500))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    ahora = float(TOPE_FALLOS_SEGUIDOS)
+    assert p.cooldowns["kilo/a:free"] > ahora
+    # sin la ruta castigada disponible, la cadena queda vacia: agotadas_todas
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=ahora)
+    # completar() no filtra por cooldown (eso lo hace router.ordenar sobre
+    # las metricas fusionadas, ver test_router.py) -- lo que se prueba aca es
+    # que el cooldown SIGUE activo, sin que este ultimo intento lo reinicie.
+    assert p.cooldowns["kilo/a:free"] > ahora
+
+
+async def test_un_exito_limpia_los_fallos_duros_seguidos():
+    estado = {"fallos": 0}
+
+    def handler(req):
+        estado["fallos"] += 1
+        if estado["fallos"] <= TOPE_FALLOS_SEGUIDOS - 1:
+            return httpx.Response(500)
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS - 1):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    # El exito en el intento numero TOPE_FALLOS_SEGUIDOS limpia el contador.
+    await p.completar([_ruta("a:free")], CUERPO, ahora=float(TOPE_FALLOS_SEGUIDOS))
+    assert "kilo/a:free" not in p.cooldowns
+
+    # Y hacen falta TOPE_FALLOS_SEGUIDOS fallos NUEVOS para volver a castigar
+    # -- no alcanza con uno solo, que es justo lo que probaria que el
+    # contador NO se reinicio.
+    estado["fallos"] = 0
+
+    def handler_2(req):
+        estado["fallos"] += 1
+        return httpx.Response(500)
+    p.http = httpx.AsyncClient(transport=httpx.MockTransport(handler_2))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=100.0)
+    assert "kilo/a:free" not in p.cooldowns
+
+
+async def test_codigo_429_castiga_en_el_primer_golpe_no_despues_de_n():
+    # Contraste directo: un SOLO 429 (no TOPE_FALLOS_SEGUIDOS) ya castiga.
+    # El path del 429 no se toco.
+    p = _proxy(lambda req: httpx.Response(429))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert "kilo/a:free" in p.cooldowns
+
+
+async def test_usa_el_timeout_global_si_el_proveedor_no_declara_el_suyo():
+    vistos = []
+
+    def handler(req):
+        vistos.append(req.extensions.get("timeout"))
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)   # kilo, sin timeout_s declarado
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert vistos[0]["read"] == 90.0   # TIMEOUT_S
+
+
+async def test_usa_el_timeout_propio_del_proveedor_si_lo_declara():
+    vistos = []
+
+    def handler(req):
+        vistos.append(req.extensions.get("timeout"))
+        return httpx.Response(200, json=_ok())
+
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    lento = Proveedor("lento", "gratis", "openai", "https://lento.test", "", "/models",
+                      {}, [], timeout_s=20.0)
+    p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await p.completar([_ruta("a:free", proveedor="lento")], CUERPO, ahora=0.0)
+    assert vistos[0]["read"] == 20.0
+
+
+async def test_un_solo_200_invalido_no_castiga_pero_n_seguidos_si():
+    # La cuenta de "fallo duro" tambien incluye un 200 con cuerpo roto o sin
+    # contenido -- no solo 5xx/red -- porque ninguno de los dos sirvio al
+    # cliente. Un solo golpe no castiga (ya cubierto por
+    # test_un_200_con_cuerpo_invalido_no_revienta_y_cae_a_503); N seguidos si.
+    p = _proxy(lambda req: httpx.Response(200, content=b"not json{{{"))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" in p.cooldowns
