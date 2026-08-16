@@ -171,9 +171,19 @@ def crear_app(estado: Estado) -> FastAPI:
         filas = []
         for r in estado.almacen.rutas_activas():
             m = metricas[r.clave]
+            medida = m.calidad_medida_en is not None
             filas.append({"clave": r.clave, "tier": r.tier,
                           "puntaje": round(puntuar(m, "balanceado"), 4),
-                          "calidad": round(m.calidad, 3),
+                          # "nunca medida" se dice, no se disfraza: mostrar el
+                          # neutro en `calidad` como si alguien lo hubiera
+                          # medido es lo que hacia invisible que `auto` estaba
+                          # ordenando por un supuesto. El valor que SI entro al
+                          # puntaje va aparte, en `calidad_asumida`.
+                          "calidad": round(m.calidad, 3) if medida else None,
+                          "calidad_medida": medida,
+                          "calidad_asumida": None if medida else round(m.calidad, 3),
+                          "ultima_sonda_calidad": _iso(m.calidad_medida_en),
+                          "ultima_sonda": _iso(m.ultima_sonda_en),
                           "confiabilidad": round(m.confiabilidad, 3),
                           "ttft_p50_ms": m.ttft_p50_ms,
                           "en_cooldown_hasta": m.en_cooldown_hasta,
@@ -229,10 +239,18 @@ def _parecidos(pedido: str, activas: list) -> list[str]:
     return difflib.get_close_matches(pedido, [r.modelo_id for r in activas], n=3, cutoff=0.3)
 
 
+def _iso(momento: float | None) -> str | None:
+    if momento is None:
+        return None
+    return datetime.fromtimestamp(momento, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _metricas(estado: Estado, ahora: float) -> dict:
     base = estado.almacen.metricas()
     for clave, hasta in estado.proxy.cooldowns.items():
         if clave in base:
-            m = base[clave]
-            base[clave] = type(m)(m.calidad, m.confiabilidad, m.ttft_p50_ms, hasta)
+            # `replace` y no `type(m)(...)` posicional: reconstruir a mano deja
+            # afuera cualquier campo nuevo de Metricas (p.ej. calidad_medida_en),
+            # y una ruta en cooldown pasaria a parecer "nunca medida".
+            base[clave] = replace(base[clave], en_cooldown_hasta=hasta)
     return base

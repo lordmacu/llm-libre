@@ -43,6 +43,15 @@ class Metricas:
     confiabilidad: float
     ttft_p50_ms: float
     en_cooldown_hasta: float        # epoch en segundos; 0 = sin castigo
+    # Momento (epoch) de la ultima sonda de CALIDAD, o None si nunca se midio.
+    # None significa que `calidad` de arriba es el supuesto neutro, no una
+    # medicion: el router lo usa para no preferir una ruta sin evaluar por
+    # encima de una con puntaje real, y /v1/ranking para no mostrar 0.6 como si
+    # alguien lo hubiera medido.
+    calidad_medida_en: float | None = None
+    # Momento de la ultima sonda de cualquier tipo (salud o calidad). Lo pide
+    # el §6 del diseno para /v1/ranking.
+    ultima_sonda_en: float | None = None
 
 
 METRICAS_NEUTRAS = Metricas(CALIDAD_NEUTRA, CONFIABILIDAD_NEUTRA, TTFT_NEUTRO_MS, 0.0)

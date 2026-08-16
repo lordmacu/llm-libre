@@ -383,3 +383,44 @@ def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
     # importar que cada una uso una cabecera distinta: es la misma llave
     # resuelta, asi que cuenta contra el mismo contador.
     assert r3.status_code == 429
+
+
+# --- Fix round 3, I3: /v1/ranking tiene que traer la fecha de la ultima sonda
+#     (§6 del diseno) y distinguir "calidad medida 0.6" de "nunca medida" --
+#     que es exactamente el dato que hacia falta para diagnosticar B2. ---
+
+def test_ranking_marca_como_no_medida_una_ruta_sin_sonda_de_calidad(cliente):
+    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert fila["calidad_medida"] is False
+    assert fila["calidad"] is None            # no se muestra el neutro como medicion
+    assert fila["calidad_asumida"] == 0.6     # pero se dice cual se uso para puntuar
+    assert fila["ultima_sonda_calidad"] is None
+    assert fila["ultima_sonda"] is None
+
+
+def test_ranking_trae_la_fecha_de_la_ultima_sonda(estado_cliente):
+    estado, cliente = estado_cliente
+    # 2026-08-17T12:00:00Z y 2026-08-17T18:00:00Z
+    estado.almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
+                                   1786968000.0)
+    estado.almacen.registrar_sonda("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
+                                   1786989600.0)
+    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert fila["calidad_medida"] is True
+    assert fila["calidad"] == 0.6             # 3/5, esta vez SI medido
+    assert fila["calidad_asumida"] is None
+    assert fila["ultima_sonda_calidad"] == "2026-08-17T12:00:00Z"
+    assert fila["ultima_sonda"] == "2026-08-17T18:00:00Z"
+
+
+def test_una_ruta_en_cooldown_no_pierde_su_marca_de_calidad_medida(estado_cliente):
+    # `_metricas` reconstruia Metricas posicionalmente para inyectar el
+    # cooldown, y asi perdia los campos nuevos: una ruta castigada aparecia
+    # como "nunca medida" y el router la mandaba al fondo por partida doble.
+    estado, cliente = estado_cliente
+    estado.almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
+                                   1786968000.0)
+    estado.proxy.cooldowns["kilo/a:free"] = time.time() + 600
+    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert fila["calidad_medida"] is True
+    assert fila["en_cooldown_hasta"] > time.time()

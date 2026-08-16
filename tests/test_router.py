@@ -7,8 +7,8 @@ def r(modelo, proveedor="kilo", tier="gratis", tools=True, vision=False, context
                 Capacidades(tools=tools, vision=vision, contexto=contexto, max_salida=4096))
 
 
-def m(calidad=0.8, confiabilidad=0.9, ttft=500, cooldown=0.0):
-    return Metricas(calidad, confiabilidad, ttft, cooldown)
+def m(calidad=0.8, confiabilidad=0.9, ttft=500, cooldown=0.0, medida_en=1000.0):
+    return Metricas(calidad, confiabilidad, ttft, cooldown, medida_en)
 
 
 def test_descarta_las_rutas_que_no_soportan_tools_cuando_se_piden():
@@ -78,7 +78,48 @@ def test_una_ruta_sin_metricas_usa_las_neutras_y_no_ceros():
     # 0.6*0.8*factor_latencia(1500) = 0.24, asi que le gana a la conocida y queda primera.
     # Si el fallback fuera Metricas(0,0,0,0) puntuaria 0 y quedaria de ULTIMA: el orden
     # se invertiria y este assert fallaria, que es justo lo que este test debe detectar.
+    #
+    # `medida_en=None` en la conocida es deliberado (fix round 3, B2b): las dos
+    # rutas quedan igual de "no medidas" para que lo que decida el orden sea el
+    # puntaje, que es lo unico que este test quiere proteger. El criterio de
+    # medida-antes-que-supuesta tiene sus propios tests, mas abajo.
     rutas = [r("conocida:free"), r("nueva:free")]
-    metricas = {"kilo/conocida:free": m(calidad=0.3, confiabilidad=0.5, ttft=1500)}
+    metricas = {"kilo/conocida:free": m(calidad=0.3, confiabilidad=0.5, ttft=1500,
+                                        medida_en=None)}
     salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
     assert [x.modelo_id for x in salida] == ["nueva:free", "conocida:free"]
+
+
+# --- Fix round 3, B2 (Blocking), mitad (b): una ruta que nunca paso por la
+#     bateria de calidad carga un supuesto neutro (0.6), no una medicion. No
+#     puede preferirse por encima de una ruta cuya calidad SI se midio: eso es
+#     lo que dejaba a un modelo recien aparecido -- rapido y sin evaluar --
+#     arriba de todo hasta 25 h. Tiene que seguir siendo alcanzable, eso si, o
+#     nunca se mediria. ---
+
+def test_una_ruta_nunca_sondeada_va_despues_de_una_con_calidad_medida():
+    rutas = [r("nueva:free"), r("medida:free")]
+    metricas = {
+        # La medida puntua PEOR en balanceado (0.35*0.9*f(500) = 0.24) que la
+        # nueva con los neutros (0.6*0.9*f(200) = 0.48): si el orden fuera solo
+        # por puntaje, la nueva ganaria. Debe perder igual.
+        "kilo/medida:free": m(calidad=0.35, ttft=500, medida_en=1000.0),
+        "kilo/nueva:free": m(calidad=0.6, ttft=200, medida_en=None),
+    }
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["medida:free", "nueva:free"]
+
+
+def test_una_ruta_nunca_sondeada_sigue_en_la_cadena_para_poder_medirse():
+    rutas = [r("nueva:free"), r("medida:free")]
+    metricas = {"kilo/medida:free": m(calidad=0.9, medida_en=1000.0)}
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert "nueva:free" in [x.modelo_id for x in salida]
+
+
+def test_entre_dos_nunca_sondeadas_sigue_mandando_el_puntaje():
+    rutas = [x for x in (r("lenta:free"), r("rapida:free"))]
+    metricas = {"kilo/lenta:free": m(ttft=5000, medida_en=None),
+                "kilo/rapida:free": m(ttft=100, medida_en=None)}
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["rapida:free", "lenta:free"]

@@ -101,22 +101,33 @@ class Almacen:
     def metricas(self) -> dict[str, Metricas]:
         salida: dict[str, Metricas] = {}
         for (clave,) in self._con.execute("SELECT clave FROM rutas WHERE activa = 1"):
+            calidad, medida_en = self._calidad(clave)
             salida[clave] = Metricas(
-                calidad=self._calidad(clave),
+                calidad=calidad,
                 confiabilidad=self._confiabilidad(clave),
                 ttft_p50_ms=self._ttft_p50(clave),
                 en_cooldown_hasta=0.0,  # el cooldown vive en memoria del proxy
+                calidad_medida_en=medida_en,
+                ultima_sonda_en=self._ultima_sonda(clave),
             )
         return salida
 
-    def _calidad(self, clave: str) -> float:
+    def _calidad(self, clave: str) -> tuple[float, float | None]:
+        """(calidad, momento de la medicion). El momento es None si nunca se
+        midio: ahi la calidad devuelta es el NEUTRO, un supuesto -- y quien la
+        consuma tiene que poder distinguir un 0.6 medido de un 0.6 asumido."""
         fila = self._con.execute(
-            """SELECT casos_pasados, casos_totales FROM sondas
+            """SELECT casos_pasados, casos_totales, momento FROM sondas
                WHERE clave = ? AND tipo = 'calidad' AND casos_totales > 0
                ORDER BY momento DESC LIMIT 1""", (clave,)).fetchone()
         if not fila:
-            return CALIDAD_NEUTRA
-        return fila[0] / fila[1]
+            return CALIDAD_NEUTRA, None
+        return fila[0] / fila[1], fila[2]
+
+    def _ultima_sonda(self, clave: str) -> float | None:
+        fila = self._con.execute(
+            "SELECT MAX(momento) FROM sondas WHERE clave = ?", (clave,)).fetchone()
+        return fila[0] if fila else None
 
     def _confiabilidad(self, clave: str) -> float:
         filas = self._con.execute(

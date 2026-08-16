@@ -106,3 +106,31 @@ def test_el_uso_de_pago_se_cuenta_por_llave_y_dia(almacen):
     assert almacen.sumar_uso_pago("k1", "2026-08-16") == 2
     assert almacen.uso_pago("k1", "2026-08-17") == 0
     assert almacen.uso_pago("k2", "2026-08-16") == 0
+
+
+# --- Fix round 3, B2b/I3: distinguir "calidad medida 0.6" de "nunca medida". ---
+
+def test_una_ruta_nunca_sondeada_no_declara_fecha_de_calidad(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    m = almacen.metricas()["kilo/a:free"]
+    assert m.calidad_medida_en is None
+    assert m.ultima_sonda_en is None
+    assert m.calidad == pytest.approx(0.6)   # el neutro sigue alimentando el puntaje
+
+
+def test_una_ruta_sondeada_declara_el_momento_de_su_ultima_sonda_de_calidad(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 2, 5, 300.0)
+    almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 900.0)
+    m = almacen.metricas()["kilo/a:free"]
+    assert m.calidad_medida_en == 900.0
+    assert m.calidad == pytest.approx(0.8)
+
+
+def test_la_ultima_sonda_cuenta_tambien_las_de_salud(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 300.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", True, 120, 0, 200, 0, 0, 800.0)
+    m = almacen.metricas()["kilo/a:free"]
+    assert m.ultima_sonda_en == 800.0        # la mas reciente de cualquier tipo
+    assert m.calidad_medida_en == 300.0      # pero la de CALIDAD sigue siendo la suya
