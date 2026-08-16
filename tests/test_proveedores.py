@@ -34,8 +34,18 @@ def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
     assert rutas[0].tier == "pago"
     assert rutas[0].capacidades.tools is True
     assert rutas[0].capacidades.vision is False
+    assert rutas[0].capacidades.contexto == 128000
+    assert rutas[0].capacidades.max_salida == 32768
 
 
 def test_un_proveedor_gratis_no_tiene_modelos_fijos():
     kilo = cargar(YAML, {})[0]
     assert rutas_fijas(kilo) == []
+
+
+def test_clave_de_solo_espacios_se_normaliza_a_vacia():
+    ps = cargar(YAML, {"KILO_API_KEY": "   ", "OPENROUTER_API_KEY": "\t\n"})
+    kilo = next(p for p in ps if p.id == "kilo")
+    orouter = next(p for p in ps if p.id == "openrouter")
+    assert kilo.clave == ""
+    assert orouter.clave == ""

@@ -22,7 +22,7 @@ def cargar(ruta_yaml: str, entorno: dict) -> list[Proveedor]:
         datos = yaml.safe_load(f)
     return [Proveedor(
         id=p["id"], tier=p["tier"], dialecto=p["dialecto"], base_url=p["base_url"],
-        clave=entorno.get(p.get("clave_env", ""), "") or "",
+        clave=(entorno.get(p.get("clave_env", ""), "") or "").strip(),
         modelos_path=p.get("modelos_path", ""),
         cabeceras_extra=p.get("cabeceras_extra", {}) or {},
         modelos_fijos=p.get("modelos_fijos", []) or [],
