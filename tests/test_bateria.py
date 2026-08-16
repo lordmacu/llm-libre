@@ -9,10 +9,26 @@ def test_hay_al_menos_cinco_casos():
     assert len(CASOS) >= 5
 
 
-def test_todos_los_casos_piden_pocos_tokens():
-    # Sondear consume la misma cuota gratis que el servicio necesita para trabajar.
+def test_los_topes_dejan_lugar_a_los_tokens_de_razonamiento():
+    # Fix round 3, I1. Este test decia lo contrario -- `max_tokens <= 256`,
+    # "sondear consume cuota" -- y asi consagraba el bug: casi todos estos
+    # modelos son de razonamiento y los tokens de pensamiento salen del MISMO
+    # presupuesto de la completion, con lo cual la bateria medía si le entraba
+    # el pensamiento en 32 tokens, no la calidad de la respuesta.
+    #
+    # Verificado en vivo (Kilo, 2026-08-16, nvidia/nemotron-3.5-lightning:free,
+    # caso de aritmetica): con max_tokens=32 devuelve finish_reason "length" y
+    # el monologo ("Here's a thinking process: ..."), FALLA; con max_tokens=512
+    # devuelve finish_reason "stop" y "12", PASA.
     for c in CASOS:
-        assert c.cuerpo["max_tokens"] <= 256, c.nombre
+        assert c.cuerpo["max_tokens"] >= 512, c.nombre
+        assert c.cuerpo["max_tokens"] <= 2048, c.nombre   # sigue acotado
+
+
+def test_la_bateria_sigue_siendo_chica_en_numero_de_peticiones():
+    # El §14 presupuesta el sondeo en PETICIONES, no en tokens: lo que hay que
+    # cuidar es cuantos casos hay, no cuanto puede escribir cada uno.
+    assert len(CASOS) <= 6
 
 
 def test_el_caso_de_aritmetica_acepta_la_respuesta_correcta():
