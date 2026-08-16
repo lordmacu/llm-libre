@@ -257,3 +257,17 @@ async def test_proxima_liberacion_reporta_la_mas_cercana_de_esta_cadena():
     assert r.estado == 503
     assert p.cooldowns["kilo/b:free"] < p.cooldowns["kilo/a:free"]
     assert r.json["error"]["proxima_liberacion"] == p.cooldowns["kilo/b:free"]
+
+
+# --- Fix round 3, I5: el camino NO streaming no puede medir un
+#     time-to-first-token (la respuesta llega entera de una vez), asi que deja
+#     de escribir su round-trip en la columna de ttft y lo guarda en
+#     latencia_ms, que es lo que de verdad midio. ---
+
+async def test_el_camino_no_streaming_guarda_latencia_no_ttft():
+    p = _proxy(lambda req: httpx.Response(200, json=_ok()))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    fila = p.almacen._con.execute(
+        "SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
+    assert fila[0] == 0                # no se inventa un ttft
+    assert fila[1] is not None         # pero la latencia real si queda registrada

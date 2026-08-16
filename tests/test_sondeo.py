@@ -473,3 +473,16 @@ async def test_una_sincronizacion_sana_no_ensucia_los_logs_de_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="llm_libre.sondeo"):
         await sincronizar_catalogo(http, _prov_kilo(), almacen, ahora=100.0)
     assert caplog.text == ""
+
+
+async def test_la_sonda_de_salud_no_escribe_un_ttft_que_no_midio():
+    # I5: la sonda de salud es no-streaming, asi que su numero es un round-trip
+    # completo, no un ttft. Va a latencia_ms; la columna de ttft queda en 0 y
+    # el p50 de ttft la ignora.
+    p = _proxy(lambda req: httpx.Response(200, json={
+        "choices": [{"message": {"content": "ok"}}]}))
+    await sondear_salud(p, p.almacen, [_ruta()], ahora=100.0)
+    fila = p.almacen._con.execute(
+        "SELECT latencia_ms, ttft_ms FROM sondas WHERE tipo='salud'").fetchone()
+    assert fila[0] >= 0
+    assert fila[1] == 0

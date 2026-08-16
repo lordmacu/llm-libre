@@ -62,6 +62,10 @@ class Metricas:
     # Momento de la ultima sonda de cualquier tipo (salud o calidad). Lo pide
     # el §6 del diseno para /v1/ranking.
     ultima_sonda_en: float | None = None
+    # p50 del round-trip COMPLETO, que es otra cosa que `ttft_p50_ms` (ver el
+    # comentario de almacen.py). No entra en el puntaje: se expone para poder
+    # diagnosticar. None = nunca se observo.
+    latencia_p50_ms: float | None = None
 
 
 METRICAS_NEUTRAS = Metricas(CALIDAD_NEUTRA, CONFIABILIDAD_NEUTRA, TTFT_NEUTRO_MS, 0.0)

@@ -306,3 +306,12 @@ async def test_ttft_mide_el_primer_token_no_el_fin_del_stream():
     # duracion_total_ms en vez de quedarse cerca de demora_antes.
     assert ttft_ms < duracion_total_ms - 100
     assert ttft_ms < (demora_antes * 1000) + 100
+
+
+async def test_el_camino_streaming_si_escribe_ttft():
+    # La contracara de I5: aca el ttft SI se puede medir, y es el unico camino
+    # que escribe esa columna.
+    p = _proxy(lambda req: httpx.Response(200, content=_sse("hola")))
+    await _juntar(p.completar_stream([_ruta()], CUERPO, 0.0))
+    fila = p.almacen._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
+    assert fila[0] >= 0 and fila[1] is None

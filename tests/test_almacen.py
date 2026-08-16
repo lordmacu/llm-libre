@@ -134,3 +134,35 @@ def test_la_ultima_sonda_cuenta_tambien_las_de_salud(almacen):
     m = almacen.metricas()["kilo/a:free"]
     assert m.ultima_sonda_en == 800.0        # la mas reciente de cualquier tipo
     assert m.calidad_medida_en == 300.0      # pero la de CALIDAD sigue siendo la suya
+
+
+# --- Fix round 3, I5: `ttft_ms` mezclaba dos mediciones incompatibles en una
+#     sola columna. El camino no-streaming guardaba el round-trip COMPLETO
+#     (7-27 s en un modelo de razonamiento) y el de streaming el tiempo real
+#     hasta el primer chunk (~200 ms). Mezclados en un mismo p50, el perfil
+#     `rapido` ordenaba por un numero que no significa nada. ---
+
+def test_el_ttft_p50_solo_cuenta_mediciones_de_ttft_de_verdad(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    # Streaming: ttft real.
+    almacen.registrar_evento("kilo/a:free", True, 200, 200, 150.0)
+    # No streaming: no hay ttft que medir, va el round-trip a latencia_ms.
+    almacen.registrar_evento("kilo/a:free", True, 0, 200, 160.0, latencia_ms=21000)
+    almacen.registrar_evento("kilo/a:free", True, 0, 200, 170.0, latencia_ms=19000)
+    assert almacen.metricas()["kilo/a:free"].ttft_p50_ms == 200.0
+
+
+def test_la_latencia_total_se_guarda_aunque_no_alimente_el_ttft(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_evento("kilo/a:free", True, 0, 200, 160.0, latencia_ms=21000)
+    almacen.registrar_evento("kilo/a:free", True, 0, 200, 170.0, latencia_ms=19000)
+    m = almacen.metricas()["kilo/a:free"]
+    assert m.latencia_p50_ms == 21000.0        # p50 de las dos observaciones
+    assert m.ttft_p50_ms == 1500.0             # el neutro: ttft nunca se midio
+
+
+def test_sin_ninguna_observacion_de_ttft_se_usa_el_neutro(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    m = almacen.metricas()["kilo/a:free"]
+    assert m.ttft_p50_ms == 1500.0
+    assert m.latencia_p50_ms is None

@@ -87,7 +87,12 @@ class Proxy:
                 codigo = resp.status_code
             except httpx.HTTPError as e:
                 codigo, resp, ultimo_error = 0, None, str(e)
-            ttft = int((time.monotonic() - t0) * 1000)
+            # Round-trip completo, NO un time-to-first-token: por este camino la
+            # respuesta llega entera de una vez, asi que este numero incluye
+            # toda la generacion (7-27 s en un modelo de razonamiento). Va a
+            # `latencia_ms`; `ttft_ms` queda en 0 para no contaminar un p50 que
+            # significa otra cosa. Ver el comentario de cabecera de almacen.py.
+            latencia = int((time.monotonic() - t0) * 1000)
 
             # Un 200 con cuerpo no parseable (p.ej. una pagina de mantenimiento
             # HTML servida con status 200) no es un exito: se trata como intento
@@ -115,7 +120,8 @@ class Proxy:
                     ultimo_error = "200 sin contenido ni tool_calls"
 
             exito = codigo == 200 and datos is not None
-            self.almacen.registrar_evento(ruta.clave, exito, ttft, codigo, ahora)
+            self.almacen.registrar_evento(ruta.clave, exito, 0, codigo, ahora,
+                                          latencia_ms=latencia)
 
             if exito:
                 self._castigos.pop(ruta.clave, None)

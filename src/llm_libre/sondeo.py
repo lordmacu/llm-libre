@@ -109,7 +109,11 @@ async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None
         t0 = time.monotonic()
         r = await proxy.completar([ruta], dict(PING), ahora)
         ms = int((time.monotonic() - t0) * 1000)
-        almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, ms,
+        # `ttft_ms=0`, no `ms`: esta sonda es no-streaming, asi que lo que midio
+        # es un round-trip completo y no un time-to-first-token. Escribirlo en
+        # la columna de ttft mezclaba dos magnitudes distintas en un mismo p50
+        # (ver el comentario de cabecera de almacen.py).
+        almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
                                 r.estado, 0, 0, ahora)
 
 

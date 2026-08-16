@@ -200,7 +200,13 @@ def crear_app(estado: Estado) -> FastAPI:
                           "ultima_sonda_calidad": _iso(m.calidad_medida_en),
                           "ultima_sonda": _iso(m.ultima_sonda_en),
                           "confiabilidad": round(m.confiabilidad, 3),
+                          # Dos numeros distintos a proposito: ttft_p50_ms es
+                          # tiempo al primer token (solo lo mide el streaming, y
+                          # es lo que pesa en el puntaje); latencia_p50_ms es el
+                          # round-trip completo (no-streaming y sondas). Antes
+                          # compartian columna y el promedio no significaba nada.
                           "ttft_p50_ms": m.ttft_p50_ms,
+                          "latencia_p50_ms": m.latencia_p50_ms,
                           "en_cooldown_hasta": m.en_cooldown_hasta,
                           "tools": r.capacidades.tools, "vision": r.capacidades.vision,
                           "contexto": r.capacidades.contexto})

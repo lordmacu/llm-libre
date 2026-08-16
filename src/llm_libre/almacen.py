@@ -18,7 +18,7 @@ CREATE INDEX IF NOT EXISTS ix_sondas ON sondas(clave, tipo, momento DESC);
 
 CREATE TABLE IF NOT EXISTS eventos (
     clave TEXT NOT NULL, momento REAL NOT NULL, ok INTEGER NOT NULL,
-    ttft_ms INTEGER, codigo_http INTEGER);
+    ttft_ms INTEGER, codigo_http INTEGER, latencia_ms INTEGER);
 CREATE INDEX IF NOT EXISTS ix_eventos ON eventos(clave, momento DESC);
 
 CREATE TABLE IF NOT EXISTS uso_pago (
@@ -28,6 +28,27 @@ CREATE TABLE IF NOT EXISTS uso_pago (
 
 VENTANA = 50  # cuantas observaciones recientes pesan en confiabilidad y latencia
 
+# QUE SIGNIFICA CADA COLUMNA DE TIEMPO (decidido en el fix round 3, I5).
+#
+# `ttft_ms` significa UNA sola cosa: milisegundos hasta el primer token util
+# que el llamador podria ver. Solo puede medirlo quien lee un stream, asi que
+# solo el camino de streaming escribe ahi. Antes lo escribian los dos caminos:
+# el no-streaming metia el round-trip COMPLETO (7-27 s en un modelo de
+# razonamiento, porque hasta que no termina de generar no llega nada) y el de
+# streaming el tiempo real al primer chunk (~200 ms). Mezclados en un mismo
+# p50, el numero no significaba nada y el perfil `rapido` ordenaba por ruido.
+#
+# `latencia_ms` es el round-trip completo, que es lo que de verdad mide un
+# camino no-streaming (y la sonda de salud). Se guarda -- el §5 del diseno ya
+# lo pedia en `eventos` -- y se expone en /v1/ranking, pero NO alimenta el
+# factor de latencia del puntaje, que esta calibrado en escala de ttft.
+#
+# Consecuencia asumida: en un despliegue que solo use el camino no-streaming,
+# ningun ttft se mide y todas las rutas quedan con el neutro, o sea que la
+# latencia deja de discriminar. Es preferible a discriminar por un numero
+# inventado: se ve en /v1/ranking (ttft_p50_ms == el neutro para todas) y se
+# arregla solo en cuanto haya trafico de streaming.
+
 
 class Almacen:
     def __init__(self, ruta_db: str):
@@ -36,7 +57,16 @@ class Almacen:
 
     def crear_esquema(self) -> None:
         self._con.executescript(ESQUEMA)
+        self._migrar()
         self._con.commit()
+
+    def _migrar(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` no agrega columnas a una tabla que ya
+        existe: una base viva (la del volumen de /datos, que a proposito
+        sobrevive a los redeploys) se quedaria sin `eventos.latencia_ms`."""
+        columnas = {f[1] for f in self._con.execute("PRAGMA table_info(eventos)")}
+        if "latencia_ms" not in columnas:
+            self._con.execute("ALTER TABLE eventos ADD COLUMN latencia_ms INTEGER")
 
     def upsert_rutas(self, rutas: list[Ruta], momento: float,
                      desactivar_faltantes: bool = True,
@@ -93,9 +123,15 @@ class Almacen:
         self._con.commit()
 
     def registrar_evento(self, clave: str, ok: bool, ttft_ms: int,
-                         codigo_http: int, momento: float) -> None:
-        self._con.execute("INSERT INTO eventos VALUES (?,?,?,?,?)",
-                          (clave, momento, int(ok), ttft_ms, codigo_http))
+                         codigo_http: int, momento: float,
+                         latencia_ms: int | None = None) -> None:
+        """`ttft_ms` solo lo escribe quien pudo medir un time-to-first-token de
+        verdad (el camino de streaming); el resto pasa 0 y manda su round-trip
+        en `latencia_ms`. Ver el comentario de arriba del archivo."""
+        self._con.execute(
+            """INSERT INTO eventos (clave, momento, ok, ttft_ms, codigo_http, latencia_ms)
+               VALUES (?,?,?,?,?,?)""",
+            (clave, momento, int(ok), ttft_ms, codigo_http, latencia_ms))
         self._con.commit()
 
     def metricas(self) -> dict[str, Metricas]:
@@ -109,6 +145,7 @@ class Almacen:
                 en_cooldown_hasta=0.0,  # el cooldown vive en memoria del proxy
                 calidad_medida_en=medida_en,
                 ultima_sonda_en=self._ultima_sonda(clave),
+                latencia_p50_ms=self._latencia_p50(clave),
             )
         return salida
 
@@ -140,6 +177,9 @@ class Almacen:
         return sum(f[0] for f in filas) / len(filas)
 
     def _ttft_p50(self, clave: str) -> float:
+        """p50 de time-to-first-token. Solo entran observaciones que de verdad
+        midieron un ttft (streaming): las demas escriben 0 y quedan fuera del
+        `ttft_ms > 0`. Sin ninguna, se devuelve el neutro."""
         filas = self._con.execute(
             """SELECT ttft_ms FROM (
                    SELECT momento, ttft_ms FROM sondas WHERE clave = ? AND ok = 1
@@ -149,6 +189,23 @@ class Almacen:
             (clave, clave, VENTANA)).fetchall()
         if not filas:
             return TTFT_NEUTRO_MS
+        valores = sorted(f[0] for f in filas)
+        return float(valores[len(valores) // 2])
+
+    def _latencia_p50(self, clave: str) -> float | None:
+        """p50 del round-trip completo. No entra en el puntaje (el factor de
+        latencia esta calibrado en escala de ttft); se expone para diagnostico,
+        que es justo lo que faltaba cuando las dos mediciones compartian
+        columna. None = nunca se observo."""
+        filas = self._con.execute(
+            """SELECT latencia_ms FROM (
+                   SELECT momento, latencia_ms FROM sondas WHERE clave = ? AND ok = 1
+                   UNION ALL
+                   SELECT momento, latencia_ms FROM eventos WHERE clave = ? AND ok = 1
+               ) WHERE latencia_ms > 0 ORDER BY momento DESC LIMIT ?""",
+            (clave, clave, VENTANA)).fetchall()
+        if not filas:
+            return None
         valores = sorted(f[0] for f in filas)
         return float(valores[len(valores) // 2])
 
