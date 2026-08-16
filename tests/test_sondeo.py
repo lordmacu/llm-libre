@@ -1,3 +1,5 @@
+import logging
+
 import httpx
 
 from llm_libre.almacen import Almacen
@@ -416,3 +418,58 @@ async def test_el_ciclo_completo_no_sondea_la_ruta_de_pago():
     await ciclo(estado, contador=1)   # contador 1: salud si, calidad no
     assert {r.clave for r in almacen.rutas_activas()} == {"kilo/x:free", "minimax/MiniMax-M3"}
     assert not any("m.test" in u for u in llamadas), "se le pego a la ruta de pago"
+
+
+# --- Fix round 3, I4: `sincronizar_catalogo` fallaba en silencio absoluto --
+#     cuatro `continue` (error de red, status != 200, cuerpo mal formado,
+#     catalogo vacio) y ni una linea de log en todo el modulo. Si un proveedor
+#     empieza a fallar, su catalogo se congela para siempre y nada lo dice.
+#     Esta es justo la capa que existe para evitar catalogos rancios. ---
+
+def _prov_kilo():
+    return [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+
+
+async def _sincronizar_con(handler, caplog):
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with caplog.at_level(logging.WARNING, logger="llm_libre.sondeo"):
+        await sincronizar_catalogo(http, _prov_kilo(), almacen, ahora=100.0)
+    return caplog.text
+
+
+async def test_un_error_de_red_se_loguea_con_el_proveedor_y_la_razon(caplog):
+    def handler(req):
+        raise httpx.ConnectError("no hay ruta al host")
+
+    texto = await _sincronizar_con(handler, caplog)
+    assert "kilo" in texto and "no hay ruta al host" in texto
+
+
+async def test_un_status_distinto_de_200_se_loguea(caplog):
+    texto = await _sincronizar_con(lambda req: httpx.Response(503), caplog)
+    assert "kilo" in texto and "503" in texto
+
+
+async def test_un_cuerpo_mal_formado_se_loguea(caplog):
+    texto = await _sincronizar_con(
+        lambda req: httpx.Response(200, text="<html>mantenimiento</html>"), caplog)
+    assert "kilo" in texto
+    assert "no se pudo interpretar" in texto or "interpretar" in texto
+
+
+async def test_un_catalogo_vacio_se_loguea(caplog):
+    texto = await _sincronizar_con(
+        lambda req: httpx.Response(200, json=CATALOGO_VACIO), caplog)
+    assert "kilo" in texto
+    assert "cero modelos" in texto or "vacio" in texto
+
+
+async def test_una_sincronizacion_sana_no_ensucia_los_logs_de_warning(caplog):
+    almacen = _almacen()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO)))
+    with caplog.at_level(logging.WARNING, logger="llm_libre.sondeo"):
+        await sincronizar_catalogo(http, _prov_kilo(), almacen, ahora=100.0)
+    assert caplog.text == ""

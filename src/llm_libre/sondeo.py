@@ -1,3 +1,4 @@
+import logging
 import os
 import time
 
@@ -7,6 +8,8 @@ from llm_libre.bateria import CASOS, evaluar
 from llm_libre.catalogo import normalizar
 from llm_libre.modelos import Ruta
 from llm_libre.proveedores import Proveedor, rutas_fijas
+
+log = logging.getLogger(__name__)
 
 PING = {"messages": [{"role": "user", "content": "ping"}], "max_tokens": 8,
         "temperature": 0}
@@ -37,6 +40,12 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
     parseable/con forma inesperada, o un 200 con cero modelos utilizables --
     mas probable un proveedor roto que un catalogo genuinamente vacio) no se
     toca en absoluto: mejor conservar lo que ya se sabia de EL que borrarlo.
+
+    Cada uno de esos cuatro caminos DEJA UN WARNING con el proveedor y la
+    razon. Sin eso, conservar el catalogo viejo -- que es lo correcto -- se
+    vuelve indistinguible de que todo funcione: el catalogo de ese proveedor
+    se congela para siempre y nadie se entera. Esta es justo la capa que
+    existe para que un catalogo no se pudra sin aviso (§1 del diseno).
     """
     total = 0
     for p in proveedores:
@@ -53,23 +62,35 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
         try:
             r = await http.get(p.base_url.rstrip("/") + p.modelos_path,
                                headers=cabeceras, timeout=30.0)
-        except httpx.HTTPError:
+        except httpx.HTTPError as e:
+            log.warning("catalogo de %s: no se pudo consultar %s (%s: %s). "
+                        "Se conserva el catalogo anterior.",
+                        p.id, p.modelos_path, type(e).__name__, e)
             continue
         if r.status_code != 200:
+            log.warning("catalogo de %s: %s respondio HTTP %s. "
+                        "Se conserva el catalogo anterior.",
+                        p.id, p.modelos_path, r.status_code)
             continue
         try:
             nuevas = normalizar(p.id, r.json())
-        except (ValueError, TypeError, AttributeError, KeyError):
+        except (ValueError, TypeError, AttributeError, KeyError) as e:
             # Cuerpo no-JSON (ValueError/JSONDecodeError) o JSON de una forma
             # inesperada -- p.ej. un error de auth disfrazado de 200, que deja
             # a normalizar() iterando algo que no son dicts de modelo
             # (AttributeError/KeyError/TypeError). Un proveedor roto no debe
             # tirar abajo la sincronizacion de los demas.
+            log.warning("catalogo de %s: no se pudo interpretar la respuesta de %s "
+                        "(%s: %s). Se conserva el catalogo anterior.",
+                        p.id, p.modelos_path, type(e).__name__, e)
             continue
         if not nuevas:
             # Un 200 con cero modelos utilizables no autoriza a apagar lo que
             # ya se sabia de este proveedor: se trata igual que cualquier otro
             # fallo de ESTE proveedor puntual, sin afectar a los demas.
+            log.warning("catalogo de %s: HTTP 200 con cero modelos utilizables. "
+                        "Mas probable un proveedor roto que un catalogo vacio de "
+                        "verdad: se conserva el catalogo anterior.", p.id)
             continue
         # Este proveedor respondio bien: se persiste YA, con su propio scope,
         # sin esperar a saber que paso con el resto de la lista.
