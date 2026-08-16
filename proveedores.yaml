@@ -1,0 +1,35 @@
+# Registro de proveedores. Los gratis descubren su catalogo desde modelos_path;
+# los de pago declaran sus modelos y capacidades a mano, porque el /v1/models de
+# MiniMax solo devuelve id/created/owned_by, sin metadatos de capacidad.
+proveedores:
+  - id: kilo
+    tier: gratis
+    dialecto: openai
+    base_url: https://api.kilo.ai/api/gateway
+    clave_env: KILO_API_KEY          # OPCIONAL: sin clave el tier anonimo funciona igual
+    modelos_path: /models
+
+  - id: openrouter
+    tier: gratis
+    dialecto: openai
+    base_url: https://openrouter.ai/api/v1
+    clave_env: OPENROUTER_API_KEY
+    modelos_path: /models
+    cabeceras_extra:
+      HTTP-Referer: https://github.com/lordmacu/llm-libre
+      X-Title: llm-libre
+
+  - id: minimax
+    tier: pago
+    dialecto: openai
+    base_url: https://api.minimax.io/v1
+    clave_env: MINIMAX_API_KEY
+    modelos_fijos:
+      # Verificado 2026-08-16 contra la API real: chat, tools y streaming OK.
+      # contexto es un PISO conservador usado solo para filtrar por x_min_contexto;
+      # subirlo si se confirma uno mayor. vision en false porque no se verifico.
+      - id: MiniMax-M3
+        tools: true
+        vision: false
+        contexto: 128000
+        max_salida: 32768
