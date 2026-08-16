@@ -26,12 +26,16 @@ Estas ya se discutieron. No re-litigar sin motivo nuevo.
 
 | Decisión | Elección | Razón |
 |---|---|---|
-| Proveedores | Kilo + OpenRouter, con registro declarativo abierto | Sumar Groq/Cerebras después debe ser una entrada de config, no código |
-| Auto-selección | Capacidades requeridas + salud medida, con perfil opcional | Filtrar por datos reales del catálogo, no por listas curadas a mano |
+| Proveedores | chatgpt-proxy + Kilo + OpenRouter, con registro declarativo abierto | Sumar Groq/Cerebras después debe ser una entrada de config, no código |
+| Auto-selección | Capacidades requeridas + salud medida, con perfil opcional y prioridad manual | Filtrar por datos reales del catálogo, no por listas curadas a mano |
 
 **Nota de vocabulario, para que el código no lo confunda:** *tier* es siempre el tipo de
 proveedor (`gratis` \| `pago`). *Perfil* es siempre lo que prefiere la petición
-(`rapido` \| `balanceado` \| `potente`). Nunca usar una palabra por la otra.
+(`rapido` \| `balanceado` \| `potente`). **`prioridad` (Task 13) es un TERCER concepto,
+separado de los dos**: el orden manual en que el router prueba los proveedores antes de
+mirar puntaje (p.ej. un proveedor propio antes que terceros). Nunca usar una palabra por
+otra, y nunca dejar que `prioridad` decida lo que decide `tier`: una ruta de pago con
+`prioridad: 0` sigue yendo siempre al final (§7).
 | Despliegue | `blog`, docker, público por cloudflared con `X-API-Key` | Mismo patrón que `arkiv-api`; hay consumidores fuera de la LAN |
 | Escape a pago | **Sí**, MiniMax como último escalón, con tope diario por llave | Decisión explícita del usuario (2026-08-16), revirtiendo "solo gratis" |
 | Ranking | Sonda de salud + batería de calidad verificable por código | Puntaje auditable, sin juez-LLM ruidoso ni doble gasto de cuota |
@@ -92,6 +96,19 @@ gateway (§6.1), no en cada app.
 Las 7 copias de la clave de MiniMax en los contenedores de Coolify son **idénticas**
 (mismo SHA-256, 125 caracteres), así que una sola sirve para todo.
 
+**chatgpt-proxy (Task 13, 2026-08-16), verificado contra el proxy real.** Servicio
+propio que expone ChatGPT por su flujo anónimo (sin credenciales — `Authorization`
+solo separa sesiones, no autentica), contrato compatible con OpenAI
+(`/v1/chat/completions`, `/v1/models`, `/health`). Chat sin streaming y streaming
+(forma real de OpenAI: `finish_reason` hermano de `delta`, no adentro) **funcionan**.
+**`tools` NO soportado: devuelve HTTP 500**, no un fallo elegante — por eso sus
+modelos se declaran `tools: false` a mano en `proveedores.yaml`, igual que MiniMax
+(su `/v1/models` tampoco trae metadatos de capacidad). `temperature`/`max_tokens`/etc.
+se aceptan y se ignoran. **Filtra el modo "canvas" de ChatGPT al `content`**, con
+marcas `:::palabra{...}` … `:::` que envuelven la respuesta real (no algo para
+descartar, a diferencia de `<think>`) — el gateway las desenvuelve, en bloque y en
+streaming (§6.1).
+
 ## 4. Arquitectura
 
 Un contenedor. **Un solo worker de uvicorn**: mantiene coherente el estado en memoria
@@ -114,14 +131,26 @@ se prueba entera sin tocar internet.
 
 ```yaml
 proveedores:
+  - id: chatgpt
+    tier: gratis
+    prioridad: 0                 # antes que todo lo demas gratis
+    dialecto: openai
+    base_url_env: CHATGPT_PROXY_URL   # la direccion real viene del entorno
+    base_url: http://127.0.0.1:8888   # default si la variable no esta
+    modelos_fijos: [gpt-5-6, gpt-5-5, gpt-5-6-mini, gpt-5-5-mini, gpt-5-3-mini]
+    # tools:false en los cinco -- mandarle tools devuelve HTTP 500, no un
+    # fallo elegante (verificado 2026-08-16). No se declara "auto" (colisiona
+    # con el alias de llm-libre) ni los alias legacy gpt-4o/gpt-4/gpt-3.5.
   - id: kilo
     tier: gratis
+    prioridad: 1
     dialecto: openai
     base_url: https://api.kilo.ai/api/gateway
     clave_env: KILO_API_KEY      # opcional: si falta, va anónimo
     modelos_path: /models
   - id: openrouter
     tier: gratis
+    prioridad: 1
     dialecto: openai
     base_url: https://openrouter.ai/api/v1
     clave_env: OPENROUTER_API_KEY
@@ -131,11 +160,20 @@ proveedores:
       X-Title: llm-libre
   - id: minimax
     tier: pago
+    prioridad: 2
     dialecto: openai
     base_url: https://api.minimax.io/v1
     clave_env: MINIMAX_API_KEY
     modelos_fijos: [MiniMax-M3]   # no se descubre: es de pago y no se sondea
 ```
+
+`prioridad` (Task 13, default `100` si no se declara) es un entero manual —
+ver la nota de vocabulario en §2 — que el router usa ANTES del puntaje, pero
+DESPUÉS del filtro `tier == "pago"` (§7): nunca puede comprarle a una ruta de
+pago un lugar antes que lo gratis. `base_url_env`, si está declarada, permite
+que la URL real venga del entorno (con el `base_url` del YAML como default) —
+existe porque `chatgpt-proxy` se despliega en `blog` y su dirección todavía
+no está fija.
 
 ## 5. Modelo de datos
 
@@ -147,8 +185,10 @@ SQLite, un archivo en volumen:
 
 - **`rutas`** — `proveedor`, `modelo_id`, `tier`, capacidades normalizadas
   (`soporta_tools`, `soporta_vision`, `contexto`, `max_salida`), `visto_por_ultima_vez`,
-  `activa`. Las rutas que desaparecen del catálogo se marcan inactivas, **no se borran**:
-  el histórico sirve para detectar renombres como el de `laguna`.
+  `activa`, `prioridad` (Task 13, `INTEGER NOT NULL DEFAULT 100`, migración idempotente
+  con `ALTER TABLE`, mismo patrón que `latencia_ms`). Las rutas que desaparecen del
+  catálogo se marcan inactivas, **no se borran**: el histórico sirve para detectar
+  renombres como el de `laguna`.
 - **`sondas`** — una fila por sonda: `ruta`, `tipo` (salud|calidad), `momento`, `ok`,
   `latencia_ms`, `ttft_ms`, `codigo_http`, `casos_pasados`, `casos_totales`.
 - **`eventos`** — telemetría del tráfico real: `ruta`, `momento`, `ok`, `latencia_ms`,
@@ -207,6 +247,16 @@ Varios modelos —gratis y de pago— escupen su cadena de pensamiento dentro de
 
 Se puede desactivar por petición con `x_crudo: true`.
 
+**Cercas de canvas (Task 13).** `chatgpt-proxy` filtra el modo "canvas" de ChatGPT al
+`content` con marcas `:::palabra{...atributos...}` … `:::` envolviendo la respuesta.
+**Al revés que `<think>`: el contenido de ADENTRO es la respuesta**, no algo para
+descartar — solo se quitan las dos líneas de marca (apertura y cierre), conservando
+todo lo demás carácter por carácter. Mismo requisito que el recorte de razonamiento: la
+marca puede llegar partida entre chunks en streaming. Una cerca que nunca cierra no
+pierde contenido (solo se descuenta la marca de apertura, ya confirmada); un `:::` que
+no está al inicio de línea, o al que no le sigue una palabra, nunca se confunde con una
+marca real.
+
 ### `GET /v1/models`
 
 El catálogo normalizado en formato OpenAI (para que los SDK lo listen), más los alias `auto*`.
@@ -256,8 +306,22 @@ pedido: `rapido` pondera latencia, `potente` pondera calidad y contexto, `balanc
 default) reparte parejo.
 
 El router devuelve una **lista ordenada**, no un ganador único: el proxy baja por ella ante
-fallos. Las rutas de pago van siempre al final, y solo entran si (a) se agotaron las gratis,
-(b) la llave no superó su tope diario y (c) la petición no trae `x_permitir_pago: false`.
+fallos. La clave de orden completa (Task 13) es
+`(tier == "pago", prioridad, no-medida, -puntaje)`:
+
+1. **`tier == "pago"` decide primero, siempre.** Las rutas de pago van siempre al final, y
+   solo entran si (a) se agotaron las gratis, (b) la llave no superó su tope diario y (c) la
+   petición no trae `x_permitir_pago: false`. **Ninguna `prioridad` puede comprar ese
+   lugar**: una ruta de pago con `prioridad: 0` sigue yendo última. La plata es la razón.
+2. **`prioridad`** (entero manual, default `100`, ver §2 y §4) decide dentro de un mismo
+   `tier` — p.ej. `chatgpt` (`prioridad: 0`) se prueba antes que `kilo`/`openrouter`
+   (`prioridad: 1`), aunque puntúe peor.
+3. A igual prioridad, una ruta nunca sondeada por la batería de calidad va después de una
+   con medición real (el criterio que ya existía).
+4. Y recién ahí decide el puntaje.
+
+Un `model` explícito (un id real, no un alias `auto*`) sigue evitando todo este orden: filtra
+directo a esa ruta, sin mirar prioridad ni puntaje.
 
 ## 8. Sondeo
 
@@ -325,13 +389,24 @@ desarrollo.
 
 - **Mayoría sin red:** `ranking` y `router` son funciones puras; se prueban con datos
   fabricados. Incluye los casos que importan: empate, todo en cooldown, ninguna ruta con
-  tools, ruta nueva sin evaluar, tope de pago alcanzado.
+  tools, ruta nueva sin evaluar, tope de pago alcanzado, y (Task 13) el invariante de que
+  una ruta de pago con `prioridad: 0` y puntaje perfecto sigue yendo al final contra una
+  ruta gratis mediocre, y que un `model` explícito evita el orden por completo.
 - **Normalización de catálogo:** contra JSON reales grabados de Kilo y OpenRouter, incluido
   el caso `lyria` (precio 0 pero modelo de música → debe descartarse).
 - **Recorte de razonamiento:** con la etiqueta partida en todas las posiciones posibles
   entre chunks, bloques anidados, y una etiqueta que nunca cierra (no debe tragarse la
   respuesta entera ni colgar el stream).
-- **Integración real:** un puñado marcado para no correr en CI, contra los proveedores vivos.
+- **Cercas de canvas (Task 13):** mismo estándar que el recorte de razonamiento — la marca
+  partida en cada posición posible entre chunks, una cerca que nunca cierra (no debe
+  perder contenido), texto con `:::` que no es una cerca real (no debe tocarse), y
+  contenido normal intacto.
+- **Migración de esquema (Task 13):** `rutas.prioridad` verificada contra una base con el
+  esquema viejo (sin esa columna) y filas ya adentro — no debe reventar al abrir, la fila
+  preexistente migra al default, y la base sigue siendo escribible después.
+- **Integración real:** un puñado marcado para no correr en CI, contra los proveedores vivos
+  — incluye `chatgpt-proxy` (Task 13), que se salta limpio si `CHATGPT_PROXY_URL` no está
+  configurada.
 
 ## 13. Fuera de alcance
 
