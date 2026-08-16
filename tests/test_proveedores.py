@@ -279,6 +279,38 @@ def test_base_url_env_sin_sufijo_en_el_default_no_agrega_nada(tmp_path):
     assert p.base_url == "https://otra.test"
 
 
+# --- Re-revision: la regla de normalizacion era DEMASIADO ansiosa -- agregaba
+#     el sufijo sin condicion, asi que "...:8888/v2" (una ruta PROPIA del
+#     operador, p.ej. un mount de reverse proxy) terminaba en
+#     ".../v2/v1/chat/completions". Se aprieta: solo se agrega el sufijo
+#     cuando la URL del entorno NO trae ruta propia (vacia o "/"); si ya trae
+#     una, se usa TAL CUAL -- "dijeron lo que quisieron decir" -- con un aviso
+#     por si fue sin querer, no una correccion silenciosa. ---
+
+def test_base_url_env_con_ruta_propia_no_se_le_pisa_el_sufijo():
+    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
+                   if p.id == "chatgpt")
+    assert chatgpt.base_url == "https://blog.test:8888/v2"
+
+
+def test_base_url_env_con_ruta_propia_loguea_advertencia_sin_modificar(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="llm_libre.proveedores"):
+        chatgpt = next(
+            p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
+            if p.id == "chatgpt")
+    assert chatgpt.base_url == "https://blog.test:8888/v2"
+    assert "chatgpt" in caplog.text
+    assert "/v2" in caplog.text
+
+
+def test_base_url_env_con_la_ruta_correcta_no_loguea_nada(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger="llm_libre.proveedores"):
+        cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
+    assert caplog.text == ""
+
+
 def test_rutas_fijas_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_path):
     yaml_prioridad_rara = tmp_path / "prioridad_rara.yaml"
     yaml_prioridad_rara.write_text(

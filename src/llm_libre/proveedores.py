@@ -57,29 +57,44 @@ def _resolver_base_url(p: dict, entorno: dict) -> str:
     sin tener que editar el YAML en cada despliegue.
 
     Si el `base_url` por default trae una RUTA (p.ej. el "/v1" de chatgpt) y
-    la variable de entorno no la trae, se la agregamos: el operador solo
-    tiene que acordarse del host, no de la ruta interna del proveedor. Sin
-    esto, "CHATGPT_PROXY_URL=https://blog.example" (sin /v1) deja cada
-    peticion de chat pegando a una URL que no existe -- el MISMO footgun que
-    ya se arreglo del lado del YAML (base_url original sin /v1, Task 13),
-    sobreviviendo del lado del entorno. Se normaliza en vez de reventar al
-    arrancar porque hay una unica interpretacion correcta (el sufijo que el
-    propio YAML ya declara); se loguea igual, para que quede visible."""
+    la variable de entorno NO TRAE NINGUNA RUTA PROPIA (esta vacia o es solo
+    "/", o sea el operador puso nada mas que el host), se la agregamos: el
+    operador solo tiene que acordarse del host, no de la ruta interna del
+    proveedor. Sin esto, "CHATGPT_PROXY_URL=https://blog.example" (sin /v1)
+    deja cada peticion de chat pegando a una URL que no existe -- el MISMO
+    footgun que ya se arreglo del lado del YAML (base_url original sin /v1,
+    Task 13), sobreviviendo del lado del entorno.
+
+    Si la variable de entorno SI trae una ruta propia (p.ej. un mount de
+    reverse proxy que sirve el chat bajo su propio prefijo) y esa ruta no
+    coincide con el sufijo esperado, NO se toca: agregarla igual convertiria
+    ".../v2" (una ruta que el operador eligio a proposito) en
+    ".../v2/v1/chat/completions", sin ninguna forma de decir "no, dejala
+    como esta". El operador dijo lo que quiso decir; solo se avisa, por si
+    fue sin querer -- ver el aviso mas abajo."""
     env_var = p.get("base_url_env")
     if not env_var:
         return p["base_url"]
-    desde_entorno = (entorno.get(env_var, "") or "").strip()
+    desde_entorno = (entorno.get(env_var, "") or "").strip().rstrip("/")
     if not desde_entorno:
         return p["base_url"]
-    desde_entorno = desde_entorno.rstrip("/")
     sufijo = urlsplit(p["base_url"]).path.rstrip("/")
-    if sufijo and not desde_entorno.endswith(sufijo):
+    if not sufijo:
+        return desde_entorno
+    ruta_entorno = urlsplit(desde_entorno).path.rstrip("/")
+    if not ruta_entorno:
         log.warning(
-            "%s: %s='%s' no trae el sufijo '%s' que proveedores.yaml declara "
-            "para este proveedor; se agrega automaticamente (%s%s). Definir "
-            "la variable con el sufijo ya incluido evita este aviso.",
+            "%s: %s='%s' no trae ninguna ruta; se agrega el sufijo '%s' que "
+            "proveedores.yaml declara para este proveedor (%s%s). Definir la "
+            "variable con el sufijo ya incluido evita este aviso.",
             p["id"], env_var, desde_entorno, sufijo, desde_entorno, sufijo)
-        desde_entorno += sufijo
+        return desde_entorno + sufijo
+    if ruta_entorno != sufijo:
+        log.warning(
+            "%s: %s='%s' trae una ruta ('%s') distinta del sufijo '%s' que "
+            "proveedores.yaml declara por default para este proveedor; se usa "
+            "TAL CUAL, sin modificar -- si fue sin querer, corregi la variable.",
+            p["id"], env_var, desde_entorno, ruta_entorno, sufijo)
     return desde_entorno
 
 
