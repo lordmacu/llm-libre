@@ -75,6 +75,27 @@ las conoce las ignora sin romperse:
 | `x_permitir_pago` | `false` desactiva el escalón de pago (MiniMax) para esa petición puntual |
 | `x_crudo` | `true` desactiva el recorte de razonamiento (`<think>`, etc.) y devuelve el `content` tal cual lo mandó el proveedor |
 
+## `x_razonamiento` en la respuesta
+
+Varios modelos —gratis y de pago— escupen su cadena de pensamiento dentro de
+`content`, entre etiquetas `<think>` / `<thinking>` / `<reasoning>`. El gateway
+la separa: el `content` que ve el cliente queda limpio y el bloque recortado
+vuelve en un campo de nivel superior, `x_razonamiento`, que cualquier SDK de
+OpenAI ignora sin romperse.
+
+```json
+{
+  "choices": [{"message": {"role": "assistant", "content": "La respuesta es 4."}}],
+  "x_razonamiento": "2+2 son 4"
+}
+```
+
+El campo solo aparece si de verdad hubo algo que recortar. **En streaming no
+va**: meterlo ahí obligaría a emitir un evento SSE no estándar, justo lo que
+el contrato evita para no romper el parseo de los SDK. Un cliente que streamea
+y quiere el razonamiento pide `x_crudo: true` y lo recibe dentro del `content`,
+tal cual lo mandó el proveedor.
+
 ## Cabeceras de respuesta
 
 Toda respuesta **no-streaming** de `/v1/chat/completions` lleva:

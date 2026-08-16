@@ -152,7 +152,23 @@ def crear_app(estado: Estado) -> FastAPI:
         if r.ruta is not None:
             cabeceras["X-Ruta-Usada"] = r.ruta.clave
             cabeceras["X-Tier"] = r.ruta.tier
-        return JSONResponse(r.json, status_code=r.estado, headers=cabeceras)
+        cuerpo_resp = r.json
+        if r.estado == 200 and r.razonamiento and isinstance(cuerpo_resp, dict):
+            # §6.1: el razonamiento recortado se devuelve en un campo aparte,
+            # "para quien lo quiera". Antes se recortaba de `content` y se
+            # tiraba, asi que con el default `x_crudo: false` no habia forma de
+            # recuperarlo. Va al nivel superior (no dentro de `choices`) porque
+            # ahi cualquier SDK de OpenAI lo ignora sin romperse, que es la
+            # unica condicion que el contrato pone a las extensiones.
+            #
+            # LIMITACION CONOCIDA, deliberada: en streaming NO se devuelve.
+            # Meterlo ahi obliga a emitir un evento SSE no estandar, que es
+            # justo lo que el §6 descarta por arriesgar el parseo de los SDK
+            # que este contrato existe para complacer. Un cliente que streamea
+            # y quiere el razonamiento pide `x_crudo: true` y lo recibe dentro
+            # del `content`, tal cual lo mando el proveedor.
+            cuerpo_resp = {**cuerpo_resp, "x_razonamiento": r.razonamiento}
+        return JSONResponse(cuerpo_resp, status_code=r.estado, headers=cabeceras)
 
     @app.get("/v1/models")
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):

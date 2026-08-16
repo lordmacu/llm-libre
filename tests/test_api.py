@@ -495,3 +495,46 @@ def test_el_503_por_indisponibilidad_no_reporta_liberacion_si_no_hay_cooldown():
     assert r.status_code == 503
     assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(
         estado.proxy.cooldowns["free_prov/f:free"])
+
+
+# --- Fix round 3, I2: el §6.1 promete devolver el razonamiento recortado en un
+#     campo aparte, `x_razonamiento`. Se recortaba de `content` y se tiraba: un
+#     cliente con el default `x_crudo: false` no tenia forma de recuperarlo. ---
+
+def _cliente_que_piensa(contenido):
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    almacen.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "",
+                              "/models", {}, [])}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={"choices": [
+            {"message": {"role": "assistant", "content": contenido}}]})))
+    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
+                    llaves={"buena"}, tope_pago_diario=200)
+    return TestClient(crear_app(estado))
+
+
+def test_devuelve_el_razonamiento_recortado_en_x_razonamiento():
+    cliente = _cliente_que_piensa("<think>2+2 son 4</think>La respuesta es 4.")
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": []})
+    assert r.status_code == 200
+    assert r.json()["choices"][0]["message"]["content"] == "La respuesta es 4."
+    assert r.json()["x_razonamiento"] == "2+2 son 4"
+
+
+def test_sin_razonamiento_no_agrega_el_campo():
+    cliente = _cliente_que_piensa("La respuesta es 4.")
+    assert "x_razonamiento" not in cliente.post(
+        "/v1/chat/completions", headers={"X-API-Key": "buena"},
+        json={"model": "auto", "messages": []}).json()
+
+
+def test_en_modo_crudo_no_hay_x_razonamiento_porque_sigue_en_el_content():
+    cliente = _cliente_que_piensa("<think>mmm</think>hola")
+    cuerpo = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                          json={"model": "auto", "messages": [], "x_crudo": True}).json()
+    assert cuerpo["choices"][0]["message"]["content"] == "<think>mmm</think>hola"
+    assert "x_razonamiento" not in cuerpo
