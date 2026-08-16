@@ -439,3 +439,73 @@ async def test_un_solo_200_invalido_no_castiga_pero_n_seguidos_si():
     for i in range(TOPE_FALLOS_SEGUIDOS):
         await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
     assert "kilo/a:free" in p.cooldowns
+
+
+# --- Re-revision: hallazgo HIGH. Un 4xx (que no sea 429) es un error
+#     DETERMINISTA del CLIENTE -- payload invalido, parametro no soportado,
+#     secuencia de roles invalida -- que el proveedor le devuelve a
+#     CUALQUIERA que mande ese mismo pedido, sano o no. Contarlo hacia el
+#     cooldown convierte el error de UN cliente en un apagon para TODOS:
+#     verificado contra el registro real de 5 rutas, tres pedidos
+#     malformados seguidos bastan para dejar las cinco en cooldown, y una
+#     llave DISTINTA con un pedido valido recibe 503 mientras tanto. Antes de
+#     este fix un 400 solo perjudicaba al cliente que lo mando -- ahora tiene
+#     que seguir siendo asi. ---
+
+async def test_tres_400_seguidos_no_castigan():
+    p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" not in p.cooldowns
+
+
+async def test_tras_400_seguidos_un_pedido_valido_de_otra_llave_sigue_sirviendose():
+    # "Otra llave" no es un concepto de Proxy (eso vive en api.py); lo que se
+    # prueba aca es la causa raiz: sin cooldown activado por el 400, una
+    # llamada SIGUIENTE (de quien sea) sigue intentando la ruta normalmente,
+    # no la encuentra "agotada por castigo" de entrada.
+    estado = {"fallar": True}
+
+    def handler(req):
+        if estado["fallar"]:
+            return httpx.Response(400, json={"error": "context_length_exceeded"})
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" not in p.cooldowns
+
+    estado["fallar"] = False
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=100.0)
+    assert r.estado == 200
+
+
+async def test_tres_500_siguen_castigando_igual_que_antes():
+    # Regresion directa: el fix de 4xx no debe tocar el camino de 5xx.
+    p = _proxy(lambda req: httpx.Response(500))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" in p.cooldowns
+
+
+async def test_mezcla_de_4xx_y_5xx_solo_cuenta_los_5xx():
+    # 400, 500, 400, 500, 400, 500: si el 400 contara, castigaria antes de
+    # tiempo. Con TOPE_FALLOS_SEGUIDOS=3, hacen falta las TRES respuestas 500
+    # (llamadas 2, 4 y 6) para castigar -- los 400 intercalados no cuentan
+    # (ni suman ni reinician el contador).
+    codigos = [400, 500, 400, 500, 400, 500]
+    llamadas = []
+
+    def handler(req):
+        codigo = codigos[len(llamadas)]
+        llamadas.append(codigo)
+        return httpx.Response(codigo)
+
+    p = _proxy(handler)
+    for i in range(5):   # las primeras 5 (400,500,400,500,400): solo dos 500
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" not in p.cooldowns
+
+    await p.completar([_ruta("a:free")], CUERPO, ahora=5.0)   # el tercer 500
+    assert "kilo/a:free" in p.cooldowns

@@ -525,3 +525,47 @@ async def test_un_exito_en_streaming_limpia_los_fallos_duros_seguidos():
     for i in range(TOPE_FALLOS_SEGUIDOS):
         [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
     assert "kilo/a:free" not in p.cooldowns
+
+
+async def test_tres_400_seguidos_en_streaming_no_castigan():
+    # Misma correccion HIGH que en completar(): un 4xx (no 429) es un error
+    # DETERMINISTA del cliente, no una senal de que la ruta este rota.
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
+    assert "kilo/a:free" not in p.cooldowns
+
+
+# --- Re-revision: hallazgo MEDIUM. completar_stream() seguia usando el
+#     TIMEOUT_S global fijo, ignorando Proveedor.timeout_s -- streaming es el
+#     default de los clientes de chat, y es precisamente el camino del
+#     escenario "proxy colgado" que motivo el timeout por proveedor. Un knob
+#     que no hace nada es peor que no tener knob. ---
+
+async def test_usa_el_timeout_propio_del_proveedor_en_streaming():
+    vistos = []
+
+    def handler(req):
+        vistos.append(req.extensions.get("timeout"))
+        return httpx.Response(200, content=_sse("bien"))
+
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    lento = Proveedor("lento", "gratis", "openai", "https://lento.test", "", "/models",
+                      {}, [], timeout_s=20.0)
+    p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    [l async for l in p.completar_stream([_ruta(proveedor="lento")], CUERPO, 0.0)]
+    assert vistos[0]["read"] == 20.0
+
+
+async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_suyo():
+    vistos = []
+
+    def handler(req):
+        vistos.append(req.extensions.get("timeout"))
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)   # kilo, sin timeout_s declarado
+    [l async for l in p.completar_stream([_ruta(proveedor="kilo")], CUERPO, 0.0)]
+    assert vistos[0]["read"] == 90.0   # TIMEOUT_S

@@ -63,6 +63,21 @@ _SOBRE_CHUNK = frozenset({"id", "object", "created", "model",
 _SOBRE_ELECCION = frozenset({"index"})
 
 
+def _es_error_del_cliente(codigo: int) -> bool:
+    """4xx que no sea 429 (ese tiene su propio castigo inmediato, ver
+    _castigar): un error DETERMINISTA del CLIENTE -- payload invalido, un
+    parametro que el proveedor no soporta, una secuencia de roles invalida
+    -- que el proveedor le devuelve a CUALQUIERA que mande ese mismo pedido,
+    sano o no. Contarlo hacia el cooldown de fallos duros convertiria el
+    error de UN cliente en un apagon para TODOS: verificado contra el
+    registro real de 5 rutas, tres pedidos malformados seguidos bastan para
+    dejar las cinco en cooldown, y una llave DISTINTA con un pedido valido
+    recibe 503 mientras tanto. Antes del cooldown de fallos duros (Task 13)
+    un 400 solo perjudicaba al cliente que lo mando; tiene que seguir siendo
+    asi."""
+    return 400 <= codigo < 500 and codigo != 429
+
+
 def _timeout_de(proveedor) -> float:
     """`Proveedor.timeout_s` (default None) permite acotar el peor caso de UN
     proveedor puntual -- p.ej. uno que puede colgarse -- sin bajarle el
@@ -203,7 +218,7 @@ class Proxy:
 
             if codigo == 429:
                 self._castigar(ruta.clave, ahora)
-            else:
+            elif not _es_error_del_cliente(codigo):
                 self._registrar_fallo(ruta.clave, ahora)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
 
@@ -269,11 +284,11 @@ class Proxy:
 
             try:
                 async with self.http.stream("POST", url, headers=cabeceras, json=payload,
-                                            timeout=TIMEOUT_S) as resp:
+                                            timeout=_timeout_de(proveedor)) as resp:
                     if resp.status_code != 200:
                         if resp.status_code == 429:
                             self._castigar(ruta.clave, ahora)
-                        else:
+                        elif not _es_error_del_cliente(resp.status_code):
                             self._registrar_fallo(ruta.clave, ahora)
                         self.almacen.registrar_evento(ruta.clave, False, 0,
                                                       resp.status_code, ahora)
