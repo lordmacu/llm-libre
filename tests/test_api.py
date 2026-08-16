@@ -538,3 +538,18 @@ def test_en_modo_crudo_no_hay_x_razonamiento_porque_sigue_en_el_content():
                           json={"model": "auto", "messages": [], "x_crudo": True}).json()
     assert cuerpo["choices"][0]["message"]["content"] == "<think>mmm</think>hola"
     assert "x_razonamiento" not in cuerpo
+
+
+# --- Fix round 3, ALSO: el acoplamiento entre el neutro de confiabilidad y el
+#     piso de /health es cargante y vive en dos archivos distintos, sin nada
+#     que lo pruebe. Si alguna vez se invierte, una instalacion NUEVA -- sin
+#     un solo evento todavia -- reporta "caido" y Coolify nunca marca el
+#     contenedor como sano: el servicio no arranca nunca, por una constante. ---
+
+def test_el_neutro_de_confiabilidad_queda_por_encima_del_piso_de_health():
+    from llm_libre.api import UMBRAL_CONFIABILIDAD_SALUD
+    from llm_libre.modelos import CONFIABILIDAD_NEUTRA
+    assert CONFIABILIDAD_NEUTRA > UMBRAL_CONFIABILIDAD_SALUD, (
+        "una ruta sin telemetria debe contar como viva (§6 del diseno): con el "
+        "neutro por debajo del piso, /health diria 'caido' en una instalacion "
+        "nueva y el contenedor nunca pasaria el health check")

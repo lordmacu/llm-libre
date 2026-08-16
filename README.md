@@ -48,8 +48,14 @@ de dos cabeceras:
 
 ## Alias `auto*`
 
-El campo `model` acepta un id real (`kilo/nvidia/nemotron-3-super-120b-a12b:free`,
-por ejemplo) o uno de estos alias virtuales:
+El campo `model` acepta un id real o uno de estos alias virtuales. El id real
+es el del **modelo**, sin prefijo de proveedor — tal cual lo lista
+`GET /v1/models` (por ejemplo `nvidia/nemotron-3-super-120b-a12b:free`, donde
+`nvidia/` es parte del id del modelo, no el proveedor). Es a propósito: el
+mismo modelo suele existir en varios proveedores, y pedirlo por su id deja que
+el gateway haga failover entre ellos. Quién lo sirvió se ve después, en la
+cabecera `X-Ruta-Usada` (`kilo/nvidia/nemotron-3-super-120b-a12b:free`), que
+sí lleva el proveedor adelante.
 
 | Alias | Qué selecciona |
 |---|---|
