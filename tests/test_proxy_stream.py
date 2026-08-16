@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import time
 
 import httpx
@@ -409,3 +410,39 @@ async def test_el_sobre_repetido_no_convierte_en_util_a_un_chunk_de_razonamiento
     filas = p.almacen._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
     assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
+
+
+# --- Fix round 4, Minor: descartar chunks retenidos deja de ser silencioso. ---
+
+async def test_avisa_cuando_descarta_los_chunks_retenidos_de_un_intento_fallido(caplog):
+    vacio = (b'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n'
+             b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n'
+             b'data: [DONE]\n\n')
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(1)
+        if len(llamadas) == 1:
+            return httpx.Response(200, content=vacio)
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    with caplog.at_level(logging.INFO, logger="llm_libre.proxy"):
+        texto = await _juntar(p.completar_stream([_ruta("a:free"), _ruta("b:free")],
+                                                 CUERPO, 0.0))
+    assert texto == "bien"
+    assert "kilo/a:free" in caplog.text
+    assert "descarta" in caplog.text
+
+
+async def test_avisa_cuando_la_retencion_se_desborda(caplog):
+    # Mas de TOPE_PENDIENTES chunks sin contenido: se sueltan y el intento ya
+    # no puede hacer failover limpio. Eso tiene que quedar dicho.
+    from llm_libre.proxy import TOPE_PENDIENTES
+    ruido = b"".join(
+        b'data: {"choices":[{"index":0,"delta":{"reasoning":"x"}}]}\n\n'
+        for _ in range(TOPE_PENDIENTES + 5))
+    p = _proxy(lambda req: httpx.Response(200, content=ruido + b"data: [DONE]\n\n"))
+    with caplog.at_level(logging.INFO, logger="llm_libre.proxy"):
+        [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, 0.0)]
+    assert "kilo/a:free" in caplog.text

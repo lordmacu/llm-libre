@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -8,6 +9,8 @@ import httpx
 from llm_libre.cliente import armar_peticion
 from llm_libre.modelos import Ruta
 from llm_libre.razonamiento import RecortadorStream, recortar
+
+log = logging.getLogger(__name__)
 
 COOLDOWN_BASE_S = 60.0
 COOLDOWN_TOPE_S = 3600.0
@@ -141,6 +144,15 @@ class Proxy:
                 except ValueError:
                     datos = None
                     ultimo_error = "200 con cuerpo no-JSON"
+                else:
+                    # JSON valido pero que no es un objeto (p.ej. una lista):
+                    # `_limpiar` de mas abajo hace datos.get(...) y reventaria
+                    # con AttributeError sin atrapar -- o sea un 500 del
+                    # gateway porque el proveedor mando algo raro. El mismo
+                    # trato que el cuerpo no-JSON, y ANTES de tocar `datos`.
+                    if not isinstance(datos, dict):
+                        datos = None
+                        ultimo_error = "200 con cuerpo JSON que no es un objeto"
 
             # Mismo lugar y mismo trato que el guard de arriba: un 200 que no
             # trae respuesta adentro tampoco es un exito. El recorte del
@@ -303,6 +315,10 @@ class Proxy:
                                 # sueltan (se pierde el failover limpio) pero
                                 # el intento sigue contando como fallido si
                                 # nunca llega contenido de verdad.
+                                log.info(
+                                    "stream de %s: mas de %d chunks sin contenido "
+                                    "retenidos; se sueltan y este intento ya no puede "
+                                    "hacer failover limpio", ruta.clave, TOPE_PENDIENTES)
                                 for p in pendientes:
                                     yield p
                                 pendientes.clear()
@@ -334,6 +350,15 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
+                        if pendientes:
+                            # Lo retenido se va a la basura junto con el intento.
+                            # Es lo correcto (nada de eso llego al cliente, asi
+                            # que el failover sigue siendo limpio) pero no puede
+                            # ser silencioso: son chunks de una ruta que dijo 200.
+                            log.info(
+                                "stream de %s: se descartan %d chunk(s) retenidos; el "
+                                "intento cerro sin contenido ni tool_calls",
+                                ruta.clave, len(pendientes))
                         if emitido:
                             # Ya se solto lo retenido (ver TOPE_PENDIENTES): no
                             # se puede empalmar otra ruta encima sin mezclar

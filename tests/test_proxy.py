@@ -271,3 +271,30 @@ async def test_el_camino_no_streaming_guarda_latencia_no_ttft():
         "SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
     assert fila[0] == 0                # no se inventa un ttft
     assert fila[1] is not None         # pero la latencia real si queda registrada
+
+
+# --- Fix round 4, Minor: un 200 cuyo JSON es valido pero NO es un objeto (una
+#     lista) llegaba a `_limpiar`, que hace datos.get(...) -> AttributeError
+#     sin atrapar -> 500. Preexistente, pero la defensa de `hay_respuesta`
+#     quedo una linea DESPUES de donde hacia falta. Un gateway de passthrough
+#     no puede devolver 500 porque el proveedor mando algo raro. ---
+
+async def test_un_200_cuyo_json_no_es_un_objeto_no_revienta():
+    p = _proxy(lambda req: httpx.Response(200, json=[1, 2, 3]))
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert r.estado == 503
+    assert "kilo/a:free" not in p.cooldowns     # no es rate-limit, esta rota
+
+
+async def test_un_200_con_json_que_no_es_objeto_pasa_a_la_siguiente_ruta():
+    llamadas = []
+
+    def handler(req):
+        llamadas.append(req.url)
+        if len(llamadas) == 1:
+            return httpx.Response(200, json=["esto no es una respuesta"])
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
+    assert r.estado == 200 and r.ruta.modelo_id == "b:free"
