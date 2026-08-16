@@ -21,26 +21,38 @@ def compatibles(rutas: list[Ruta], pedido: Pedido) -> list[Ruta]:
 
 def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
             ahora: float) -> list[Ruta]:
-    """Devuelve la cadena de intentos, mejor primero. Las de pago van siempre al final."""
+    """Devuelve la cadena de intentos, mejor primero.
+
+    Orden: `(tier == "pago", prioridad, no-medida, -puntaje)`.
+
+    INVARIANTE que nada de lo que sigue puede romper: las rutas de PAGO van
+    siempre al final, sin importar su `prioridad` ni su puntaje. Por eso
+    `tier == "pago"` es el PRIMER criterio de la tupla (False < True ordena
+    gratis antes que pago) y `prioridad` -- un concepto totalmente aparte,
+    ver Ruta.prioridad -- entra recien despues: una ruta de pago con
+    `prioridad: 0` no puede comprar un lugar antes que lo gratis. La plata es
+    la razon.
+
+    Dentro de un mismo tier, `prioridad` (menor primero) decide antes que el
+    puntaje: es el orden manual declarado en el YAML (p.ej. un proveedor
+    propio antes que los de terceros). A igual prioridad, el criterio previo
+    a este cambio sigue intacto: una ruta nunca sondeada por la bateria de
+    calidad (calidad_medida_en is None) va despues de una con medicion real,
+    y recien ahi decide el puntaje.
+    """
     candidatas = compatibles(rutas, pedido)
     if not pedido.permitir_pago:
         candidatas = [r for r in candidatas if r.tier == "gratis"]
     disponibles = [r for r in candidatas
                    if metricas.get(r.clave, METRICAS_NEUTRAS).en_cooldown_hasta <= ahora]
 
-    def orden(r: Ruta) -> tuple[int, float]:
-        # Primer criterio: haber sido medida. Una ruta que nunca paso por la
-        # bateria de calidad lleva el valor NEUTRO, que es un supuesto, no una
-        # medicion -- y un supuesto no puede ganarle a un puntaje real, o un
-        # modelo recien aparecido (rapido y sin evaluar) se sirve como si fuera
-        # el mejor durante todo un ciclo de calidad. Sigue en la lista, solo
-        # que despues: tiene que recibir trafico alguna vez o nunca se mediria.
+    def orden(r: Ruta) -> tuple[bool, int, int, float]:
         m = metricas.get(r.clave, METRICAS_NEUTRAS)
-        return (1 if m.calidad_medida_en is None else 0, -puntuar(m, pedido.perfil))
+        return (r.tier == "pago", r.prioridad,
+                1 if m.calidad_medida_en is None else 0,
+                -puntuar(m, pedido.perfil))
 
-    gratis = sorted([r for r in disponibles if r.tier == "gratis"], key=orden)
-    pago = sorted([r for r in disponibles if r.tier == "pago"], key=orden)
-    return gratis + pago
+    return sorted(disponibles, key=orden)
 
 
 def _cumple(r: Ruta, p: Pedido) -> bool:

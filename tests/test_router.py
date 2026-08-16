@@ -123,3 +123,45 @@ def test_entre_dos_nunca_sondeadas_sigue_mandando_el_puntaje():
                 "kilo/rapida:free": m(ttft=100, medida_en=None)}
     salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
     assert [x.modelo_id for x in salida] == ["rapida:free", "lenta:free"]
+
+
+# --- Task 13: `prioridad`, un concepto DISTINTO de `tier` y de `perfil`. ---
+
+def _rp(modelo, prioridad, proveedor="kilo", tier="gratis", tools=True):
+    return Ruta(proveedor, modelo, tier,
+                Capacidades(tools=tools, vision=False, contexto=100000, max_salida=4096),
+                prioridad=prioridad)
+
+
+def test_la_prioridad_ordena_dentro_del_mismo_tier_por_encima_del_puntaje():
+    # gpt-5 (prioridad 0) puntua PEOR que el gratis de siempre (prioridad 1,
+    # el default) y aun asi tiene que ganarle: la prioridad decide antes que
+    # el puntaje dentro del mismo tier.
+    rutas = [_rp("chatgpt:free", 0, proveedor="chatgpt"), _rp("normal:free", 1)]
+    metricas = {"chatgpt/chatgpt:free": m(calidad=0.3, confiabilidad=0.3, ttft=3000),
+                "kilo/normal:free": m(calidad=0.99, confiabilidad=0.99, ttft=50)}
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["chatgpt:free", "normal:free"]
+
+
+def test_la_prioridad_no_rompe_el_invariante_de_pago_al_final():
+    # EL CASO QUE IMPORTA: una ruta de PAGO con prioridad 0 (la mas alta
+    # posible) y un puntaje perfecto contra una ruta gratis mediocre con la
+    # prioridad default. La plata es la razon: pago va al final SIEMPRE, la
+    # prioridad no puede comprar ese lugar.
+    rutas = [_rp("MiniMax-M3", 0, proveedor="minimax", tier="pago"),
+             _rp("mediocre:free", 100)]
+    metricas = {"minimax/MiniMax-M3": m(calidad=1.0, confiabilidad=1.0, ttft=50),
+                "kilo/mediocre:free": m(calidad=0.2, confiabilidad=0.3, ttft=5000)}
+    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    assert [x.tier for x in salida] == ["gratis", "pago"]
+    assert [x.modelo_id for x in salida] == ["mediocre:free", "MiniMax-M3"]
+
+
+def test_un_modelo_explicito_se_sirve_aunque_no_sea_el_de_mayor_prioridad():
+    # "Elegir modelo a mano ya funciona y debe seguir igual" (brief, punto 4):
+    # pedir un id real evita el ordenamiento por completo, prioridad incluida.
+    rutas = [_rp("prioritario:free", 0, proveedor="chatgpt"),
+             _rp("elegido-a-mano:free", 1)]
+    salida = ordenar(rutas, {}, Pedido(modelo="elegido-a-mano:free"), ahora=0.0)
+    assert [x.modelo_id for x in salida] == ["elegido-a-mano:free"]

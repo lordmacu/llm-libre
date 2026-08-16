@@ -31,6 +31,15 @@ class Ruta:
     modelo_id: str
     tier: str  # "gratis" | "pago"
     capacidades: Capacidades
+    # Concepto DISTINTO de tier y de perfil (ver Pedido.perfil mas abajo): el
+    # orden manual en el que el router prueba las rutas antes de mirar
+    # puntaje, p.ej. para que un proveedor propio (chatgpt-proxy) se pruebe
+    # antes que los proveedores gratis de terceros. Default 100 -- alto a
+    # proposito -- para que una ruta sin prioridad declarada quede ultima
+    # entre sus pares, en vez de colarse antes que las que si la declararon.
+    # NO participa en el invariante de tier: una ruta de pago con prioridad 0
+    # sigue yendo al final (ver router.ordenar).
+    prioridad: int = 100
 
     @property
     def clave(self) -> str:
