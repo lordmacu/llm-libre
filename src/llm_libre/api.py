@@ -8,6 +8,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_libre.auth import LimitadorPorLlave
 from llm_libre.modelos import METRICAS_NEUTRAS, Pedido
+from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPCION, HEALTH_DOCS,
+                               MODELOS_DOCS, RANKING_DOCS, RESUMEN, TITULO, USO_DOCS,
+                               VERSION, personalizar_openapi)
 from llm_libre.ranking import puntuar
 from llm_libre.router import clave_de_orden, compatibles, ordenar
 
@@ -80,7 +83,12 @@ def _resolver_llave(x_api_key: str | None, authorization: str | None) -> str | N
 
 
 def crear_app(estado: Estado) -> FastAPI:
-    app = FastAPI(title="llm-libre")
+    # title/version/summary/description y personalizar_openapi (Task 14) solo
+    # enriquecen lo que sirve /docs y /openapi.json -- ver llm_libre.openapi.
+    # No tocan ninguna ruta ni su logica: exigir_llave, interpretar_pedido y
+    # el passthrough de completions siguen exactamente igual.
+    app = FastAPI(title=TITULO, version=VERSION, summary=RESUMEN, description=DESCRIPCION)
+    personalizar_openapi(app)
 
     def exigir_llave(x_api_key: str | None, authorization: str | None = None) -> str:
         llave = _resolver_llave(x_api_key, authorization)
@@ -113,7 +121,7 @@ def crear_app(estado: Estado) -> FastAPI:
             _sin_rutas(activas, pedido, metricas, ahora, tope_alcanzado)   # siempre levanta
         return rutas, pedido
 
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", **CHAT_COMPLETIONS_DOCS)
     async def completions(request: Request, x_api_key: str | None = Header(None),
                           authorization: str | None = Header(None)):
         llave = exigir_llave(x_api_key, authorization)
@@ -191,7 +199,7 @@ def crear_app(estado: Estado) -> FastAPI:
             cuerpo_resp = {**cuerpo_resp, "x_razonamiento": r.razonamiento}
         return JSONResponse(cuerpo_resp, status_code=r.estado, headers=cabeceras)
 
-    @app.get("/v1/models")
+    @app.get("/v1/models", **MODELOS_DOCS)
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         exigir_llave(x_api_key, authorization)
         datos = [{"id": r.modelo_id, "object": "model", "owned_by": r.proveedor}
@@ -199,7 +207,7 @@ def crear_app(estado: Estado) -> FastAPI:
         datos += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIAS]
         return {"object": "list", "data": datos}
 
-    @app.get("/v1/ranking")
+    @app.get("/v1/ranking", **RANKING_DOCS)
     def ranking(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         exigir_llave(x_api_key, authorization)
         ahora = time.time()
@@ -244,14 +252,14 @@ def crear_app(estado: Estado) -> FastAPI:
                           "contexto": r.capacidades.contexto})
         return {"rutas": filas}
 
-    @app.get("/v1/uso")
+    @app.get("/v1/uso", **USO_DOCS)
     def uso(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         llave = exigir_llave(x_api_key, authorization)
         dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return {"dia": dia, "pago_hoy": estado.almacen.uso_pago(llave, dia),
                 "tope": estado.tope_pago_diario}
 
-    @app.get("/health")
+    @app.get("/health", **HEALTH_DOCS)
     def health():
         # Honesto: mira si hay una ruta VIVA y servible, no si el proceso esta
         # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (round

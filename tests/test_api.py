@@ -121,6 +121,57 @@ def test_completions_responde_y_marca_la_ruta_usada(cliente):
     assert r.json()["choices"][0]["message"]["content"] == "hola"
 
 
+# --- Task 14 (documentacion): la regla que manda es que ENRIQUECER
+#     /openapi.json no puede tocar el comportamiento real del endpoint --
+#     completions() sigue leyendo `await request.json()` a mano, SIN un
+#     modelo Pydantic que ligue el cuerpo (eso haria que FastAPI descarte
+#     cualquier campo que no declare, rompiendo el contrato passthrough que
+#     este proyecto existe para dar). `test_cliente.py` ya prueba esto al
+#     nivel de `armar_peticion` (la copia somera que le saca las extensiones
+#     x_* al cuerpo); este test lo extiende al nivel HTTP completo -- cliente
+#     -> FastAPI -> proxy -> proveedor -- para que quede pineado que un campo
+#     que ni el gateway ni ningun SDK de OpenAI conocen sigue llegando al
+#     proveedor TAL CUAL, con el valor exacto que mando el cliente. ---
+
+def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
+    recibido = {}
+
+    def handler(req):
+        recibido.update(json.loads(req.content))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "hola"}}]})
+
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    almacen.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
+                    llaves={"buena"}, tope_pago_diario=200)
+    c = TestClient(crear_app(estado))
+
+    r = c.post("/v1/chat/completions", headers={"X-API-Key": "buena"}, json={
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hi"}],
+        # Ni un campo estandar de OpenAI que el gateway no lista en su
+        # documentacion (reasoning) ni uno inventado por el proveedor de
+        # turno (safety_identifier) son EXTENSIONES DEL GATEWAY (x_*, ver
+        # EXTENSIONES_GATEWAY) -- el contrato es "pasa todo lo que no
+        # reconozcas", no una lista blanca.
+        "reasoning": {"enabled": False},
+        "safety_identifier": "algo-que-el-gateway-jamas-va-a-conocer",
+    })
+
+    assert r.status_code == 200
+    assert recibido["reasoning"] == {"enabled": False}
+    assert recibido["safety_identifier"] == "algo-que-el-gateway-jamas-va-a-conocer"
+    # Y las extensiones DEL GATEWAY, si vinieran en el mismo pedido, seguirian
+    # sin viajar -- ver test_no_reenvia_las_extensiones_del_gateway_al_proveedor
+    # en test_cliente.py para esa mitad del contrato.
+    assert "x_crudo" not in recibido
+
+
 def test_models_lista_el_catalogo_y_los_alias(cliente):
     r = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
     ids = [m["id"] for m in r.json()["data"]]
