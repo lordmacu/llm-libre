@@ -537,6 +537,15 @@ async def test_tres_400_seguidos_en_streaming_no_castigan():
     assert "kilo/a:free" not in p.cooldowns
 
 
+async def test_un_400_en_streaming_se_registra_marcado_como_error_del_cliente():
+    # Round 4: el mismo agujero de confiabilidad/health del lado streaming.
+    p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
+    [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, 0.0)]
+    fila = p.almacen._con.execute(
+        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila == (0, 1)
+
+
 # --- Re-revision: hallazgo MEDIUM. completar_stream() seguia usando el
 #     TIMEOUT_S global fijo, ignorando Proveedor.timeout_s -- streaming es el
 #     default de los clientes de chat, y es precisamente el camino del

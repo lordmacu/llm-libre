@@ -4,7 +4,7 @@ import pytest
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.almacen import Almacen
 from llm_libre.proveedores import Proveedor
-from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS, Proxy
+from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS, Proxy, _es_error_del_cliente
 
 CUERPO = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
@@ -509,3 +509,61 @@ async def test_mezcla_de_4xx_y_5xx_solo_cuenta_los_5xx():
 
     await p.completar([_ruta("a:free")], CUERPO, ahora=5.0)   # el tercer 500
     assert "kilo/a:free" in p.cooldowns
+
+
+# --- Re-revision (round 4), hallazgo HIGH: el fix de la ronda 3 saco el 4xx
+#     del CONTADOR de cooldown, pero seguia escribiendose como evento
+#     fallido comun -- y eso alimenta confiabilidad, que /health usa para
+#     declarar una ruta muerta. 26 pedidos malformados de UNA llave bastaban
+#     para tirar la confiabilidad de TODAS las rutas, con /health en "caido"
+#     mientras una llave DISTINTA seguia recibiendo 200. Peor que el 503 de
+#     la ronda anterior: el volumen persistente de /datos hace que un
+#     reinicio del contenedor (que Coolify dispara SOLO porque /health
+#     fallo) no limpie nada -- loop de reinicios contra un servicio sano. ---
+
+async def test_un_400_se_registra_pero_marcado_como_error_del_cliente():
+    p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila == (0, 1)
+
+
+async def test_un_500_se_registra_sin_marca_de_error_del_cliente():
+    p = _proxy(lambda req: httpx.Response(500))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila == (0, 0)
+
+
+# --- Decision de diseno (round 4): 408 y 425 son 4xx, pero por espiritu son
+#     RETRYABLE, no errores deterministas de payload -- 408 suele significar
+#     que el UPSTREAM se colgo esperando (el mismo sintoma que motivo todo
+#     este cooldown), y 425 es una nuance de protocolo/TLS, no un payload
+#     invalido. Un proveedor detras de algo que devuelve 408 cuando se cuelga
+#     nunca entraria en cooldown si se los tratara como error del cliente.
+#     Se los saca de _es_error_del_cliente: SI cuentan hacia el cooldown de
+#     fallos duros y hacia confiabilidad, como cualquier otro fallo "real".
+#     Probabilidad baja, y la consecuencia de no hacerlo seria solo volver
+#     al comportamiento viejo (reintentar para siempre) -- pero encajan mejor
+#     del lado de "esto es evidencia sobre la ruta" que del lado del 400.
+
+def test_408_y_425_no_se_tratan_como_error_del_cliente():
+    assert _es_error_del_cliente(408) is False
+    assert _es_error_del_cliente(425) is False
+
+
+async def test_tres_408_seguidos_si_castigan_la_ruta():
+    p = _proxy(lambda req: httpx.Response(408))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" in p.cooldowns
+
+
+async def test_un_408_se_registra_sin_marca_de_error_del_cliente():
+    p = _proxy(lambda req: httpx.Response(408))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila == (0, 0)

@@ -63,19 +63,38 @@ _SOBRE_CHUNK = frozenset({"id", "object", "created", "model",
 _SOBRE_ELECCION = frozenset({"index"})
 
 
+_4XX_NO_SON_ERROR_DEL_CLIENTE = frozenset({
+    429,  # tiene su propio castigo inmediato, ver _castigar
+    # Decision de diseno (round 4): 408 y 425 son 4xx, pero por espiritu son
+    # RETRYABLE, no errores deterministas de payload. 408 suele significar
+    # que el UPSTREAM se colgo esperando -- el mismo sintoma que motivo todo
+    # este cooldown -- y 425 es una nuance de protocolo/TLS (replay), no un
+    # payload invalido. Un proveedor detras de algo que devuelve 408 cuando
+    # se cuelga nunca entraria en cooldown si se tratara como error del
+    # cliente. Probabilidad baja de que esto importe en la practica, y la
+    # consecuencia de NO hacerlo seria solo volver al comportamiento viejo
+    # (reintentar para siempre) -- pero encajan mejor del lado de "esto es
+    # evidencia sobre la ruta" que del lado del 400.
+    408, 425,
+})
+
+
 def _es_error_del_cliente(codigo: int) -> bool:
-    """4xx que no sea 429 (ese tiene su propio castigo inmediato, ver
-    _castigar): un error DETERMINISTA del CLIENTE -- payload invalido, un
-    parametro que el proveedor no soporta, una secuencia de roles invalida
-    -- que el proveedor le devuelve a CUALQUIERA que mande ese mismo pedido,
-    sano o no. Contarlo hacia el cooldown de fallos duros convertiria el
-    error de UN cliente en un apagon para TODOS: verificado contra el
-    registro real de 5 rutas, tres pedidos malformados seguidos bastan para
-    dejar las cinco en cooldown, y una llave DISTINTA con un pedido valido
-    recibe 503 mientras tanto. Antes del cooldown de fallos duros (Task 13)
-    un 400 solo perjudicaba al cliente que lo mando; tiene que seguir siendo
-    asi."""
-    return 400 <= codigo < 500 and codigo != 429
+    """4xx que no sea 429/408/425 (ver _4XX_NO_SON_ERROR_DEL_CLIENTE): un
+    error DETERMINISTA del CLIENTE -- payload invalido, un parametro que el
+    proveedor no soporta, una secuencia de roles invalida -- que el
+    proveedor le devuelve a CUALQUIERA que mande ese mismo pedido, sano o
+    no. Ni cuenta hacia el cooldown de fallos duros ni hacia confiabilidad
+    (ver Almacen.registrar_evento): contarlo convertiria el error de UN
+    cliente en un apagon para TODOS. Verificado contra el registro real de 5
+    rutas: tres pedidos malformados seguidos bastan para dejar las cinco en
+    cooldown, con una llave DISTINTA recibiendo 503 mientras tanto; y (round
+    4) 26 pedidos malformados seguidos de una llave bastan para tirar
+    confiabilidad por el piso y dejar /health en "caido" -- persistente en
+    el volumen de /datos, asi que ni un reinicio del proceso lo limpia.
+    Antes del cooldown de fallos duros (Task 13) un 400 solo perjudicaba al
+    cliente que lo mando; tiene que seguir siendo asi."""
+    return 400 <= codigo < 500 and codigo not in _4XX_NO_SON_ERROR_DEL_CLIENTE
 
 
 def _timeout_de(proveedor) -> float:
@@ -210,7 +229,8 @@ class Proxy:
 
             exito = codigo == 200 and datos is not None
             self.almacen.registrar_evento(ruta.clave, exito, 0, codigo, ahora,
-                                          latencia_ms=latencia)
+                                          latencia_ms=latencia,
+                                          es_error_cliente=_es_error_del_cliente(codigo))
 
             if exito:
                 self._limpiar_castigo(ruta.clave)
@@ -290,8 +310,9 @@ class Proxy:
                             self._castigar(ruta.clave, ahora)
                         elif not _es_error_del_cliente(resp.status_code):
                             self._registrar_fallo(ruta.clave, ahora)
-                        self.almacen.registrar_evento(ruta.clave, False, 0,
-                                                      resp.status_code, ahora)
+                        self.almacen.registrar_evento(
+                            ruta.clave, False, 0, resp.status_code, ahora,
+                            es_error_cliente=_es_error_del_cliente(resp.status_code))
                         continue
                     rec = RecortadorStreamCompuesto(desenvolver_canvas=proveedor.desenvuelve_canvas)
                     # Chunks recibidos que todavia no llevan nada util. Se
