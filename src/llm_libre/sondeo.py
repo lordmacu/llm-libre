@@ -51,7 +51,24 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
     vuelve indistinguible de que todo funcione: el catalogo de ese proveedor
     se congela para siempre y nadie se entera. Esta es justo la capa que
     existe para que un catalogo no se pudra sin aviso (§1 del diseno).
+
+    Antes del loop por proveedor, un barrido aparte
+    (`Almacen.desactivar_proveedores_no_registrados`) apaga las rutas de
+    cualquier proveedor que YA NO este en `proveedores` -- necesario porque
+    el loop de abajo solo puede dar de baja, via su scope, lo que SIGUE en
+    el registro; un proveedor sacado del YAML (p.ej. `openrouter` sin
+    `OPENROUTER_API_KEY`, cuyas rutas terminaban todas en cooldown por 401)
+    nunca vuelve a pasar por ese loop, asi que sin el barrido sus rutas
+    quedarian `activa=1` para siempre: visibles en `GET /v1/models` y
+    `GET /v1/ranking`, y elegibles como candidatas que fallarian siempre.
     """
+    conocidos = {p.id for p in proveedores}
+    desactivadas = almacen.desactivar_proveedores_no_registrados(conocidos)
+    if desactivadas:
+        log.warning(
+            "catalogo: %d ruta(s) desactivadas porque su proveedor ya no esta "
+            "en proveedores.yaml (no se borran -- el historico sirve para "
+            "detectar renombres, ver Almacen.upsert_rutas)", desactivadas)
     total = 0
     for p in proveedores:
         if p.modelos_fijos:

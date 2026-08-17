@@ -81,6 +81,52 @@ def test_el_scope_de_proveedor_no_cambia_el_comportamiento_por_defecto(almacen):
     assert activas == {"otro/otra:free"}   # kilo/vieja:free tambien se apaga, como antes
 
 
+# --- Sacar un proveedor de proveedores.yaml (p.ej. openrouter) no debe
+#     dejar sus rutas activa=1 para siempre: sincronizar_catalogo solo puede
+#     dar de baja, via su scope, lo que SIGUE en el registro -- un
+#     proveedor que desaparece del todo nunca vuelve a pasar por ese loop.
+#     Este barrido aparte cubre exactamente ese hueco. ---
+
+def test_desactivar_proveedores_no_registrados_apaga_las_rutas_del_que_se_fue(almacen):
+    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo")], momento=50.0)
+    almacen.upsert_rutas([_ruta("b:free", proveedor="openrouter")], momento=50.0)
+    apagadas = almacen.desactivar_proveedores_no_registrados({"kilo"})
+    assert apagadas == 1
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert claves == {"kilo/a:free"}
+    # No se borra: sigue en la tabla, solo inactiva -- mismo principio que
+    # upsert_rutas con las rutas que desaparecen del catalogo de un proveedor.
+    fila = almacen._con.execute(
+        "SELECT activa FROM rutas WHERE clave = 'openrouter/b:free'").fetchone()
+    assert fila == (0,)
+
+
+def test_desactivar_proveedores_no_registrados_no_toca_los_que_siguen(almacen):
+    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo"),
+                          _ruta("c:free", proveedor="chatgpt")], momento=50.0)
+    almacen.upsert_rutas([_ruta("b:free", proveedor="openrouter")], momento=50.0)
+    almacen.desactivar_proveedores_no_registrados({"kilo", "chatgpt"})
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert claves == {"kilo/a:free", "chatgpt/c:free"}
+
+
+def test_desactivar_proveedores_no_registrados_no_hace_nada_si_todos_siguen(almacen):
+    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo")], momento=50.0)
+    apagadas = almacen.desactivar_proveedores_no_registrados({"kilo", "chatgpt", "minimax"})
+    assert apagadas == 0
+    assert len(almacen.rutas_activas()) == 1
+
+
+def test_desactivar_proveedores_no_registrados_es_idempotente(almacen):
+    # Una ruta ya inactiva (por la razon que sea) no cuenta de nuevo ni se
+    # re-toca en una segunda pasada.
+    almacen.upsert_rutas([_ruta("b:free", proveedor="openrouter")], momento=50.0)
+    primera = almacen.desactivar_proveedores_no_registrados({"kilo"})
+    segunda = almacen.desactivar_proveedores_no_registrados({"kilo"})
+    assert primera == 1
+    assert segunda == 0
+
+
 def test_la_calidad_sale_de_la_ultima_sonda_de_calidad(almacen):
     almacen.upsert_rutas([_ruta()], momento=100.0)
     almacen.registrar_sonda("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)

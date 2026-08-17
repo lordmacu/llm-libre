@@ -6,9 +6,15 @@ from llm_libre.proveedores import cargar, rutas_fijas
 YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
 
-def test_carga_los_cuatro_proveedores():
-    ps = cargar(YAML, {"OPENROUTER_API_KEY": "or", "MINIMAX_API_KEY": "mm"})
-    assert [p.id for p in ps] == ["chatgpt", "kilo", "openrouter", "minimax"]
+def test_carga_los_tres_proveedores():
+    # openrouter se saco del registro (decision del operador, 2026-08-17):
+    # nunca tuvo OPENROUTER_API_KEY configurada, asi que sus 16 rutas
+    # 401-eaban siempre -- casi la mitad del catalogo, gastando cupo de
+    # sonda y espacio en /v1/ranking solo para demostrar que seguian
+    # muertas. Sigue documentado en docs/providers.md como ejemplo del
+    # patron "todo descubierto" con clave opcional.
+    ps = cargar(YAML, {"MINIMAX_API_KEY": "mm"})
+    assert [p.id for p in ps] == ["chatgpt", "kilo", "minimax"]
 
 
 def test_kilo_sin_clave_queda_con_clave_vacia_y_sigue_siendo_valido():
@@ -22,9 +28,25 @@ def test_resuelve_las_claves_desde_el_entorno():
     assert next(p for p in ps if p.id == "minimax").clave == "secreta"
 
 
-def test_las_cabeceras_extra_se_conservan():
-    orouter = next(p for p in cargar(YAML, {}) if p.id == "openrouter")
-    assert orouter.cabeceras_extra["X-Title"] == "llm-libre"
+def test_las_cabeceras_extra_se_conservan(tmp_path):
+    # Migrado a un YAML sintetico (revision post-Task-14): antes afirmaba
+    # sobre `openrouter`, el unico proveedor real que declaraba
+    # cabeceras_extra -- pero se saco del registro (ver
+    # test_carga_los_tres_proveedores) y este mecanismo (cargar() propaga
+    # cabeceras_extra tal cual) no depende de que ningun proveedor puntual
+    # lo use hoy.
+    yaml_con_cabeceras = tmp_path / "con_cabeceras.yaml"
+    yaml_con_cabeceras.write_text(
+        "proveedores:\n"
+        "  - id: suelto\n"
+        "    tier: gratis\n"
+        "    dialecto: openai\n"
+        "    base_url: https://suelto.test\n"
+        "    modelos_path: /models\n"
+        "    cabeceras_extra:\n"
+        "      X-Title: llm-libre\n")
+    p = cargar(str(yaml_con_cabeceras), {})[0]
+    assert p.cabeceras_extra["X-Title"] == "llm-libre"
 
 
 def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
@@ -46,11 +68,11 @@ def test_un_proveedor_gratis_no_tiene_modelos_fijos():
 
 
 def test_clave_de_solo_espacios_se_normaliza_a_vacia():
-    ps = cargar(YAML, {"KILO_API_KEY": "   ", "OPENROUTER_API_KEY": "\t\n"})
+    ps = cargar(YAML, {"KILO_API_KEY": "   ", "MINIMAX_API_KEY": "\t\n"})
     kilo = next(p for p in ps if p.id == "kilo")
-    orouter = next(p for p in ps if p.id == "openrouter")
+    minimax = next(p for p in ps if p.id == "minimax")
     assert kilo.clave == ""
-    assert orouter.clave == ""
+    assert minimax.clave == ""
 
 
 # --- Task 13: chatgpt-proxy, prioridad y base_url_env ---
@@ -61,12 +83,9 @@ def test_chatgpt_tiene_prioridad_cero_y_es_gratis():
     assert chatgpt.prioridad == 0
 
 
-def test_kilo_y_openrouter_quedan_en_prioridad_uno():
-    ps = cargar(YAML, {})
-    kilo = next(p for p in ps if p.id == "kilo")
-    orouter = next(p for p in ps if p.id == "openrouter")
+def test_kilo_queda_en_prioridad_uno():
+    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
     assert kilo.prioridad == 1
-    assert orouter.prioridad == 1
 
 
 def test_minimax_queda_en_prioridad_dos():
@@ -129,12 +148,9 @@ def test_chatgpt_declara_capacidades_por_defecto_con_tools_false():
         tools=False, vision=False, contexto=128000, max_salida=8192)
 
 
-def test_kilo_y_openrouter_no_declaran_capacidades_por_defecto():
-    ps = cargar(YAML, {})
-    kilo = next(p for p in ps if p.id == "kilo")
-    orouter = next(p for p in ps if p.id == "openrouter")
+def test_kilo_no_declara_capacidades_por_defecto():
+    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
     assert kilo.capacidades_por_defecto is None
-    assert orouter.capacidades_por_defecto is None
 
 
 def test_minimax_tampoco_declara_capacidades_por_defecto():
@@ -180,12 +196,9 @@ def test_chatgpt_declara_desenvuelve_canvas():
     assert chatgpt.desenvuelve_canvas is True
 
 
-def test_kilo_y_openrouter_no_desenvuelven_canvas():
-    ps = cargar(YAML, {})
-    kilo = next(p for p in ps if p.id == "kilo")
-    orouter = next(p for p in ps if p.id == "openrouter")
+def test_kilo_no_desenvuelve_canvas():
+    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
     assert kilo.desenvuelve_canvas is False
-    assert orouter.desenvuelve_canvas is False
 
 
 def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp_path):
@@ -206,13 +219,11 @@ def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp
 #     de proxy.py", igual que hoy para todo el que no lo declare. ---
 
 def test_un_proveedor_sin_timeout_declarado_queda_en_none(tmp_path):
-    # kilo/openrouter siguen sin declarar timeout_s -- Task 14 solo le puso
-    # uno a chatgpt (ver el test de abajo), a proposito: no se toca el
-    # timeout de ningun otro proveedor.
+    # kilo sigue sin declarar timeout_s -- Task 14 solo le puso uno a
+    # chatgpt (ver el test de abajo), a proposito: no se toca el timeout de
+    # ningun otro proveedor.
     kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
-    orouter = next(p for p in cargar(YAML, {}) if p.id == "openrouter")
     assert kilo.timeout_s is None
-    assert orouter.timeout_s is None
 
 
 def test_chatgpt_declara_su_propio_timeout_en_el_yaml_real():

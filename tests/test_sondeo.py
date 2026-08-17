@@ -223,13 +223,21 @@ async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este
 
 async def test_un_proveedor_sano_no_desactiva_rutas_de_otro_proveedor():
     # La desactivacion de kilo debe quedar ACOTADA a kilo: una ruta vieja de
-    # "otro" (mucho mas vieja que `ahora`, y "otro" ni siquiera participa de
-    # esta sincronizacion) no debe caer victima del UPDATE de kilo.
+    # "otro" (mucho mas vieja que `ahora`) no debe caer victima del UPDATE
+    # de kilo. "otro" SIGUE registrado (sin modelos_path ni modelos_fijos,
+    # asi que el loop por-proveedor lo saltea sin tocarlo) -- si no
+    # estuviera en `prov`, el barrido de proveedores huerfanos
+    # (Almacen.desactivar_proveedores_no_registrados, ver el bloque de
+    # tests aparte mas abajo) la apagaria por una razon DISTINTA, y este
+    # test dejaria de aislar lo que dice probar.
     almacen = _almacen()
     almacen.upsert_rutas([_ruta("vieja:free", proveedor="otro")], momento=10.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Proveedor("otro", "gratis", "openai", "https://otro.test", "", "", {}, []),
+    ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     claves = {r.clave for r in almacen.rutas_activas()}
     assert claves == {"kilo/x:free", "otro/vieja:free"}
@@ -304,6 +312,55 @@ async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
+
+
+# --- Sacar un proveedor de proveedores.yaml (caso real: openrouter, sin
+#     OPENROUTER_API_KEY, cuyas 16 rutas 401-eaban siempre y solo ocupaban
+#     cupo de sonda y espacio en el ranking probando estar muertas) no debe
+#     dejar sus rutas `activa=1` para siempre -- ver
+#     Almacen.desactivar_proveedores_no_registrados. Esto es la mitad
+#     "a traves de sincronizar_catalogo" de esa cobertura; la otra mitad
+#     (el metodo de Almacen aislado) esta en test_almacen.py. ---
+
+async def test_sincronizar_desactiva_las_rutas_de_un_proveedor_que_se_saco_del_registro():
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free", proveedor="openrouter")], momento=50.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO)))
+    # openrouter YA NO esta en la lista que carga proveedores.cargar() --
+    # simula haberlo sacado de proveedores.yaml.
+    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    claves = {r.clave for r in almacen.rutas_activas()}
+    assert claves == {"kilo/x:free"}
+    fila = almacen._con.execute(
+        "SELECT activa FROM rutas WHERE clave = 'openrouter/previa:free'").fetchone()
+    assert fila == (0,)   # apagada, no borrada
+
+
+async def test_sincronizar_no_desactiva_rutas_de_proveedores_que_siguen_registrados():
+    # Aislado a proposito de la logica NORMAL de baja por-proveedor (que ya
+    # cubren los tests de arriba, "el que si respondio actualiza lo suyo"):
+    # minimax usa modelos_fijos, asi que su ruta se re-declara IDENTICA en
+    # cada pasada sin importar ningun mock HTTP -- si sobrevive, es prueba
+    # de que el barrido de huerfanos (`desactivar_proveedores_no_registrados`)
+    # no la toco, no de que "justo volvio a aparecer en el catalogo".
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free", proveedor="openrouter")], momento=50.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO)))
+    prov = [
+        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Proveedor("minimax", "pago", "openai", "https://m.test", "k", "", {},
+                  [{"id": "MiniMax-M3", "tools": True, "vision": False,
+                    "contexto": 128000, "max_salida": 32768}]),
+    ]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    claves = {r.clave for r in almacen.rutas_activas()}
+    # kilo se descubrio de nuevo, minimax (modelos_fijos, SIGUE registrado)
+    # sigue activa, y openrouter (sacado del registro) desaparecio -- las
+    # tres cosas a la vez, sin que ninguna se confunda con la otra.
+    assert claves == {"kilo/x:free", "minimax/MiniMax-M3"}
 
 
 async def test_sincronizar_catalogo_no_deja_escapar_la_excepcion_de_un_proveedor_roto():

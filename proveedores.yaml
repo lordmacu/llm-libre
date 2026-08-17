@@ -1,5 +1,8 @@
 # Registro de proveedores. Tres patrones distintos, los tres declarativos:
-#   - Kilo / OpenRouter: ids Y capacidades DESCUBIERTOS desde modelos_path.
+#   - Kilo: ids Y capacidades DESCUBIERTOS desde modelos_path (mismo patron
+#     que usaba openrouter, sacado de este archivo -- ver la nota junto a
+#     minimax, mas abajo -- pero documentado igual en docs/providers.md
+#     como ejemplo de este patron con clave opcional).
 #   - MiniMax: ids Y capacidades DECLARADOS a mano (modelos_fijos) -- su
 #     /models real no trae metadatos de capacidad.
 #   - chatgpt: ids DESCUBIERTOS desde modelos_path, capacidades DECLARADAS
@@ -86,16 +89,22 @@ proveedores:
     clave_env: KILO_API_KEY          # OPCIONAL: sin clave el tier anonimo funciona igual
     modelos_path: /models
 
-  - id: openrouter
-    tier: gratis
-    prioridad: 1
-    dialecto: openai
-    base_url: https://openrouter.ai/api/v1
-    clave_env: OPENROUTER_API_KEY
-    modelos_path: /models
-    cabeceras_extra:
-      HTTP-Referer: https://github.com/lordmacu/llm-libre
-      X-Title: llm-libre
+  # openrouter (patron "todo descubierto", igual que kilo -- ver la nota de
+  # cabecera) SACADO del registro en produccion: nunca se definio
+  # OPENROUTER_API_KEY, asi que sus 16 rutas devolvian 401 en TODO pedido, el
+  # sondeo lo confirmaba, y el router las mandaba a cooldown correctamente --
+  # pero eran casi la mitad del catalogo (16 de ~34 rutas), gastando cupo de
+  # sonda y espacio en /v1/ranking solo para demostrar, una y otra vez, que
+  # seguian muertas (medido en vivo: 21 rutas en cooldown, 16 de openrouter).
+  # Decision del operador: sacarlo en vez de conseguir la clave. Las rutas ya
+  # sincronizadas de "openrouter" NO quedan huerfanas -- ver
+  # Almacen.desactivar_proveedores_no_registrados, que sondeo.sincronizar_catalogo
+  # llama en cada ciclo con el conjunto de ids que este archivo trae en ESE
+  # momento: un proveedor que ya no esta aca se apaga (activa=0, nunca se
+  # borra) solo, sin reiniciar nada a mano. El patron sigue documentado en
+  # docs/providers.md como ejemplo de registro "todo descubierto" con clave
+  # opcional -- volver a agregarlo es una entrada de YAML, no un cambio de
+  # codigo.
 
   - id: minimax
     tier: pago

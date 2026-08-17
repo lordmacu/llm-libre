@@ -134,6 +134,41 @@ class Almacen:
                     "UPDATE rutas SET activa = 0 WHERE visto_por_ultima_vez < ?", (momento,))
         self._con.commit()
 
+    def desactivar_proveedores_no_registrados(self, proveedores_conocidos: set[str]) -> int:
+        """Apaga (activa=0, NUNCA borra -- el historico sirve para detectar
+        renombres de modelo, ver upsert_rutas) toda ruta cuyo `proveedor` ya
+        no esta en `proveedores_conocidos`.
+
+        Existe porque `upsert_rutas` (y por lo tanto la baja de rutas que ya
+        no aparecen) esta ACOTADA al proveedor de cada llamada
+        (`sincronizar_catalogo` la invoca una vez por proveedor, con su
+        propio `proveedor=p.id`): un proveedor que se SACA por completo del
+        registro (`proveedores.yaml`) nunca vuelve a sincronizarse, asi que
+        sin este barrido aparte sus rutas quedarian `activa=1` para
+        siempre -- visibles en `GET /v1/models`, en `GET /v1/ranking`, y
+        elegibles como candidatas de ruteo que fallarian siempre (401 de
+        una llave que ya no existe, por ejemplo), sin que nada las apague.
+
+        Se llama una vez por ciclo de sondeo, desde `sondeo.sincronizar_catalogo`,
+        con el conjunto de ids que `proveedores.yaml` trae EN ESE MOMENTO --
+        no una lista fija -- asi que sacar (o volver a agregar) un proveedor
+        del registro se refleja solo, en el proximo ciclo, sin tocar codigo
+        ni reiniciar a mano. Devuelve cuantas filas se apagaron, para que el
+        llamador pueda dejar un `log.warning` (un proveedor que desaparece
+        del registro es una decision del operador, pero vale la pena que
+        quede visible en los logs cuando de verdad tiene efecto)."""
+        filas = self._con.execute(
+            "SELECT DISTINCT proveedor FROM rutas WHERE activa = 1").fetchall()
+        huerfanos = [p for (p,) in filas if p not in proveedores_conocidos]
+        if not huerfanos:
+            return 0
+        marcador = ",".join("?" * len(huerfanos))
+        cur = self._con.execute(
+            f"UPDATE rutas SET activa = 0 WHERE activa = 1 AND proveedor IN ({marcador})",
+            huerfanos)
+        self._con.commit()
+        return cur.rowcount
+
     def rutas_activas(self) -> list[Ruta]:
         filas = self._con.execute(
             """SELECT proveedor, modelo_id, tier, tools, vision, contexto, max_salida,
