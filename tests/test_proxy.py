@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -633,3 +635,140 @@ async def test_tres_413_seguidos_no_castigan():
     for i in range(TOPE_FALLOS_SEGUIDOS):
         await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
     assert "kilo/a:free" not in p.cooldowns
+
+
+# --- Round 7: la atribucion de Parte 1 (que codigo cuenta como evidencia del
+#     PEDIDO) se aplicaba solo a nivel de RESPUESTA -- cada ruta se juzgaba
+#     sola. Pero `completar()` recorre la CADENA entera por pedido, asi que
+#     sabe algo que ninguna respuesta individual puede decir: si el MISMO
+#     pedido falla en TODAS las rutas de la cadena, el factor comun es el
+#     pedido, no todas las rutas a la vez -- y contarlo hacia el cooldown de
+#     cada una convierte el error de UN cliente en un apagon para TODOS, con
+#     un vector que ni siquiera necesita un 4xx: un 403 de moderacion, un 451
+#     legal/geografico, un timeout por un prompt gigante o un 200 sin
+#     contenido (un modelo de razonamiento que se gasta el presupuesto
+#     pensando) funcionan igual, porque ninguno pasa por
+#     `_es_error_del_cliente` (esos cuatro SI son evidencia de la ruta,
+#     correctamente, por Parte 1) pero los cuatro son deterministas: CUALQUIER
+#     ruta le va a devolver lo mismo a ESTE pedido puntual.
+#
+#     Regla nueva: un fallo dentro de una vuelta de `completar`/
+#     `completar_stream` solo se commitea hacia el contador de fallos duros
+#     de SU ruta si, en ESA MISMA vuelta, alguna OTRA ruta de la cadena tuvo
+#     exito -- evidencia real de que ESA ruta en particular fallo, no el
+#     pedido. Si la cadena se agota entera sin ningun exito Y tiene mas de
+#     una ruta, se descartan TODOS los fallos de esa vuelta -- no hay forma
+#     de saber, con esta unica senal, si el pedido esta envenenado o si de
+#     verdad las rutas fallaron todas a la vez, y COOLDOWN ES UNA EXCLUSION:
+#     al reves que confiabilidad (una medicion, donde el default de Parte 1
+#     es "si no se sabe, contar" porque una falsa alarma ahi se autocorrige),
+#     ante la duda no se excluye, porque una ruta sana excluida por
+#     error ES el apagon con luz verde que este mecanismo entero existe para
+#     prevenir. `429` no se toca -- sigue castigando de inmediato, sin pasar
+#     por este mecanismo: es una senal inequivoca de ESA ruta (su capacidad
+#     ahora mismo), no algo que un payload pueda inducir identico en varios
+#     proveedores independientes a la vez. Una cadena de UNA sola ruta (la
+#     sonda de salud SIEMPRE lo es, ver sondeo.py) no tiene con que
+#     compararse: sigue commiteando de inmediato, sin cambios -- por eso
+#     ningun test de arriba (todos de una sola ruta) se movio.
+#
+#     Medido el costo del bug: tres pedidos IDENTICOS de una sola llave
+#     contra un gateway de 5 rutas SANAS bastaban para poner las cinco en
+#     cooldown -- /health caido, otra llave con un pedido valido recibiendo
+#     503. Con el fix, ninguna de las cinco entra en cooldown; y una ruta que
+#     de verdad esta rota (con una hermana sana en la MISMA cadena) sigue
+#     cayendo en el mismo numero de pedidos que hoy. ---
+
+def _multi(*modelos):
+    return [_ruta(m) for m in modelos]
+
+
+async def test_una_falla_identica_en_toda_la_cadena_no_castiga_ninguna_ruta():
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        r = await p.completar(rutas, CUERPO, ahora=float(i))
+        assert r.estado == 503
+    assert p.cooldowns == {}
+
+
+async def test_451_identico_en_toda_la_cadena_no_castiga_ninguna_ruta():
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(lambda req: httpx.Response(451, json={"error": "no disponible por razones legales"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar(rutas, CUERPO, ahora=float(i))
+    assert p.cooldowns == {}
+
+
+async def test_200_sin_contenido_identico_en_toda_la_cadena_no_castiga_ninguna_ruta():
+    # Un modelo de razonamiento que se gasta el presupuesto pensando: 200,
+    # sin `content` util. No es ni siquiera un 4xx -- pasa por el MISMO
+    # mecanismo de "fallo duro" que un 500, y con la misma vulnerabilidad de
+    # cadena antes del fix.
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(contenido=None)))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar(rutas, CUERPO, ahora=float(i))
+    assert p.cooldowns == {}
+
+
+async def test_un_timeout_identico_en_toda_la_cadena_no_castiga_ninguna_ruta():
+    def handler(req):
+        raise httpx.ReadTimeout("prompt gigante", request=req)
+
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar(rutas, CUERPO, ahora=float(i))
+    assert p.cooldowns == {}
+
+
+async def test_el_evento_se_sigue_registrando_aunque_el_fallo_de_cadena_se_descarte():
+    # El fix es SOLO sobre cooldown. `eventos`/confiabilidad (una medicion,
+    # no una exclusion) siguen contando cada intento sin cambios -- Parte 1
+    # no se toca.
+    rutas = _multi("m0:free", "m1:free")
+    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
+    await p.completar(rutas, CUERPO, ahora=0.0)
+    filas = p.almacen._con.execute(
+        "SELECT clave, ok, es_error_cliente FROM eventos ORDER BY clave").fetchall()
+    assert filas == [("kilo/m0:free", 0, 0), ("kilo/m1:free", 0, 0)]
+
+
+async def test_una_ruta_rota_con_hermana_sana_en_la_misma_cadena_sigue_castigando_igual_que_antes():
+    # Contraste directo: cuando SI hay una ruta hermana que responde bien EN
+    # LA MISMA cadena, el fallo SI es evidencia de esa ruta puntual -- el
+    # mismo numero de pedidos que hoy la manda a cooldown.
+    def handler(req):
+        modelo = json.loads(req.content)["model"]
+        return httpx.Response(500) if modelo == "a:free" else httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        r = await p.completar(_multi("a:free", "b:free"), CUERPO, ahora=float(i))
+        assert r.estado == 200
+    assert "kilo/a:free" in p.cooldowns
+    assert "kilo/b:free" not in p.cooldowns
+
+
+async def test_una_cadena_de_una_sola_ruta_sigue_castigando_de_inmediato_como_la_sonda():
+    # Sin hermana con quien compararse -- ni la sonda de salud (siempre de
+    # una sola ruta, ver sondeo.py) ni un pedido con un unico candidato
+    # posible tienen forma de distinguir "el pedido esta envenenado" de "la
+    # ruta esta rota". Se sigue commiteando de inmediato, sin cambios.
+    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar(_multi("a:free"), CUERPO, ahora=float(i))
+    assert "kilo/a:free" in p.cooldowns
+
+
+async def test_429_en_una_cadena_que_falla_entera_sigue_castigando_de_inmediato():
+    # 429 no pasa por el mecanismo de "fallos duros seguidos" -- sigue
+    # castigando en el primer golpe, sin importar si el resto de la cadena
+    # tambien fallo. Es una senal inequivoca de ESA ruta, no del pedido.
+    rutas = _multi("m0:free", "m1:free", "m2:free")
+    p = _proxy(lambda req: httpx.Response(429))
+    await p.completar(rutas, CUERPO, ahora=0.0)
+    assert "kilo/m0:free" in p.cooldowns
+    assert "kilo/m1:free" in p.cooldowns
+    assert "kilo/m2:free" in p.cooldowns

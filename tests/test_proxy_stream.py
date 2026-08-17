@@ -578,3 +578,70 @@ async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_
     p = _proxy(handler)   # kilo, sin timeout_s declarado
     [l async for l in p.completar_stream([_ruta(proveedor="kilo")], CUERPO, 0.0)]
     assert vistos[0]["read"] == 90.0   # TIMEOUT_S
+
+
+# --- Round 7: la misma atribucion a nivel de CADENA que en completar()
+#     (test_proxy.py), probada sobre los tres caminos de falla del
+#     streaming (status != 200, stream sin contenido util, error de red).
+#     Ver el comentario de cabecera de TOPE_FALLOS_SEGUIDOS en proxy.py para
+#     la regla completa. ---
+
+def _multi(*modelos):
+    return [_ruta(m) for m in modelos]
+
+
+async def test_status_no_200_identico_en_toda_la_cadena_no_castiga_en_streaming():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream(rutas, CUERPO, float(i))]
+    assert p.cooldowns == {}
+
+
+async def test_stream_sin_contenido_util_identico_en_toda_la_cadena_no_castiga():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(lambda req: httpx.Response(200, content=vacio))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream(rutas, CUERPO, float(i))]
+    assert p.cooldowns == {}
+
+
+async def test_error_de_red_identico_en_toda_la_cadena_no_castiga_en_streaming():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+
+    def handler(req):
+        raise httpx.ReadTimeout("prompt gigante", request=req)
+
+    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream(rutas, CUERPO, float(i))]
+    assert p.cooldowns == {}
+
+
+async def test_una_ruta_rota_con_hermana_sana_sigue_castigando_en_streaming():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+
+    def handler(req):
+        cuerpo = json.loads(req.content)
+        if cuerpo["model"] == "a:free":
+            return httpx.Response(500)
+        return httpx.Response(200, content=_sse("bien"))
+
+    p = _proxy(handler)
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        texto = await _juntar(p.completar_stream(_multi("a:free", "b:free"), CUERPO, float(i)))
+        assert texto == "bien"
+    assert "kilo/a:free" in p.cooldowns
+    assert "kilo/b:free" not in p.cooldowns
+
+
+async def test_una_cadena_de_una_sola_ruta_sigue_castigando_de_inmediato_en_streaming():
+    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        [l async for l in p.completar_stream(_multi("a:free"), CUERPO, float(i))]
+    assert "kilo/a:free" in p.cooldowns

@@ -33,6 +33,52 @@ TIMEOUT_S = 90.0
 # _castigos/_castigar): la diferencia es CUANDO se dispara, no cuanto dura.
 TOPE_FALLOS_SEGUIDOS = 3
 
+# Round 7. La atribucion de mas arriba (que codigo cuenta como evidencia del
+# PEDIDO, Parte 1) se aplicaba solo a nivel de RESPUESTA -- cada ruta se
+# juzgaba sola, sin mirar que paso con sus hermanas en la MISMA cadena. Pero
+# `completar`/`completar_stream` recorren la cadena entera por pedido, asi
+# que saben algo que ninguna respuesta individual puede decir: si el MISMO
+# pedido falla en TODAS las rutas de la cadena, el factor comun es el
+# pedido, no todas las rutas a la vez -- y eso vale incluso para fallas que
+# `_es_error_del_cliente` no puede clasificar como evidencia del pedido
+# (un 403 de moderacion, un 451 legal/geografico, un timeout por un prompt
+# gigante, un 200 sin contenido de un modelo de razonamiento): las cuatro
+# son, correctamente, evidencia de LA RUTA por Parte 1 -- pero tambien las
+# cuatro son deterministas, CUALQUIER ruta le devuelve lo mismo a ESTE
+# pedido puntual.
+#
+# Regla: un fallo solo se COMMITEA hacia el contador de fallos duros de SU
+# ruta si, en esa MISMA vuelta de la cadena, alguna OTRA ruta tuvo exito --
+# evidencia real de que esa ruta en particular fallo, no el pedido. Si la
+# cadena se agota entera sin ningun exito Y tiene mas de una ruta, se
+# DESCARTAN todos los fallos de esa vuelta: con esta unica senal no hay
+# forma de distinguir "el pedido esta envenenado" de "las rutas fallaron
+# todas a la vez de verdad".
+#
+# Por que descartar y no, por ejemplo, contar la mitad: COOLDOWN ES UNA
+# EXCLUSION, lo contrario de confiabilidad (una MEDICION). Parte 1 le puso
+# el default "cuando no se sabe, contar" a confiabilidad porque ahi una
+# falsa alarma se autocorrige sola -- alguien mira el ranking, ve que la
+# ruta esta bien, sigue. Una ruta sana EXCLUIDA por error, en cambio, es
+# exactamente el apagon con luz verde que el mecanismo de cooldown existe
+# para prevenir -- asi que ante la misma duda, el default tiene que ser el
+# contrario: no excluir.
+#
+# `429` no pasa por este mecanismo -- sigue castigando de inmediato
+# (`_castigar`, sin pasar por `_fallos_seguidos`), sin importar el resto de
+# la cadena: es una senal inequivoca de la capacidad de ESA ruta ahora
+# mismo, no algo que un payload pueda inducir identico en varios
+# proveedores independientes a la vez.
+#
+# Una cadena de UNA sola ruta (la sonda de salud SIEMPRE lo es, ver
+# sondeo.py -- y tambien un pedido con un unico candidato posible) no tiene
+# con que compararse: sigue commiteando de inmediato, sin cambios. Es,
+# ademas, la salida de emergencia para una ruta genuinamente rota que ya no
+# tiene ninguna hermana sana en su cadena: la sonda (payload fijo, que
+# controla el propio gateway -- nunca ambiguo) la sigue enfriando aunque el
+# trafico real deje de poder hacerlo.
+
+
 # Cuantos chunks sin nada util (role inicial, finish_reason, razonamiento
 # filtrado) se retienen antes de soltarlos. Existe para que un stream que
 # TODAVIA no entrego contenido pueda hacer failover limpio -- si esos chunks ya
@@ -194,6 +240,12 @@ class Proxy:
         ultimo_error = None
         ultimo_codigo = 0
         claves_del_pedido = {ruta.clave for ruta in rutas}
+        # Ver el comentario de cabecera de TOPE_FALLOS_SEGUIDOS (round 7):
+        # los fallos duros de esta vuelta se acumulan aca SIN commitear hacia
+        # `_fallos_seguidos` todavia -- recien se sabe si son evidencia de SU
+        # ruta (una hermana tuvo exito) o del pedido (la cadena entera
+        # fallo) al terminar de recorrerla.
+        fallos_pendientes: list[str] = []
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
@@ -254,13 +306,26 @@ class Proxy:
 
             if exito:
                 self._limpiar_castigo(ruta.clave)
+                # Una hermana tuvo exito en ESTA MISMA cadena: los fallos
+                # anteriores de esta vuelta SI son evidencia de sus rutas
+                # (no del pedido, que a esta ruta le fue bien) -- se
+                # commitean recien ahora.
+                self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
                 self._castigar(ruta.clave, ahora)
             elif not _es_error_del_cliente(codigo):
-                self._registrar_fallo(ruta.clave, ahora)
+                fallos_pendientes.append(ruta.clave)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
+
+        # La cadena se agoto SIN NINGUN exito. Con una sola ruta no hay
+        # hermana con quien comparar -- se commitea igual que siempre (ver
+        # el comentario de cabecera de TOPE_FALLOS_SEGUIDOS). Con mas de
+        # una, el fallo es IDENTICO en todas: el factor comun es el pedido,
+        # no que las rutas hayan fallado todas a la vez -- se descartan.
+        if len(rutas) <= 1:
+            self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
 
         # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
         # mas alla de una sola llamada y puede tener castigadas rutas ajenas a
@@ -295,6 +360,11 @@ class Proxy:
         contar uso de pago (u otra cosa) atado a "esta ruta sirvio", sin
         arriesgarse a contar de mas ni de menos.
         """
+        # Ver el comentario de cabecera de TOPE_FALLOS_SEGUIDOS (round 7) y
+        # el mismo mecanismo en completar(): se acumulan aca sin commitear
+        # hasta saber si son evidencia de la ruta (una hermana tuvo exito EN
+        # ESTA MISMA cadena) o del pedido (la cadena entera fallo igual).
+        fallos_pendientes: list[str] = []
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
@@ -319,6 +389,11 @@ class Proxy:
                         200, ahora)
                     evento_registrado = True
                     self._limpiar_castigo(ruta.clave)
+                    # Esta ruta tuvo exito: los fallos anteriores de ESTA
+                    # MISMA cadena si son evidencia de sus rutas (no del
+                    # pedido, que aca le fue bien) -- se commitean recien
+                    # ahora.
+                    self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
                     if en_ruta_comprometida is not None:
                         en_ruta_comprometida(ruta)
 
@@ -329,7 +404,7 @@ class Proxy:
                         if resp.status_code == 429:
                             self._castigar(ruta.clave, ahora)
                         elif not _es_error_del_cliente(resp.status_code):
-                            self._registrar_fallo(ruta.clave, ahora)
+                            fallos_pendientes.append(ruta.clave)
                         self.almacen.registrar_evento(
                             ruta.clave, False, 0, resp.status_code, ahora,
                             es_error_cliente=_es_error_del_cliente(resp.status_code))
@@ -434,7 +509,7 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
-                            self._registrar_fallo(ruta.clave, ahora)
+                            fallos_pendientes.append(ruta.clave)
                         if pendientes:
                             # Lo retenido se va a la basura junto con el intento.
                             # Es lo correcto (nada de eso llego al cliente, asi
@@ -447,7 +522,11 @@ class Proxy:
                         if emitido:
                             # Ya se solto lo retenido (ver TOPE_PENDIENTES): no
                             # se puede empalmar otra ruta encima sin mezclar
-                            # dos respuestas.
+                            # dos respuestas. Se corta la cadena aca, no se
+                            # llega a saber si el resto tambien fallaba --
+                            # se commitea de inmediato (no es "la cadena se
+                            # agoto sola", es "se decidio no seguir").
+                            self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
                             yield "data: [DONE]\n\n"
                             return
                         continue
@@ -458,11 +537,20 @@ class Proxy:
             except httpx.HTTPError:
                 if not evento_registrado:
                     self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
-                    self._registrar_fallo(ruta.clave, ahora)
+                    fallos_pendientes.append(ruta.clave)
                 if emitido:
+                    # Idem arriba: se corta la cadena aca, no se agoto sola.
+                    self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
                     yield "data: [DONE]\n\n"
                     return
                 continue
+
+        # La cadena se agoto SIN NINGUN exito. Mismo criterio que completar():
+        # con una sola ruta no hay hermana con quien comparar, se commitea
+        # igual que siempre; con mas de una, el fallo es identico en todas
+        # -- el factor comun es el pedido, se descartan.
+        if len(rutas) <= 1:
+            self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
 
         yield 'data: {"error":{"message":"sin rutas disponibles"}}\n\n'
         yield "data: [DONE]\n\n"
@@ -486,13 +574,32 @@ class Proxy:
         ver _castigar). Un hiccup aislado no saca a una ruta sana de la
         rotacion: recien al llegar a TOPE_FALLOS_SEGUIDOS fallos SEGUIDOS
         (sin exito en el medio) se la castiga -- y el contador se reinicia
-        para exigir otra racha completa antes de volver a castigar."""
+        para exigir otra racha completa antes de volver a castigar.
+
+        Privado a proposito (round 7): NO se llama directo desde
+        completar()/completar_stream() en el momento en que ocurre el fallo
+        -- eso fue el bug (cada ruta se juzgaba sola, sin mirar la cadena).
+        Los llamadores acumulan en una lista `fallos_pendientes` y recien la
+        pasan por `_comprometer_fallos_pendientes` cuando se sabe si son
+        evidencia de la ruta o del pedido. Ver el comentario de cabecera de
+        TOPE_FALLOS_SEGUIDOS para la regla completa."""
         n = self._fallos_seguidos.get(clave, 0) + 1
         if n >= TOPE_FALLOS_SEGUIDOS:
             self._castigar(clave, ahora)
             self._fallos_seguidos.pop(clave, None)
         else:
             self._fallos_seguidos[clave] = n
+
+    def _comprometer_fallos_pendientes(self, fallos_pendientes: list[str], ahora: float) -> None:
+        """Commitea hacia `_registrar_fallo` cada clave acumulada en
+        `fallos_pendientes` (mutandola en el llamador: la vacia al
+        terminar) -- el otro extremo del mecanismo de atribucion a nivel de
+        cadena, ver TOPE_FALLOS_SEGUIDOS. Un no-op sobre una lista vacia
+        (el caso comun: la enorme mayoria de las cadenas o tienen exito
+        directo o son de una sola ruta, donde el llamador commitea distinto)."""
+        for clave in fallos_pendientes:
+            self._registrar_fallo(clave, ahora)
+        fallos_pendientes.clear()
 
     @staticmethod
     def _limpiar(datos: dict, desenvolver_canvas: bool) -> str:
