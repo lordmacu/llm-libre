@@ -238,6 +238,13 @@ arrancar porque hay una interpretación por default razonable (el sufijo que el 
 YAML declara) para el caso común (solo host), y para el caso con ruta propia no hay
 ninguna interpretación segura salvo respetar lo que el operador escribió.
 
+**LOW, corregido en la tercera revisión: el sufijo se agrega parseando la URL
+(`urlsplit`/`urlunsplit`), no concatenando texto.** La primera versión hacía
+`desde_entorno + sufijo`, así que una URL con path vacío pero CON query string
+(`.../8888?token=abc`) terminaba con el sufijo pegado DENTRO del valor de la query
+(`.../8888?token=abc/v1`) en vez de en la posición correcta
+(`.../8888/v1?token=abc`).
+
 **`desenvuelve_canvas` y `timeout_s` son declaraciones por proveedor, mismo shape que
 `prioridad`/`capacidades_por_defecto` (revisión de Task 13).** `desenvuelve_canvas`
 (default `False`) decide si `razonamiento`/`proxy` desenvuelven las cercas de canvas de
@@ -282,7 +289,10 @@ SQLite, un archivo en volumen:
 - **`sondas`** — una fila por sonda: `ruta`, `tipo` (salud|calidad), `momento`, `ok`,
   `latencia_ms`, `ttft_ms`, `codigo_http`, `casos_pasados`, `casos_totales`.
 - **`eventos`** — telemetría del tráfico real: `ruta`, `momento`, `ok`, `latencia_ms`,
-  `ttft_ms`, `codigo_http`, `llave`. Alimenta el ranking entre sondas.
+  `ttft_ms`, `codigo_http`, `llave`, `es_error_cliente` (tercera revisión de Task 13,
+  `INTEGER NOT NULL DEFAULT 0`, misma migración idempotente). Alimenta el ranking entre
+  sondas — salvo las filas con `es_error_cliente=1`, que `_confiabilidad` excluye de su
+  ventana por completo (§7): quedan igual en la tabla, para diagnóstico, pero no pesan.
 - **`uso_pago`** — `llave`, `dia`, `peticiones`. Para el tope diario de fallback.
 
 Podado de `sondas` y `eventos` a los 30 días.
@@ -404,7 +414,22 @@ Por ruta:
 - **`calidad`** (0–1) — fracción de casos de la batería que pasó en la última evaluación.
   Las rutas nunca evaluadas arrancan en un valor neutro configurable, no en 0 (si no,
   jamás las elegiría y nunca se evaluarían).
-- **`confiabilidad`** (0–1) — EWMA de éxitos, mezclando sondas y tráfico real.
+- **`confiabilidad`** (0–1) — EWMA de éxitos, mezclando sondas y tráfico real. **Un `4xx`
+  del cliente (ver más abajo) NUNCA entra en esta cuenta** (corrección de una tercera
+  revisión, severidad HIGH): el evento se sigue guardando en `eventos` (queda
+  diagnosticable — `es_error_cliente=1` en la fila), pero `Almacen._confiabilidad`
+  excluye esas filas de la ventana por completo, ni como fallo ni como observación.
+  Antes solo se sacó del *contador de cooldown* (revisión anterior), pero seguía
+  contando como fallo común hacia confiabilidad — y `/health`/`/v1/ranking` la usan
+  directo. Reproducido: 26 pedidos malformados SEGUIDOS de una sola llave (un cliente
+  reintentando el mismo error — algo que los SDK de OpenAI hacen solos) bastan para
+  tirar la confiabilidad de TODAS las rutas por el piso, con `/health` en `caido`/`503`
+  mientras una llave DISTINTA con un pedido VÁLIDO sigue recibiendo `200`. **Peor que el
+  503 de la revisión anterior en el despliegue real**: Coolify usa `/health` como
+  *health check* y REINICIA el contenedor cuando falla, pero `eventos` vive en el
+  volumen persistente `/datos` — un proceso nuevo contra la MISMA base sigue viendo los
+  mismos 26 fallos y sigue reportando `caido`. Loop de reinicios que reiniciar no puede
+  cortar, contra un servicio que responde bien.
 - **`latencia`** — p50 de time-to-first-token de las últimas N observaciones.
 - **`cooldown`** — una ruta que devolvió 429 queda excluida hasta que expire su castigo
   (backoff exponencial con tope). **Desde la revisión de Task 13, también una ruta que
@@ -419,17 +444,31 @@ Por ruta:
   `timeout_s` (§4) para acotar el peor caso sin bajarle el timeout a todos — aplica al
   camino síncrono y al de streaming por igual.
 
-  **Un `4xx` que no sea `429` NUNCA cuenta para este cooldown** (corrección de una
-  segunda revisión, severidad HIGH). `armar_peticion` reenvía el cuerpo del cliente tal
-  cual, así que un error determinista de ESE pedido —`context_length_exceeded`, un
-  parámetro no soportado, una secuencia de roles inválida— produce el mismo `4xx` contra
-  CUALQUIER ruta de la cadena, sano el proveedor o no. Contarlo hacia el cooldown
-  convierte el error de un cliente en un apagón para todos: verificado contra el
-  registro real de 5 rutas, tres pedidos malformados seguidos bastaban para dejar las
-  cinco en cooldown, con una llave DISTINTA recibiendo `503` mientras tanto y `/health`
-  en `caido` — estrictamente peor que el síntoma de proxy colgado que el cooldown vino a
-  arreglar. Antes de este mecanismo, un `400` solo perjudicaba al cliente que lo mandó;
-  sigue siendo así.
+  **Un `4xx` que no sea `429`, `408` ni `425` NUNCA cuenta para este cooldown**
+  (corrección de una segunda revisión, severidad HIGH). `armar_peticion` reenvía el
+  cuerpo del cliente tal cual, así que un error determinista de ESE pedido
+  —`context_length_exceeded`, un parámetro no soportado, una secuencia de roles
+  inválida— produce el mismo `4xx` contra CUALQUIER ruta de la cadena, sano el proveedor
+  o no. Contarlo hacia el cooldown convierte el error de un cliente en un apagón para
+  todos: verificado contra el registro real de 5 rutas, tres pedidos malformados
+  seguidos bastaban para dejar las cinco en cooldown, con una llave DISTINTA recibiendo
+  `503` mientras tanto y `/health` en `caido` — estrictamente peor que el síntoma de
+  proxy colgado que el cooldown vino a arreglar. Antes de este mecanismo, un `400` solo
+  perjudicaba al cliente que lo mandó; sigue siendo así. `proxy._es_error_del_cliente`
+  es la única fuente de verdad para "esto es evidencia sobre el pedido, no sobre la
+  ruta" — la usan tanto el gate del cooldown como el flag `es_error_cliente` que se
+  guarda en `eventos`, para que las dos exclusiones no puedan desincronizarse.
+
+  **Decisión de diseño (tercera revisión): `408` y `425` quedan AFUERA de esta
+  excepción, aunque son `4xx`.** Por espíritu son retryables, no errores deterministas
+  de payload — `408` suele significar que el UPSTREAM se colgó esperando (el mismo
+  síntoma que motivó todo este mecanismo) y `425` es una nuance de protocolo/TLS
+  (replay), no un payload inválido. Un proveedor detrás de algo que devuelve `408`
+  cuando se cuelga nunca entraría en cooldown si se tratara como error del cliente. Se
+  los excluye de `_es_error_del_cliente`, así que SÍ cuentan hacia el cooldown de
+  fallos duros y hacia confiabilidad, como cualquier fallo "real". Probabilidad baja de
+  que esto importe en la práctica; la consecuencia de no hacerlo sería solo volver al
+  comportamiento viejo (reintentar para siempre) para ese caso puntual.
 
 `puntaje = calidad^wc · confiabilidad^wr · f(latencia)^wl`, con los pesos según el **perfil**
 pedido: `rapido` pondera latencia, `potente` pondera calidad y contexto, `balanceado` (el
@@ -574,9 +613,21 @@ desarrollo.
 - **`/v1/ranking` modela el cooldown (segunda revisión):** una ruta castigada, aunque
   tenga la mejor `prioridad` y el mejor puntaje, va al final de la tabla — no solo
   `prioridad` (primera revisión, hallazgo 3).
+- **Un `4xx` no cuenta para confiabilidad/health/ranking (tercera revisión, HIGH):** 30
+  `400` seguidos dejan `/health` en `ok` y todas las rutas sobre el piso; probado
+  también contra un proceso NUEVO abierto sobre la MISMA base de archivo (el caso de
+  loop de reinicios de Coolify — un `Almacen`/`Estado` segundo, sin nada en memoria del
+  primero, tiene que leer el mismo resultado); 30 `500` seguidos siguen tirando
+  `/health` exactamente como antes; `/v1/ranking` no se mueve con una racha de `400`
+  pero sí con una de `500`. Verificado en rojo revirtiendo el filtro
+  `es_error_cliente=0` de `_confiabilidad`. Y `408`/`425`, la decisión de diseño de esta
+  revisión: se prueba explícitamente que SÍ castigan (no quedan en la excepción del
+  4xx).
 - **Normalización de `base_url_env` (segunda revisión):** una ruta propia en la variable
   de entorno que no coincide con el sufijo default se usa tal cual, sin pisarla — solo
-  se loguea el aviso.
+  se loguea el aviso. **Corrección LOW (tercera revisión):** una URL con path vacío pero
+  con query string no le astilla el sufijo adentro de la query — se parsea con
+  `urlsplit`/`urlunsplit`, no se concatena texto.
 - **Rungs sin pinnear, cerrados en la revisión:** `rutas_fijas` estampando la `prioridad`
   real del proveedor (no una constante — probado con un YAML sintético y un valor
   distintivo), y el orden `(prioridad, no-medida)` en `router.clave_de_orden` (no
@@ -593,6 +644,16 @@ desarrollo.
   (`tests/test_vivo.py`) todavía no había corrido contra una instancia real; se resuelve
   la URL con `proveedores.cargar` (el mismo camino de producción, `/v1` incluido) en vez
   de reconstruirla a mano, para que corra igual sin importar cómo el operador configuró
+  `CHATGPT_PROXY_URL`. **Corregido en la tercera revisión:** el test de chat mandaba un
+  id CABLEADO (`"gpt-5-3-mini"`) — justo lo que esta Task existe para prohibir — y la
+  revisión probó el costo: cuando ese id dejó de existir, el test de `tools` falló con
+  el diagnóstico EQUIVOCADO ("¿volvió el 500 viejo?") en vez de decir que el id ya no
+  existía. Ahora los dos tests descubren el catálogo real primero (`/v1/models`) y usan
+  esos ids. Además, `tools: false` es una afirmación sobre TODAS las rutas descubiertas
+  de `chatgpt`, no sobre un modelo puntual — un backend que ganara function calling en
+  un modelo distinto del probado dejaría el test en verde con el YAML ya mintiendo, así
+  que el test de `tools` ahora recorre TODOS los ids que el catálogo real trajo, no uno
+  solo.
   `CHATGPT_PROXY_URL`.
 
 ## 13. Fuera de alcance
