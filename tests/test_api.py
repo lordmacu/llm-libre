@@ -326,6 +326,105 @@ def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
     assert despues_500["puntaje"] < antes["puntaje"]
 
 
+# --- Round 5 de Task 13, hallazgo HIGH. La clasificacion de la ronda 4
+#     ("es reintentable?" decide) archivaba 401/402/403/404 del lado del
+#     cliente -- pero no son evidencia del PEDIDO, son evidencia de la
+#     RUTA: la clave vencio (401), la cuenta se quedo sin credito (402,
+#     "insufficient credits" de OpenRouter), la cuenta esta suspendida o
+#     hay moderacion del lado del proveedor (403), o el modelo ya no existe
+#     (404 -- literalmente el problema central que este proyecto existe
+#     para detectar). Medido: las 5 rutas devolviendo 401 dejaba al cliente
+#     con 503 en el 100% de los pedidos mientras /health seguia en "ok" --
+#     el apagon con luz verde que /health existe para prevenir, y sin
+#     ningun backstop para las rutas de pago (nunca sondeadas). Redibujado
+#     sobre ATRIBUCION (ver proxy._es_error_del_cliente /
+#     _CODIGOS_EVIDENCIA_DE_RUTA): estos cuatro ahora cuentan igual que un
+#     500, en /health y en /v1/ranking. ---
+
+@pytest.mark.parametrize("codigo", [401, 402, 403, 404])
+def test_health_cae_con_30_seguidos_de_un_codigo_de_ruta(estado_cliente, codigo):
+    estado, cliente = estado_cliente
+    ahora = time.time()
+
+    async def _mandar_treinta_veces():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(codigo, json={"error": "x"})))
+        for _ in range(30):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+
+    asyncio.run(_mandar_treinta_veces())
+    r = cliente.get("/health")
+    assert r.status_code != 200
+    assert r.json()["estado"] != "ok"
+
+
+def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path):
+    # La contracara del test de restart-loop de la ronda 4: un codigo que SI
+    # es evidencia de la ruta (401, clave vencida) tiene que seguir
+    # reportando "caido" incluso en un proceso NUEVO contra la MISMA base --
+    # este es el test que habria detectado el bug original (401 mal
+    # archivado como error del cliente dejaba a /health diciendo "ok" con
+    # las 5 rutas realmente caidas, incluso despues de un reinicio).
+    ruta_db = str(tmp_path / "salud_401.sqlite3")
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    proxy1 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(401, json={"error": "invalid api key"}))))
+    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+
+    async def _mandar_401_treinta_veces():
+        rutas = almacen1.rutas_activas()
+        for _ in range(30):
+            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
+
+    asyncio.run(_mandar_401_treinta_veces())
+    cliente1 = TestClient(crear_app(estado1))
+    r1 = cliente1.get("/health")
+    assert r1.status_code != 200
+    assert r1.json()["estado"] != "ok"
+
+    # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
+    # con un transport SANO en el segundo proceso, para probar que la caida
+    # viene de la TELEMETRIA ya persistida (eventos con es_error_cliente=0),
+    # no de ningun trafico que este segundo proceso vuelva a generar.
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    proxy2 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "hola"}}]}))))
+    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    r2 = cliente2.get("/health")
+    assert r2.status_code != 200
+    assert r2.json()["estado"] != "ok"
+
+
+def test_ranking_cae_con_401_seguidos_igual_que_con_500(estado_cliente):
+    estado, cliente = estado_cliente
+    ahora = time.time()
+    antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+
+    async def _mandar_401_treinta_veces():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(401, json={"error": "invalid api key"})))
+        for _ in range(30):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+
+    asyncio.run(_mandar_401_treinta_veces())
+    despues = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert despues["confiabilidad"] < antes["confiabilidad"]
+    assert despues["puntaje"] < antes["puntaje"]
+
+
 def test_ranking_desglosa_los_componentes(cliente):
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     for campo in ("clave", "puntaje", "calidad", "confiabilidad", "ttft_p50_ms", "tier",
