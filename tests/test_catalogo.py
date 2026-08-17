@@ -236,6 +236,29 @@ def test_chatgpt_descarta_auto_por_ser_un_id_reservado():
     assert "auto" not in {r.modelo_id for r in rutas}
 
 
+# --- INFO de la revision round 6: IDS_RESERVADOS solo excluia el id LITERAL
+#     "auto", no los alias compuestos que api.py TAMBIEN trata como
+#     reservados ("auto:rapido", "auto:potente", "auto:tools",
+#     "auto:vision" -- ver ALIAS en api.py e interpretar_pedido, que resuelve
+#     CUALQUIER id que empiece con "auto:" como alias, nunca como id
+#     literal). Un proveedor que publicara un modelo real llamado, por
+#     ejemplo, "auto:rapido" creaba una ruta PERMANENTEMENTE inalcanzable:
+#     ningun pedido con `model: "auto:rapido"` llega nunca a
+#     `pedido.modelo == "auto:rapido"`, porque interpretar_pedido lo
+#     resuelve antes como perfil "rapido" con modelo=None. ---
+
+def test_se_descartan_tambien_los_alias_compuestos_de_auto():
+    rutas = normalizar("prov", [
+        {"id": "auto:rapido", "name": "Choca con el alias compuesto"},
+        {"id": "auto:potente", "name": "Choca con el alias compuesto"},
+        {"id": "auto:tools", "name": "Choca con el alias compuesto"},
+        {"id": "auto:vision", "name": "Choca con el alias compuesto"},
+        {"id": "un-modelo-real", "name": "Modelo real"},
+    ], capacidades_por_defecto=_DEFAULTS_CHATGPT)
+    ids = {r.modelo_id for r in rutas}
+    assert ids == {"un-modelo-real"}
+
+
 def test_un_modelo_nuevo_del_proxy_aparece_sin_tocar_el_yaml():
     # El fixture "con_modelo_nuevo" simula que manana el backend real de
     # ChatGPT agrega un modelo (gpt-5-7) que hoy no existe: tiene que

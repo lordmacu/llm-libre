@@ -56,7 +56,25 @@ _DESCARTAR = re.compile("|".join(_ESPECIALIDAD + _META_ROUTER), re.IGNORECASE)
 # modelo_id literal quedaria inalcanzable para siempre. Se filtra aca, en el
 # descubrimiento, para que NINGUN proveedor (presente o futuro) pueda colar
 # sin querer una ruta invalida por coincidencia de nombres.
+#
+# INFO de la revision round 6: el literal "auto" no alcanza. `ALIAS` en
+# api.py (y `interpretar_pedido`) tambien trata como alias reservado
+# CUALQUIER id de la forma "auto:<sufijo>" -- "auto:rapido", "auto:potente",
+# "auto:tools", "auto:vision" -- resolviendolo SIEMPRE antes de comparar
+# contra `pedido.modelo`. Un proveedor que publicara un modelo real con uno
+# de esos ids (o cualquier otro "auto:*" que api.py agregue manana) creaba
+# una ruta permanentemente inalcanzable, exactamente por el mismo mecanismo
+# que ya justificaba reservar "auto". Por eso `es_id_reservado` cubre el
+# PATRON completo, no una lista de ids conocidos hoy.
 IDS_RESERVADOS = frozenset({"auto"})
+
+
+def es_id_reservado(id_: str) -> bool:
+    """True si `id_` colisiona con "auto" o con cualquier alias compuesto
+    "auto:<sufijo>" que interpretar_pedido (api.py) resuelve antes de
+    comparar contra un id literal -- ver el comentario de arriba de
+    IDS_RESERVADOS."""
+    return id_ in IDS_RESERVADOS or id_.startswith("auto:")
 
 # Los proveedores que agregan alias legacy a su propio catalogo (chatgpt-proxy
 # expone "gpt-4o" como alias de "auto", p.ej.) se autoidentifican con este
@@ -111,7 +129,7 @@ def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100,
         if not m.get("id"):
             log.warning("catalogo %s: entrada sin 'id', se omite: %.120r", proveedor, m)
             continue
-        if m["id"] in IDS_RESERVADOS:
+        if es_id_reservado(m["id"]):
             continue
         if _es_alias(m):
             continue
