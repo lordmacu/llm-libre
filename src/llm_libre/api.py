@@ -353,7 +353,17 @@ def _sin_rutas(activas: list, pedido, metricas: dict, ahora: float,
 
 
 def _parecidos(pedido: str, activas: list) -> list[str]:
-    return difflib.get_close_matches(pedido, [r.modelo_id for r in activas], n=3, cutoff=0.3)
+    # Round 7, LOW del gate: el llamador del 404-en-vivo (mas arriba) pasa
+    # `activas` SIN filtrar -- ese id de `pedido` TODAVIA esta en el
+    # catalogo local (esa es la premisa entera de ese caso: sigue en el
+    # catalogo, pero el proveedor real ya no lo tiene). Sin excluirlo aca,
+    # `get_close_matches` lo encuentra a SI MISMO como el "parecido" mas
+    # obvio (distancia cero) y el cliente lee `"el modelo 'a:free' ya no
+    # existe"` con `sugerencias: ['a:free', ...]`. Se excluye ACA, en la
+    # funcion, y no en cada llamador: una lista de sugerencias nunca debe
+    # poder sugerir el mismo id que se acaba de declarar muerto.
+    candidatos = [r.modelo_id for r in activas if r.modelo_id != pedido]
+    return difflib.get_close_matches(pedido, candidatos, n=3, cutoff=0.3)
 
 
 def _iso(momento: float | None) -> str | None:

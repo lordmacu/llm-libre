@@ -168,6 +168,28 @@ def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente)
     assert "sugerencias" in str(r.json())
 
 
+# --- Round 7, LOW del gate: `_parecidos` corria contra `rutas_activas()`,
+#     que TODAVIA trae el id que se acaba de declarar muerto -- el cliente
+#     leia `"el modelo 'a:free' ya no existe"` con `sugerencias: ['a:free',
+#     ...]`. Se excluye el propio `pedido.modelo` de la lista antes de
+#     buscar parecidos. ---
+
+def test_la_sugerencia_del_404_en_vivo_no_incluye_el_modelo_recien_declarado_muerto(estado_cliente):
+    estado, cliente = estado_cliente
+    estado.almacen.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096)),
+         Ruta("kilo", "a:freebie", "gratis", Capacidades(True, False, 100000, 4096))],
+        1.0)
+    estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "a:free", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 404
+    sugerencias = r.json()["detail"]["sugerencias"]
+    assert "a:free" not in sugerencias
+    assert "a:freebie" in sugerencias
+
+
 def test_modelo_auto_con_404_upstream_sigue_siendo_503(estado_cliente):
     # En modo "auto" no hay un id EXPLICITO que nombrar -- pedido.modelo es
     # None -- asi que este caso se queda con el 503 generico de siempre, no
