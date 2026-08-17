@@ -638,15 +638,94 @@ Por ruta:
 
   `429` no pasa por este mecanismo — sigue castigando de inmediato, sin importar el resto
   de la cadena: es una señal inequívoca de la capacidad de ESA ruta ahora mismo, no algo
-  que un payload pueda inducir idéntico en varios proveedores independientes a la vez. Una
-  cadena de UNA sola ruta (la sonda de salud SIEMPRE lo es, ver §8 — y también un pedido
-  con un único candidato posible) no tiene con qué compararse: sigue computando de
-  inmediato, sin cambios — es, además, la salida de emergencia para una ruta genuinamente
-  rota que ya no tiene ninguna hermana sana en su cadena: la sonda (payload fijo, que
-  controla el propio gateway) la sigue enfriando aunque el tráfico real deje de poder
-  hacerlo. Con el fix, una ruta que de verdad está rota (con una hermana sana en la MISMA
-  cadena) sigue cayendo en el mismo número de pedidos que antes — verificado con un test
-  de contraste directo, tanto en el camino síncrono como en el de streaming.
+  que un payload pueda inducir idéntico en varios proveedores independientes a la vez.
+
+  **Octava revisión: la atribución a nivel de cadena seguía rota — las dos fugas que
+  quedaban estaban en las EXCEPCIONES que la propia séptima revisión escribió a
+  propósito.** La cadena de UNA sola ruta ("sin hermana con quién compararse, se computa
+  de inmediato") parecía un caso borde, pero el CLIENTE la puede forzar él mismo — con un
+  `model` explícito, o con `x_min_contexto` (que `GET /v1/ranking` ya publica por ruta, sin
+  hacer falta ningún conocimiento interno del gateway): 15 pedidos idénticos contra una
+  cadena de una sola ruta bastaban para enfriarla, una por una, las cinco rutas del
+  registro. Peor: la rama `if emitido:` de `completar_stream` (el force-flush de
+  `TOPE_PENDIENTES` cuando un stream retiene demasiados chunks sin contenido útil)
+  commiteaba de inmediato SIN chequear ni hermana ni longitud de cadena — ni siquiera hacía
+  falta narrows la cadena: `{"model":"auto","stream":true}`, sin extensiones, con un prompt
+  que agota el presupuesto de razonamiento sin emitir texto nunca, apagaba las cinco rutas
+  en 15 pedidos.
+
+  > **Cuando las fugas están en las excepciones que uno mismo escribió a propósito, el eje
+  > está mal, no sub-enumerado.** Seis rondas del mismo mecanismo (retryability, una lista
+  > de códigos, la lista con el default invertido, atribución a nivel de respuesta,
+  > atribución a nivel de cadena) cayeron cada una por un vector nuevo sobre la MISMA señal
+  > compartida: qué le pasó al PEDIDO del cliente.
+
+  **El cambio, esta vez estructural: el tráfico de un cliente real deja de ser una señal
+  que EXCLUYE una ruta, y pasa a ser una señal que puede, como mucho, pedirle al gateway
+  que vaya a mirar.**
+
+  > **Solo una sonda escrita por el propio gateway puede excluir una ruta. El tráfico de
+  > un cliente nunca puede — solo puede pedirle al gateway que vaya a mirar.**
+
+  La razón por la que esto cierra los seis vectores de una vez: el payload de una sonda
+  (`PING`, ahora en `proxy.py` — antes en `sondeo.py`, ver más abajo) lo escribe EL
+  GATEWAY. No hay nada que atribuir. Si la sonda falla, la ruta está rota, punto — ninguno
+  de los vectores de las seis rondas anteriores (contenido flageado, prompt gigante, un
+  modelo de razonamiento que se gasta el presupuesto, una cadena corta, un early-return de
+  streaming) puede tocar el payload de una sonda, porque el cliente nunca lo escribe.
+
+  Mecánica (`Proxy._sospechar`, `Proxy._probar_bajo_demanda`):
+
+  - Un fallo de tráfico real (no-429, no evidencia-de-pedido) ya NO se computa hacia
+    ningún cooldown — solo se agrega a una lista de marcas de tiempo por ruta
+    (`_sospechas`), que se poda a `VENTANA_SOSPECHA_S` (10 min) en cada llamada. La
+    sospecha DECAE a propósito: mucho más corta que "horas", así que fallos de un
+    incidente real disperso en el tiempo nunca se suman para disparar una sonda espuria.
+  - Al cruzar `UMBRAL_SOSPECHA` (3, el mismo número que el viejo `TOPE_FALLOS_SEGUIDOS`)
+    marcas dentro de la ventana, se programa — en SEGUNDO PLANO (`asyncio.create_task`,
+    sin bloquear la respuesta al cliente que disparó el umbral: ese cliente no tiene por
+    qué pagar la latencia de investigar una ruta ajena, y bloquear ahí arriesgaría colgar
+    el pedido si la ruta está de verdad trabada) — una sonda BAJO DEMANDA: el mismo
+    `completar()` de siempre, con el mismo payload `PING` que la sonda periódica, sobre una
+    cadena de una sola ruta, con una bandera (`es_sonda=True`) que hace que UN fallo (sin
+    necesitar sospecha, sin poder programar otra sonda anidada) castigue de inmediato.
+  - Si la sonda falla, `_castigar` corre exactamente igual que con un `429` (mismo backoff
+    exponencial, mismo tope). Si pasa, la sospecha se limpia y la ruta sigue en rotación.
+    La sonda deja además su propia fila en `sondas` — la misma tabla que ya lee
+    `Almacen.tiene_evidencia_de_vida` para `/health` — así que, para el resto del sistema,
+    una sonda bajo demanda y una periódica son indistinguibles: solo cambia quién la
+    disparó.
+  - **Rate limit por ruta: como máximo una sonda bajo demanda cada
+    `LIMITE_PROBE_BAJO_DEMANDA_S` (60 s).** Una sonda gasta la MISMA cuota gratis que el
+    tráfico real (el mismo endpoint, el mismo límite por minuto del proveedor), así que el
+    costo extra que UN cliente hostil puede imponerle a UNA ruta queda topeado en, como
+    mucho, 60 pedidos extra por hora — sin importar cuántos pedidos mande el cliente
+    (podría mandar miles y el tope sigue siendo el mismo). Y como el payload de esa sonda
+    es del gateway, el cliente jamás puede hacer que ese pedido extra FALLE: una ruta sana
+    pasa la sonda siempre, así que el peor resultado posible para el atacante es gastar ese
+    cupo fijo sin lograr nunca que una ruta sana caiga. **Costo para el atacante: con UNA
+    sola llave, lo peor que puede lograr es forzar sondeo extra acotado (como mucho 60
+    pedidos/hora por ruta) — nunca la caída de una ruta sana**, porque solo el gateway
+    escribe el payload que de verdad decide.
+  - `429` sigue exactamente igual que siempre — no pasa por sospecha, no dispara ninguna
+    sonda: es evidencia inequívoca de ESA ruta sin necesitar confirmación.
+  - **Las rutas de PAGO quedan afuera del mecanismo entero, deliberadamente.** Nunca se
+    sondean (§8), así que una sonda bajo demanda gastaría PLATA REAL contra un proveedor de
+    pago sin un dueño natural de esa cuenta (`TOPE_PAGO_DIARIO` es por LLAVE, no por ruta).
+    Sin sonda posible, tampoco tiene sentido acumular sospecha que nunca se va a resolver.
+    Van últimas en la cadena de todos modos, así que solo importan cuando TODO lo gratis ya
+    falló o está en cooldown — el mismo escenario en el que `/health` ya reporta el apagón.
+    Solo el `429` las sigue pudiendo castigar. (La alternativa considerada —una sonda bajo
+    demanda que cuente contra el tope diario— quedó descartada: no hay una llave "dueña"
+    natural de ese gasto para una sonda que dispara el propio gateway.)
+
+  **Promptness, no solo corrección**: una ruta genuinamente rota, con una hermana sana en
+  su misma cadena, sigue cayendo en el mismo número de pedidos que antes (round 7) —
+  verificado con un test de contraste directo, en el camino síncrono y en el de streaming.
+  Una cadena de una sola ruta que está rota de verdad también se enfría en
+  `UMBRAL_SOSPECHA` pedidos más una sonda — segundos u órdenes de pedidos, nunca el ciclo
+  de 5 h del sondeo periódico. Un *pool* genuinamente caído (todas las rutas rotas a la
+  vez) se excluye ruta por ruta con la misma rapidez, sin esperar horas.
 
 `puntaje = calidad^wc · confiabilidad^wr · f(latencia)^wl`, con los pesos según el **perfil**
 pedido: `rapido` pondera latencia, `potente` pondera calidad y contexto, `balanceado` (el
@@ -701,6 +780,16 @@ respuesta **verificable por código**, sin juez:
 
 Cada caso es un assert: el puntaje es auditable y reproducible. Las rutas de pago **no se
 sondean** — no tiene sentido gastar dinero puntuando el escape de emergencia.
+
+**Sonda bajo demanda (octava revisión, ver §7):** ademas de este ciclo de 5 h, `Proxy`
+dispara sondas de salud por su cuenta cuando el trafico real acumula suficiente sospecha
+sobre una ruta — mismo payload `PING` (ahora vive en `proxy.py`, no en `sondeo.py`, para
+que las dos sondas sean literalmente el mismo pedido), mismo destino en `sondas`, rate-
+limitada a una por ruta cada `LIMITE_PROBE_BAJO_DEMANDA_S`. Es el mecanismo que le da a
+una ruta genuinamente rota una forma de excluirse en el orden de segundos/pedidos, sin
+esperar el proximo ciclo programado — el ciclo de 5 h sigue como esta, esto le agrega un
+disparador, no lo reemplaza. Las rutas de pago (nunca sondeadas, arriba) tampoco reciben
+sondas bajo demanda: ver §7 para la justificacion completa.
 
 ## 9. Errores
 

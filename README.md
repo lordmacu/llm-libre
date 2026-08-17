@@ -233,7 +233,10 @@ sondea aproximadamente una vez al día— vuelve a cero.
   **calidad** cada `SONDEO_CALIDAD_CADA_N_CICLOS` ciclos (default 5, o sea
   aproximadamente una vez al día) con una batería de casos verificables por
   código (JSON válido, tool call correcto, formato pedido, aritmética,
-  idioma) — sin juez-LLM.
+  idioma) — sin juez-LLM. Además de este ciclo, el proxy dispara sus
+  propias sondas de salud **bajo demanda** cuando el tráfico real acumula
+  sospecha sobre una ruta (ver "Cómo decide" más abajo) — mismo payload,
+  mismo destino, sin esperar el próximo ciclo programado.
 - El catálogo descarta lo que el proveedor **describe** como algo que no es un
   modelo de chat de propósito general —guardrails y clasificadores de
   seguridad, rerankers, modelos de embeddings— y los *meta-routers*, que no son
@@ -341,28 +344,44 @@ sondea aproximadamente una vez al día— vuelve a cero.
   solo en cuanto alguien lo mira o el router recalcula; una ruta que
   `/health` declara muerta reinicia el contenedor. La asimetría es a
   propósito.
-- **Cooldown se decide a nivel de CADENA, no de respuesta — un solo cliente
-  ya no puede apagar rutas sanas.** La clasificación de arriba dice bien
-  qué código es de quién, pero `completar`/`completar_stream` juzgaban cada
-  ruta de la cadena SOLA: un `403` de moderación de contenido, un `451`
-  legal/geográfico, un timeout por un prompt gigante o un `200` sin
-  contenido de un modelo de razonamiento son, los cuatro, evidencia de la
-  ruta por la regla de arriba — pero también son deterministas, CUALQUIER
-  ruta le devuelve lo mismo a ESE pedido puntual. Medido: tres pedidos
-  IDÉNTICOS de una sola llave contra un gateway de 5 rutas SANAS bastaban
-  para poner las cinco en cooldown. **El principio "cuando no se sabe,
-  contar" es por-consumidor, no global**: `confiabilidad` es una medición
-  (una falsa alarma se autocorrige, así que ante la duda se cuenta);
-  `cooldown` es una exclusión (una falsa alarma ES la interrupción, así que
-  ante la duda **no se excluye**). `completar` recorre la cadena entera por
-  pedido, así que sabe algo que ninguna respuesta individual puede decir:
-  un fallo solo cuenta hacia el contador de fallos duros de SU ruta si, en
-  esa misma vuelta, alguna OTRA ruta de la cadena tuvo éxito; si la cadena
-  se agota entera sin ningún éxito y tiene más de una ruta, se descartan
-  todos los fallos de esa vuelta. `429` no se toca (sigue castigando de
-  inmediato, señal inequívoca de esa ruta), y una cadena de una sola ruta
-  (la sonda de salud siempre lo es) tampoco tiene con qué comparar, así que
-  sigue castigando de inmediato — es la salida de emergencia para una ruta
-  rota que ya no tiene ninguna hermana sana. Una ruta que de verdad está
-  rota (con una hermana sana en la misma cadena) sigue cayendo en el mismo
-  número de pedidos que antes.
+- **Solo una sonda escrita por el propio gateway puede excluir una ruta. El
+  tráfico de un cliente real nunca puede — solo puede pedirle al gateway
+  que vaya a mirar.** Seis rondas de este mismo mecanismo (retryability,
+  una lista de códigos, la lista con el default invertido, atribución por
+  respuesta, atribución a nivel de cadena) cayeron cada una por un vector
+  nuevo, y los dos últimos eran escotillas del propio diseño anterior: una
+  cadena de UNA sola ruta (el cliente la fuerza con `model` explícito o con
+  `x_min_contexto`, que `/v1/ranking` ya publica por ruta — sin ningún
+  conocimiento interno) y la rama de streaming que fuerza el cierre del
+  stream cuando ya se retuvieron demasiados chunks sin contenido útil,
+  que commiteaba sin comparar con nada. Medido: 15 pedidos idénticos
+  bastaban para enfriar cinco rutas sanas, una por una, por cualquiera de
+  las dos vías — hasta con `{"model":"auto","stream":true}` sin ninguna
+  extensión.
+
+  El cambio es estructural, no un séptimo predicado: un fallo de tráfico
+  real ya NO cuenta hacia ningún cooldown directamente — solo acumula
+  *sospecha*, que no excluye nada. Al cruzar un umbral (3 fallos en 10
+  minutos) se dispara, en segundo plano, una sonda PROPIA con el mismo
+  payload fijo (`PING`) que ya usa el sondeo periódico de salud — y es esa
+  sonda, nunca el pedido del cliente, la que decide: si falla, castiga (el
+  mismo backoff de siempre); si pasa, la sospecha se limpia. La razón por
+  la que esto cierra los seis vectores de una vez: el payload de una sonda
+  lo escribe el gateway — no hay nada que atribuir, así que un fallo contra
+  ella es evidencia inequívoca de la ruta, sin excepción posible. Las
+  sondas bajo demanda están *rate-limitadas* a una por ruta cada 60 s, así
+  que el costo extra que una sola llave hostil le puede imponer a una ruta
+  queda topeado sin importar cuántos pedidos mande — y como el payload es
+  del gateway, esa llave jamás puede hacer que la sonda falle. **Costo para
+  el atacante: como mucho, sondeo extra acotado (≤60 pedidos/hora por
+  ruta) — nunca la caída de una ruta sana.**
+
+  `429` sigue exactamente igual (castiga de inmediato, sin pasar por
+  sospecha ni sonda: es evidencia inequívoca por sí solo). Las rutas de
+  **pago** quedan afuera del mecanismo entero, deliberadamente: nunca se
+  sondean, y una sonda bajo demanda gastaría plata real sin una llave
+  dueña de ese gasto — solo el `429` las sigue pudiendo castigar. Una ruta
+  genuinamente rota, con una hermana sana en su misma cadena, sigue
+  cayendo en el mismo número de pedidos que antes; una rota sin hermana
+  (o un *pool* entero genuinamente caído) se enfría en el orden de
+  segundos/pedidos vía su propia sonda, sin esperar el ciclo de 5 h.
