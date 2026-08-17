@@ -42,6 +42,24 @@ async def test_sincronizar_guarda_las_rutas_descubiertas():
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
 
 
+async def test_sincronizar_no_astilla_un_query_string_en_base_url():
+    # Round 5: el mismo bug del sufijo concatenado, del lado de /models --
+    # el test tiene que mirar la URL que de verdad se pidio, no un campo
+    # intermedio.
+    almacen = _almacen()
+    vistas = []
+
+    def handler(req):
+        vistas.append(str(req.url))
+        return httpx.Response(200, json=CATALOGO)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [Proveedor("chatgpt", "gratis", "openai", "https://blog.test:8888?token=abc",
+                      "", "/models", {}, [])]
+    await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
+    assert vistas == ["https://blog.test:8888/models?token=abc"]
+
+
 async def test_sincronizar_agrega_los_modelos_fijos_de_pago():
     almacen = _almacen()
     http = httpx.AsyncClient(transport=httpx.MockTransport(

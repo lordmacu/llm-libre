@@ -7,7 +7,7 @@ import httpx
 from llm_libre.bateria import CASOS, TOPE_CORTO, evaluar
 from llm_libre.catalogo import normalizar
 from llm_libre.modelos import Ruta
-from llm_libre.proveedores import Proveedor, rutas_fijas
+from llm_libre.proveedores import Proveedor, rutas_fijas, unir_ruta
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +76,9 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
         if p.clave.strip():
             cabeceras["Authorization"] = "Bearer " + p.clave
         try:
-            r = await http.get(p.base_url.rstrip("/") + p.modelos_path,
+            # unir_ruta parsea y reconstruye, no concatena texto crudo: ver
+            # su docstring en proveedores.py para el bug que evita.
+            r = await http.get(unir_ruta(p.base_url, p.modelos_path),
                                headers=cabeceras, timeout=30.0)
         except httpx.HTTPError as e:
             log.warning("catalogo de %s: no se pudo consultar %s (%s: %s). "

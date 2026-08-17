@@ -1,5 +1,5 @@
 from llm_libre.modelos import EXTENSIONES_GATEWAY
-from llm_libre.proveedores import Proveedor
+from llm_libre.proveedores import Proveedor, unir_ruta
 
 
 def armar_peticion(p: Proveedor, cuerpo: dict,
@@ -16,7 +16,10 @@ def armar_peticion(p: Proveedor, cuerpo: dict,
     `x_`: el contrato es passthrough, y un parametro nuevo del proveedor de
     turno tiene que poder viajar.
     """
-    url = p.base_url.rstrip("/") + "/chat/completions"
+    # unir_ruta parsea y reconstruye la URL, no concatena texto crudo: ver su
+    # docstring para el bug que evita cuando base_url trae un query string
+    # (via CHATGPT_PROXY_URL sin ruta propia).
+    url = unir_ruta(p.base_url, "/chat/completions")
     cabeceras = {"Content-Type": "application/json", **p.cabeceras_extra}
     # Clave vacia => NO mandar Authorization. El tier anonimo de Kilo depende de esto.
     if p.clave.strip():

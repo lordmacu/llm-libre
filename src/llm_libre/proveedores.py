@@ -49,6 +49,25 @@ class Proveedor:
     timeout_s: float | None = None
 
 
+def unir_ruta(base_url: str, sufijo: str) -> str:
+    """Une un sufijo de ruta (p.ej. "/chat/completions", "/models") a
+    `base_url` PARSEANDO la URL, no concatenando texto crudo.
+
+    `base_url` puede traer un query string -- via `CHATGPT_PROXY_URL` sin
+    ruta propia, ver `_resolver_base_url` -- y una concatenacion cruda
+    (`base_url.rstrip("/") + sufijo`) pega el sufijo DENTRO del valor de la
+    query en vez de agregarlo al path: `"...:8888?token=abc" +
+    "/chat/completions"` da `"...:8888?token=abc/chat/completions"` en vez
+    de `"...:8888/chat/completions?token=abc"`. Round 5: este bug se
+    arreglo primero solo en `_resolver_base_url` (donde se GUARDA
+    `Proveedor.base_url`), pero `cliente.armar_peticion` y
+    `sondeo.sincronizar_catalogo` seguian concatenando texto al construir
+    la URL FINAL que de verdad se manda por la red -- la astilla se habia
+    movido una capa mas abajo. Los dos ahora pasan por aca."""
+    partes = urlsplit(base_url)
+    return urlunsplit(partes._replace(path=partes.path.rstrip("/") + sufijo))
+
+
 def _resolver_base_url(p: dict, entorno: dict) -> str:
     """`base_url` en el YAML es siempre el default; `base_url_env`, si esta
     declarada, nombra una variable de entorno que la pisa cuando trae algo
@@ -89,11 +108,9 @@ def _resolver_base_url(p: dict, entorno: dict) -> str:
             "proveedores.yaml declara para este proveedor. Definir la "
             "variable con el sufijo ya incluido evita este aviso.",
             p["id"], env_var, desde_entorno, sufijo)
-        # Se PARSEA y reconstruye (urlsplit/urlunsplit), no se concatena
-        # texto crudo: una URL con path vacio pero CON query string
-        # ("...:8888?token=abc") terminaria con el sufijo pegado DENTRO del
-        # valor de la query ("...:8888?token=abc/v1") si se concatenara.
-        return urlunsplit(partes._replace(path=sufijo))
+        # unir_ruta parsea y reconstruye (urlsplit/urlunsplit), no concatena
+        # texto crudo -- ver su docstring para el bug que evita.
+        return unir_ruta(desde_entorno, sufijo)
     if ruta_entorno != sufijo:
         log.warning(
             "%s: %s='%s' trae una ruta ('%s') distinta del sufijo '%s' que "

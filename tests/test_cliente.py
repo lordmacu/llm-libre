@@ -84,3 +84,21 @@ def test_deja_pasar_cualquier_otro_campo_desconocido():
                                             "provider": {"sort": "throughput"}})
     assert cuerpo["reasoning"] == {"enabled": False}
     assert cuerpo["provider"] == {"sort": "throughput"}
+
+
+# --- Round 5 de Task 13: el fix de la ronda anterior corrigio solo donde
+#     _resolver_base_url GUARDA `Proveedor.base_url`, pero armar_peticion
+#     seguia armando la URL final por concatenacion de texto crudo
+#     (`p.base_url.rstrip("/") + "/chat/completions"`). Con un base_url que
+#     trae un query string (via CHATGPT_PROXY_URL sin ruta propia, p.ej.
+#     "https://blog.test:8888?token=abc"), esa concatenacion pega el sufijo
+#     DENTRO del valor de la query -- la astilla se movio una capa mas
+#     abajo, hasta la URL que de verdad se manda por la red. El test tiene
+#     que afirmar sobre esa URL final, no sobre `p.base_url`. ---
+
+def test_query_string_en_base_url_no_se_astilla_en_la_url_final():
+    prov = Proveedor(id="chatgpt", tier="gratis", dialecto="openai",
+                     base_url="https://blog.test:8888?token=abc", clave="",
+                     modelos_path="/models", cabeceras_extra={}, modelos_fijos=[])
+    url, _, _ = armar_peticion(prov, {"model": "x"})
+    assert url == "https://blog.test:8888/chat/completions?token=abc"
