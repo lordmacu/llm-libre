@@ -1,6 +1,6 @@
 {
   "info": {
-    "_postman_id": "69bcad67-9a3b-48d3-9cdf-d05a9f3c4408",
+    "_postman_id": "dd9aecbf-668a-4d2a-98e1-3ff8f3ad1c18",
     "name": "llm-libre",
     "description": "llm-libre: one OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) in front of several providers' FREE LLM tiers, with a paid fallback (MiniMax) as a last resort and a self-measured ranking that decides routing for you.\n\n## Setup\nFill in the two collection variables (top of this collection, or an environment): `base_url` (e.g. `https://llm-libre.example.com`, no trailing slash -- do NOT include `/v1`, each request adds its own path) and `api_key` (one of the deployment's `LLM_LIBRE_API_KEYS`).\n\n## Folders\n- **Chat completions** -- `auto*` aliases, an explicit model id, streaming, and one request per `x_*` gateway extension so its effect is discoverable on its own.\n- **Catalog & diagnostics** -- `GET /v1/models`, `GET /v1/ranking` (the operator's tool to explain a routing decision), `GET /v1/uso`, `GET /health` (no key needed).\n- **Error paths** -- missing key, an unknown model id, and an impossible capability requirement: half of what you need when something misbehaves is knowing what the failure looks like.\n\nBoth auth styles are represented: every request here uses `X-API-Key` except **Auth: Authorization Bearer**, which proves the OpenAI-SDK-compatible path (`Authorization: Bearer <key>`) works exactly the same.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
@@ -160,7 +160,7 @@
                 "completions"
               ]
             },
-            "description": "Balanced profile + requires function-calling support. In production this SKIPS every chatgpt route (they declare `tools: false` -- the anonymous backend does not support real function calling) and falls through to a Kilo/OpenRouter route that does, e.g. kilo/cohere/north-mini-code:free.",
+            "description": "Balanced profile + requires function-calling support. In production this SKIPS every chatgpt route (they declare `tools: false` -- the anonymous backend does not support real function calling) and falls through to a Kilo route that does, e.g. kilo/cohere/north-mini-code:free.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"auto:tools\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What's the weather in Bogota?\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Weather for a city\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"city\": {\n              \"type\": \"string\"\n            }\n          },\n          \"required\": [\n            \"city\"\n          ]\n        }\n      }\n    }\n  ],\n  \"tool_choice\": \"auto\"\n}",
@@ -684,6 +684,82 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"auto\",\n  \"x_requiere\": [\n    \"tools\",\n    \"vision\"\n  ],\n  \"x_min_contexto\": 999999999,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Unknown auto:<suffix> alias -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "A typo of 'auto:tools' -> 400 naming the unrecognized alias, with the five real aliases as suggestions. NOT silently treated as plain 'auto' -- a client that meant to require a capability and mistyped the alias gets told so, instead of quietly getting a response with no capability guarantee at all.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto:tolls\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "x_min_contexto not a number -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "A non-numeric x_min_contexto -> 400 naming the field and the value received, instead of a generic 500 -- this is evidence about THIS request's payload, not an internal gateway failure.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_min_contexto\": \"cien mil\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"

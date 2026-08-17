@@ -1,7 +1,8 @@
 # llm-libre
 
 Un gateway que expone los modelos de LLM **gratis** de varios proveedores
-(chatgpt-proxy, Kilo y OpenRouter) detrás de un único contrato compatible con
+(chatgpt-proxy y Kilo hoy; el registro es declarativo y abierto a sumar más,
+ver "Cómo decide" más abajo) detrás de un único contrato compatible con
 OpenAI, con selección automática del mejor modelo disponible según un ranking
 propio (calidad medida, confiabilidad y latencia) y un escalón de pago
 (MiniMax) como último recurso cuando todo lo gratis está caído. Cualquier
@@ -181,7 +182,6 @@ Variables de entorno (ver `.env.example`):
 | `LLM_LIBRE_API_KEYS` | *(sin default — obligatoria)* | Llaves que aceptan los clientes, separadas por coma. El proceso **no arranca** si falta o queda vacía: ver más abajo |
 | `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml`. Idealmente incluye el `/v1` (sus rutas reales son `/v1/chat/completions` y `/v1/models`); si se pone **solo el host** (sin ninguna ruta), el `/v1` se agrega solo, con un aviso en el log. Si en cambio se pone **una ruta propia** (p.ej. un mount de reverse proxy, `.../v2`), esa ruta se respeta tal cual — no se le pisa nada, solo se avisa si no coincide con `/v1` por si fue sin querer |
 | `KILO_API_KEY` | *(sin definir)* | Opcional. **Dejar SIN DEFINIR**, no en blanco — ver nota abajo |
-| `OPENROUTER_API_KEY` | *(sin definir)* | Llave de OpenRouter (su tier gratis sí exige llave para completions, aunque `/models` sea público) |
 | `MINIMAX_API_KEY` | *(sin definir)* | Llave del proveedor de pago (escalón de fallback) |
 | `SONDEO_SALUD_HORAS` | `5` | Cada cuántas horas se sondea la salud de cada ruta |
 | `SONDEO_CALIDAD_CADA_N_CICLOS` | `5` | Cada cuántos ciclos de sondeo se corre además la batería de calidad |
@@ -217,7 +217,7 @@ sondea aproximadamente una vez al día— vuelve a cero.
 ## Cómo decide
 
 - **Orden de prioridad entre proveedores gratis:** `chatgpt` (`prioridad: 0`)
-  se prueba antes que `kilo`/`openrouter` (`prioridad: 1`). Es un servicio
+  se prueba antes que `kilo` (`prioridad: 1`). Es un servicio
   propio, así que se le da preferencia sobre terceros — pero sigue siendo
   `tier: gratis`, no consume el tope de pago diario. `minimax` (`pago`,
   `prioridad: 2`) sigue yendo **siempre al final**, sin importar su
@@ -234,8 +234,8 @@ sondea aproximadamente una vez al día— vuelve a cero.
   texto a un cliente agentic que espera una llamada estructurada — así que
   esta declaración es la única barrera. Una petición con `tools` (o
   `auto:tools` / `x_requiere: ["tools"]`) descarta automáticamente las rutas
-  de `chatgpt` y cae al siguiente proveedor gratis que sí las soporte (Kilo u
-  OpenRouter); recién si esos también fallan, al escalón de pago.
+  de `chatgpt` y cae al siguiente proveedor gratis que sí las soporte (Kilo);
+  recién si eso también falla, al escalón de pago.
 - `chatgpt-proxy` filtra el modo "canvas" de ChatGPT al `content`, con marcas
   de la forma `:::palabra{...atributos...}` … `:::`. El gateway las
   desenvuelve (en bloque y en streaming) conservando el texto de adentro —
@@ -244,13 +244,16 @@ sondea aproximadamente una vez al día— vuelve a cero.
   `proveedores.yaml`, apagada por defecto), no algo universal:
   `:::nota{...}` / `:::tip{...}` es también sintaxis Docusaurus/MDX estándar,
   y aplicar el desenvuelto a ciegas le arrancaría esas marcas a una respuesta
-  de documentación legítima de Kilo u OpenRouter. Solo `chatgpt` lo declara.
+  de documentación legítima de Kilo. Solo `chatgpt` lo declara.
 - **El catálogo de los proveedores gratis se descubre siempre desde su propio
-  `/models`, nunca se hardcodea** — Kilo, OpenRouter **y también `chatgpt`**:
+  `/models`, nunca se hardcodea** — Kilo **y también `chatgpt`**:
   así un modelo que cambia de id, desaparece o aparece se detecta solo, sin
   tocar código ni `proveedores.yaml`. Hay tres patrones en el registro, según
-  qué trae el `/models` de cada uno:
-  - Kilo / OpenRouter: ids **y** capacidades, los dos descubiertos.
+  qué trae el `/models` de cada uno (el registro es declarativo y abierto:
+  `openrouter`, sacado del registro en producción el 2026-08-17 porque nunca
+  tuvo clave configurada y sus 16 rutas 401-eaban siempre, sigue siendo un
+  ejemplo válido del primer patrón — ver `docs/providers.md` en inglés):
+  - Kilo (y, como ejemplo, OpenRouter): ids **y** capacidades, los dos descubiertos.
   - `minimax` (pago): ni ids ni capacidades — su `/models` real solo trae
     `id`/`created`/`owned_by` — así que los dos se declaran a mano
     (`modelos_fijos`).

@@ -123,16 +123,38 @@ def personalizar_openapi(app) -> None:
             for metodo, operacion in operaciones.items():
                 if metodo in {"get", "post", "put", "patch", "delete"}:
                     operacion["security"] = _SEGURIDAD_OPERACION
+        _quitar_422_espureo(esquema)
         app.openapi_schema = esquema
         return app.openapi_schema
     app.openapi = _generar
+
+
+def _quitar_422_espureo(esquema: dict) -> None:
+    """Revision post-Task-14 (gate), hallazgo Minor: FastAPI agrega un `422
+    Validation Error` automatico a CUALQUIER operacion con parametros
+    declarados via `Header`/`Query`/`Path`/body, sin mirar si de verdad
+    pueden fallar su propia validacion. Los cinco endpoints de este
+    gateway solo declaran `str | None = Header(None)` -- siempre validos
+    (cualquier string, o ausente) -- asi que ninguno puede devolver este
+    422 en la practica: documentarlo prometeria una respuesta que el
+    servicio nunca produce. Se saca de cada operacion; `HTTPValidationError`/
+    `ValidationError` en `components.schemas` SOLO se referencian desde ese
+    422 (es lo unico que `get_openapi` los genera para), asi que sin
+    ningun 422 en ninguna operacion quedan huerfanos y se sacan tambien."""
+    for operaciones in esquema.get("paths", {}).values():
+        for operacion in operaciones.values():
+            if isinstance(operacion, dict):
+                operacion.get("responses", {}).pop("422", None)
+    schemas = esquema.get("components", {}).get("schemas", {})
+    schemas.pop("HTTPValidationError", None)
+    schemas.pop("ValidationError", None)
 
 
 # --- POST /v1/chat/completions --------------------------------------------
 
 _ESQUEMA_CUERPO_CHAT = {
     "type": "object",
-    "required": ["model", "messages"],
+    "required": ["messages"],
     "description": (
         "This endpoint is a pure passthrough (see llm_libre.cliente.armar_peticion): "
         "the request is read as raw JSON, never validated against a strict schema, "
@@ -140,8 +162,11 @@ _ESQUEMA_CUERPO_CHAT = {
         "extensions below (`x_*`) are stripped, and `model` is rewritten to the "
         "provider's real id. Any other field, including standard OpenAI parameters "
         "not listed here (`temperature`, `top_p`, `max_tokens`, `response_format`, "
-        "`seed`, `logprobs`, provider-specific fields such as OpenRouter's "
-        "`provider`/`reasoning`, ...) still reaches the provider unchanged."
+        "`seed`, `logprobs`, or any field a given upstream provider defines on its "
+        "own) still reaches the provider unchanged. Note `model` is NOT required: "
+        "a request with no `model` field "
+        "at all defaults cleanly to the `auto` alias and returns `200`, exactly "
+        "like sending `\"model\": \"auto\"` explicitly."
     ),
     "properties": {
         "model": {
@@ -155,9 +180,13 @@ _ESQUEMA_CUERPO_CHAT = {
                 "(fast profile: latency weighs more), `auto:potente` (powerful "
                 "profile: measured quality weighs more), `auto:tools` (balanced "
                 "+ requires function-calling support), `auto:vision` (balanced + "
-                "requires image-input support). An alias fails over across the "
-                "gateway's whole ranked candidate list, paid fallback included "
-                "if allowed."
+                "requires image-input support). `auto:balanceado` also works "
+                "(redundant with plain `auto`) but is not listed separately in "
+                "`GET /v1/models`. An alias fails over across the gateway's "
+                "whole ranked candidate list, paid fallback included if "
+                "allowed. An `auto:` prefix with anything else after it (e.g. "
+                "a typo like `auto:tolls`) returns `400` naming the unrecognized "
+                "alias, instead of silently falling back to plain `auto`."
             ),
         },
         "messages": {
@@ -193,15 +222,20 @@ _ESQUEMA_CUERPO_CHAT = {
         "temperature": {"type": "number", "description": "Forwarded as-is."},
         "max_tokens": {"type": "integer", "description": "Forwarded as-is."},
         "x_requiere": {
-            "type": "array",
-            "items": {"type": "string", "enum": ["tools", "vision"]},
+            "oneOf": [
+                {"type": "array", "items": {"type": "string", "enum": ["tools", "vision"]}},
+                {"type": "string", "enum": ["tools", "vision"]},
+            ],
             "example": ["tools"],
             "description": (
                 "Gateway extension, interpreted here and never forwarded "
                 "upstream. Capabilities the chosen route MUST advertise. Only "
                 "`\"tools\"` and `\"vision\"` currently have any effect; other "
                 "values are accepted but ignored. Equivalent to (and "
-                "combinable with) the `auto:tools` / `auto:vision` aliases."
+                "combinable with) the `auto:tools` / `auto:vision` aliases. A "
+                "single bare string (`\"tools\"`, not `[\"tools\"]`) is also "
+                "accepted, as a convenience, and treated the same as a "
+                "one-element list."
             ),
         },
         "x_min_contexto": {
@@ -210,7 +244,10 @@ _ESQUEMA_CUERPO_CHAT = {
             "description": (
                 "Gateway extension, interpreted here and never forwarded "
                 "upstream. Minimum context window, in tokens, a route must "
-                "advertise to be considered. `0` or omitted means no minimum."
+                "advertise to be considered. `0` or omitted means no minimum. "
+                "A value that cannot be read as an integer (e.g. a non-numeric "
+                "string) returns `400` naming this field, instead of a generic "
+                "server error."
             ),
         },
         "x_permitir_pago": {
@@ -255,7 +292,11 @@ _EJEMPLOS_CUERPO_CHAT = {
         "summary": "Ask for one specific model id (still fails over between "
                    "providers that serve it)",
         "value": {
-            "model": "kilo/cohere/north-mini-code:free",
+            # El id de MODELO tal cual lo lista GET /v1/models -- SIN el
+            # prefijo de proveedor que si lleva X-Ruta-Usada
+            # ("kilo/cohere/north-mini-code:free"). Mandar el id CON ese
+            # prefijo no matchea ningun modelo_id real y da 404.
+            "model": "cohere/north-mini-code:free",
             "messages": [{"role": "user", "content": "Write a haiku about databases."}],
         },
     },
@@ -392,13 +433,33 @@ stripping entirely.
                 },
             },
         },
-        400: {"description": "No route could ever satisfy this request.",
-             "content": {"application/json": {"example": {"detail": {
-                 "message": "ninguna ruta cumple lo pedido",
-                 "pedido": {"modelo": None, "requiere_tools": False,
-                           "requiere_vision": True, "min_contexto": 0,
-                           "perfil": "balanceado", "permitir_pago": True},
-                 "rutas_activas": 34}}}}},
+        400: {"description": (
+                 "The request cannot be satisfied -- either no route could ever "
+                 "match what was asked (an impossible capability/context "
+                 "combination), or the request itself is malformed in a way "
+                 "this gateway checks for (an unrecognized `auto:<suffix>` "
+                 "alias, a non-numeric `x_min_contexto`)."),
+             "content": {"application/json": {"examples": {
+                 "impossible_capability": {
+                     "summary": "No route can ever satisfy this combination",
+                     "value": {"detail": {
+                         "message": "ninguna ruta cumple lo pedido",
+                         "pedido": {"modelo": None, "requiere_tools": False,
+                                   "requiere_vision": True, "min_contexto": 0,
+                                   "perfil": "balanceado", "permitir_pago": True},
+                         "rutas_activas": 18}}},
+                 "unknown_alias_suffix": {
+                     "summary": "'auto:<typo>' -- not silently treated as plain 'auto'",
+                     "value": {"detail": {
+                         "message": "alias de modelo desconocido: 'auto:tolls'",
+                         "sugerencias": ["auto", "auto:rapido", "auto:potente",
+                                        "auto:tools", "auto:vision"]}}},
+                 "invalid_x_min_contexto": {
+                     "summary": "x_min_contexto is not a number",
+                     "value": {"detail": {
+                         "message": "x_min_contexto debe ser un numero entero",
+                         "campo": "x_min_contexto", "valor_recibido": "cien mil"}}},
+             }}}},
         401: {"description": "Missing or invalid API key.",
              "content": {"application/json": {"example": {"detail": "llave invalida"}}}},
         404: {"description": "The requested model id no longer exists -- either "
@@ -407,7 +468,7 @@ stripping entirely.
                             "just returned a live 404 for it.",
              "content": {"application/json": {"example": {"detail": {
                  "message": "el modelo 'poolside/laguna-m.1:free' ya no existe",
-                 "sugerencias": ["poolside/laguna-s-2.1:free", "poolside/laguna-xs.2:free"],
+                 "sugerencias": ["poolside/laguna-s-2.1:free", "poolside/laguna-xs-2.1:free"],
              }}}}},
         429: {"description": "Per-key rate limit exceeded.",
              "content": {"application/json": {"example": {
@@ -427,7 +488,7 @@ stripping entirely.
                          "pedido": {"modelo": None, "requiere_tools": False,
                                    "requiere_vision": False, "min_contexto": 0,
                                    "perfil": "balanceado", "permitir_pago": True},
-                         "rutas_compatibles": 34,
+                         "rutas_compatibles": 18,
                          "proxima_liberacion": 1755400300.0,
                          "tope_pago_alcanzado": False}}},
                  "paid_allowance_spent": {
@@ -439,17 +500,35 @@ stripping entirely.
                          "pedido": {"modelo": None, "requiere_tools": False,
                                    "requiere_vision": False, "min_contexto": 0,
                                    "perfil": "balanceado", "permitir_pago": True},
-                         "rutas_compatibles": 34, "proxima_liberacion": None,
+                         "rutas_compatibles": 18, "proxima_liberacion": None,
                          "tope_pago_alcanzado": True}}},
                  "chain_exhausted_after_attempts": {
                      "summary": "Every candidate was actually attempted and "
                                 "each one failed just now (not pre-filtered by "
-                                "cooldown) -- this shape has no `detail` key",
+                                "cooldown) -- this shape has no `detail` key, "
+                                "and DOES carry an X-Intentos header (see below)",
                      "value": {"error": {
                          "message": "sin rutas disponibles",
                          "detalle": "HTTP 500",
                          "proxima_liberacion": 1755400060.0}}},
-             }}}},
+             }}},
+             "headers": {
+                 "X-Intentos": {
+                     "schema": {"type": "integer"},
+                     "example": 3,
+                     "description": (
+                         "Present ONLY on the 'chain exhausted after real "
+                         "attempts' shape (`chain_exhausted_after_attempts` "
+                         "above) -- absent on the 'pre-filtered, nothing was "
+                         "attempted' shape (`all_down_or_cooling` / "
+                         "`paid_allowance_spent`), which is raised before any "
+                         "route is tried. Never accompanied by `X-Ruta-Usada` "
+                         "or `X-Tier` on a 503: those two only appear once a "
+                         "route actually succeeds."
+                     ),
+                 },
+             },
+        },
     },
 }
 
@@ -463,10 +542,11 @@ MODELOS_DOCS = {
         "The OpenAI-shaped catalog (`GET /models` format, so OpenAI SDK "
         "tooling that lists models works unmodified) plus the gateway's own "
         "`auto*` aliases. `owned_by` is the provider id for a real route, or "
-        "`\"llm-libre\"` for an alias. In production this typically returns "
-        "39 entries: the real discovered/declared routes (34) plus the 5 "
-        "`auto*` aliases -- cross-check the route count against "
-        "`GET /health`'s `rutas_activas`."
+        "`\"llm-libre\"` for an alias. The number of REAL entries here always "
+        "equals `GET /health`'s `rutas_activas` for that same moment -- the "
+        "total returned here is that count plus the 5 fixed `auto*` aliases; "
+        "cross-checking the two is a cheap sanity check that nothing is being "
+        "double-counted or silently dropped."
     ),
     "responses": {
         200: {"description": "The catalog.", "content": {"application/json": {"example": {
@@ -474,8 +554,7 @@ MODELOS_DOCS = {
             "data": [
                 {"id": "gpt-5-3-mini", "object": "model", "owned_by": "chatgpt"},
                 {"id": "cohere/north-mini-code:free", "object": "model", "owned_by": "kilo"},
-                {"id": "nvidia/nemotron-3-super-120b-a12b:free", "object": "model",
-                 "owned_by": "openrouter"},
+                {"id": "poolside/laguna-s-2.1:free", "object": "model", "owned_by": "kilo"},
                 {"id": "MiniMax-M3", "object": "model", "owned_by": "minimax"},
                 {"id": "auto", "object": "model", "owned_by": "llm-libre"},
                 {"id": "auto:rapido", "object": "model", "owned_by": "llm-libre"},
@@ -514,7 +593,11 @@ RANKING_DOCS = {
         "`ttft_p50_ms` (time to first token) is only ever measured by "
         "streaming traffic and probes; `latencia_p50_ms` is the full "
         "round-trip and does not feed the score, only diagnostics -- the two "
-        "are different magnitudes, do not average them together."
+        "are different magnitudes, do not average them together.\n\n"
+        "The example rows below are illustrative (scores, timestamps and "
+        "the exact set of routes drift as the live catalog and its "
+        "measurements change) -- they use real route ids to stay concrete, "
+        "not a captured live snapshot."
     ),
     "responses": {
         200: {"description": "The ranking table.", "content": {"application/json": {"example": {
@@ -534,7 +617,7 @@ RANKING_DOCS = {
                  "ttft_p50_ms": 650.0, "latencia_p50_ms": 2100.0,
                  "en_cooldown_hasta": 0.0, "tools": True, "vision": False,
                  "contexto": 128000},
-                {"clave": "openrouter/poolside/laguna-s-2.1:free", "tier": "gratis",
+                {"clave": "kilo/poolside/laguna-s-2.1:free", "tier": "gratis",
                  "prioridad": 1, "puntaje": 0.5015, "calidad": 0.6,
                  "calidad_medida": False, "calidad_asumida": 0.6,
                  "ultima_sonda_calidad": None, "ultima_sonda": "2026-08-17T08:02:00Z",
@@ -610,16 +693,16 @@ HEALTH_DOCS = {
     "responses": {
         200: {"description": "At least one free route is alive.",
              "content": {"application/json": {"example": {
-                 "estado": "ok", "rutas_activas": 34, "rutas_libres": 33,
-                 "gratis_libres": 33}}}},
+                 "estado": "ok", "rutas_activas": 18, "rutas_libres": 17,
+                 "gratis_libres": 17}}}},
         503: {"description": "`degradado` (only the paid route is alive) or "
                             "`caido` (nothing is alive).",
              "content": {"application/json": {"examples": {
                  "degradado": {"summary": "Only the paid route is alive",
-                              "value": {"estado": "degradado", "rutas_activas": 34,
+                              "value": {"estado": "degradado", "rutas_activas": 18,
                                        "rutas_libres": 1, "gratis_libres": 0}},
                  "caido": {"summary": "Nothing is alive",
-                          "value": {"estado": "caido", "rutas_activas": 34,
+                          "value": {"estado": "caido", "rutas_activas": 18,
                                    "rutas_libres": 0, "gratis_libres": 0}},
              }}}},
     },

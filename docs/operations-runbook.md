@@ -18,23 +18,44 @@ back there for the mechanics.
   Cooldowns and in-flight suspicion counters are **not** in here -- they
   live in `Proxy`'s process memory and reset on every restart regardless of
   the volume.
-- **What losing it costs**: nothing catastrophic and nothing instant, but
-  it is expensive to earn back. The route catalog rebuilds on the next sync
-  cycle (up to `SONDEO_SALUD_HORAS`, default 5h, worst case). Every route's
-  measured quality resets to the neutral assumption (`calidad_medida:
-  false` everywhere in `GET /v1/ranking`) until the quality battery runs
-  again on each one -- and that battery only runs roughly once a day
-  (`SONDEO_CALIDAD_CADA_N_CICLOS`, default 5 health cycles), so a truly
-  informed ranking takes **days** to rebuild, not minutes. In the meantime
-  routing still works (unmeasured routes are still reachable, just
-  deprioritized below measured ones -- see the routing doc), it is just
-  flying without the accumulated data that normally breaks ties well.
-  Today's paid-usage counters also reset, which is harmless (a fresh day of
-  allowance) unless it happens to line up with a real attempt to stay under
-  a budget across a redeploy.
-- **Practical implication**: treat the volume mount as load-bearing.
-  Losing it is not an outage, but it silently degrades routing quality for
-  days, which is a much easier failure mode to miss than a hard error.
+- **What losing it costs**: less than it sounds like, and faster to earn
+  back than "up to `SONDEO_SALUD_HORAS`" would suggest -- **the planificador
+  runs its first full sondeo cycle immediately on startup, before its first
+  sleep**, not after `SONDEO_SALUD_HORAS`. Concretely: `planificador`'s
+  loop counter starts at `0`, and `ciclo(estado, 0)` -- catalog sync, a
+  health probe against every free route, AND (because `0 %
+  SONDEO_CALIDAD_CADA_N_CICLOS == 0` for any sane value of that setting)
+  the FULL quality battery against every free route -- runs right away,
+  concurrently with the process becoming ready to serve traffic, on every
+  single restart. Verified directly: a fresh `Almacen`/`Proxy` pair running
+  `sondeo.ciclo(estado, 0)` once produces both `sondas.tipo='salud'` AND
+  `sondas.tipo='calidad'` rows for every free route in that one pass. So
+  after losing the file (or after ANY restart, empty database or not): the
+  catalog and a first quality measurement for every free route are both
+  back within roughly one sondeo pass -- seconds to low minutes, bounded by
+  how long that many HTTP round-trips take, not by `SONDEO_SALUD_HORAS`.
+  What genuinely takes longer to rebuild is the **history**: `confiabilidad`
+  and `ttft_p50_ms` are computed over a rolling window of past probes and
+  real traffic (see the routing doc), so a fresh database starts every
+  route at the neutral assumption for those two and only converges to a
+  representative measurement after several cycles' worth of data
+  accumulates -- that part is closer to days than minutes, even though the
+  catalog and a first quality score are not. Today's paid-usage counters
+  also reset, which is harmless (a fresh day of allowance) unless it
+  happens to line up with a real attempt to stay under a budget across a
+  redeploy.
+- **The flip side of "runs the full battery on every restart"**: it is not
+  free. See [below](#probes-spend-the-same-free-quota-real-traffic-uses)
+  for what one full pass costs in free-tier quota -- a restart-happy
+  deployment (or a Coolify crash-loop) burns through a meaningful chunk of
+  a day's probing budget every time it comes back up, on top of whatever
+  triggered the restart in the first place.
+- **Practical implication**: treat the volume mount as load-bearing
+  regardless -- losing it does not cost what an earlier version of this
+  doc claimed (days before routing looks sane again), but it does erase
+  the confiabilidad/latency history that makes ranking decisions stable
+  under real traffic patterns, and that part really does take a while to
+  rebuild.
 
 ## `GET /health`: the three states, and what each one implies
 
@@ -46,7 +67,7 @@ be wired as the deployment's health check.
 | `estado` | HTTP | Meaning | What to do |
 |---|---|---|---|
 | `ok` | `200` | At least one **free** route is alive. | Normal operation. |
-| `degradado` | `503` | No free route is alive; the paid route still is. | Every request is now either failing over onto a bill or, if `x_permitir_pago: false` was set, failing outright. Go find out why the free tier is down (start with `GET /v1/ranking`'s `en_cooldown_hasta` column and the provider status of `chatgpt` / Kilo / OpenRouter) before the daily paid allowance runs out for every key relying on this gateway. |
+| `degradado` | `503` | No free route is alive; the paid route still is. | Every request is now either failing over onto a bill or, if `x_permitir_pago: false` was set, failing outright. Go find out why the free tier is down (start with `GET /v1/ranking`'s `en_cooldown_hasta` column and the provider status of `chatgpt` / Kilo) before the daily paid allowance runs out for every key relying on this gateway. |
 | `caido` | `503` | Nothing is alive, free or paid. | `POST /v1/chat/completions` is returning `503` for every request. This is the real outage state. |
 
 A route needs **two consecutive failed health probes** (with no success in
@@ -59,13 +80,59 @@ extra on-demand probe, sampling the provider more often than the fixed
 periodic schedule would -- does not flip the whole service to `caido` and
 trigger a container restart over nothing.
 
+⚠️ **`SONDEO_SALUD_HORAS` has a soft ceiling that `configuration.md` does
+not mention: `VENTANA_EVIDENCIA_VIDA_S`, hardcoded to 24h.** `/health`
+only looks for a signal (a real success, or any health probe result)
+within the trailing 24h; outside that window it falls back to "has this
+route ever been probed at all" -- and once a route HAS been probed at
+least once, ever, that fallback stops treating it as "no evidence yet" and
+starts treating a stale signal as **no current evidence**, i.e. dead.
+Verified directly: a route whose only recorded signal is a *successful*
+health probe from 26h ago (simulating `SONDEO_SALUD_HORAS` set at or
+above roughly 24-26h, with no real traffic reaching that route in the
+meantime to refresh the signal) is reported as having **no** evidence of
+life -- despite that signal being a success, not a failure. Set
+`SONDEO_SALUD_HORAS` at or anywhere near 24h and, for any route that is
+not receiving a steady trickle of real traffic to independently refresh
+its evidence between probes, expect `/health` to eventually flip that
+route to dead purely from the probe cadence being too slow for the fixed
+evidence window -- not from anything actually being wrong with the route.
+Keep `SONDEO_SALUD_HORAS` well under 24h (the default, 5h, has roughly 4x
+headroom); if the periodic cadence ever needs to go that high for
+quota reasons, the on-demand probe mechanism (fired from real traffic
+between periodic cycles, see the routing doc) is the intended way to keep
+evidence fresher than the periodic schedule alone would.
+
 Because Coolify uses this endpoint as its health check and restarts the
-container on failure, and the telemetry backing this decision lives in the
-persistent volume (not process memory), **a container restart caused by a
-real `caido` will not fix it** -- the new process reads the same evidence
-from disk and reports the same thing. Restarting only helps if the failure
-was actually in the process itself, which `/health` failing does not, by
-itself, tell you.
+container on failure, whether that restart actually helps depends on
+**why** `/health` is `caido` -- and the two causes behave differently
+enough that it is worth checking before assuming either way:
+
+- **If every route that would otherwise be alive happens to be in an
+  active cooldown right now**, a restart genuinely fixes it, immediately:
+  cooldowns live only in `Proxy`'s process memory (see above), so a fresh
+  process starts with none of them, and every route not independently
+  marked dead (next bullet) is eligible again the instant the process is
+  up. Verified directly: force a route's `en_cooldown_hasta` into the
+  future against a database, then open a **second, independent** `Proxy`
+  (simulating a restart) against that same file -- the new process's
+  `cooldowns` dict is empty, because that state was never in the database
+  to begin with.
+- **If `Almacen.tiene_evidencia_de_vida` genuinely has no positive evidence
+  for a route** (two consecutive failed health probes, or nothing within
+  the 24h evidence window at all -- see the design spec §6), a restart
+  does **not** help: that evidence lives in the persisted `sondas` /
+  `eventos` tables, on the volume, and a fresh process reading the same
+  database reaches the same conclusion `/health` did before the restart.
+
+In practice a restart is often at least a **partial**, temporary fix even
+in the second case: it clears every cooldown outright, and (see
+[above](#the-sqlite-file-where-it-lives-and-what-losing-it-costs)) a fresh
+process immediately re-runs a full probe cycle against every free route on
+startup, which gives every route a fresh, real chance to record a success.
+It is not, however, a **guaranteed** fix for a genuine, sustained provider
+outage -- if the outage is still happening when those fresh probes run,
+they fail too, and `/health` reports `caido` again.
 
 ## Everything is returning `503` from `/v1/chat/completions` -- where to look
 

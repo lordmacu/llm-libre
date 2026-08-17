@@ -12,9 +12,22 @@ what its own `/models` endpoint can tell the gateway:
 
 | Pattern | Model ids come from | Capabilities come from | Who uses it |
 |---|---|---|---|
-| **Fully discovered** | its `/models` | its `/models` | Kilo, OpenRouter |
+| **Fully discovered** | its `/models` | its `/models` | Kilo (OpenRouter too, as an example -- see the note below) |
 | **Fully declared** | `modelos_fijos` in the YAML | `modelos_fijos` in the YAML | MiniMax |
 | **Discovered ids, declared capabilities** | its `/models` | `capacidades_por_defecto` in the YAML | `chatgpt` |
+
+> **A note on OpenRouter, mentioned throughout this doc as an example of
+> the "fully discovered" pattern:** it is not currently in the live
+> `proveedores.yaml` (removed 2026-08-17 -- `OPENROUTER_API_KEY` was never
+> configured in production, so all of its routes 401ed on every request
+> and just sat in cooldown, eating almost half the catalog's probe budget
+> and ranking-table space to repeatedly prove they were dead). It stays
+> useful here purely as a worked example: unlike Kilo, its free tier
+> requires an API key for `/chat/completions` even though `/models` is
+> public without one, which is a good illustration of `clave_env` being
+> *declared* on a provider without that provider's tier being optional in
+> practice. Re-adding it is a YAML entry plus `OPENROUTER_API_KEY`, not a
+> code change -- see "Adding a new provider" below.
 
 All three are still "discovery" in the sense the project cares about
 (§1 of the design spec: *the catalog is discovered from `/models`,
@@ -22,7 +35,7 @@ always*): even the third pattern never hardcodes a model **id** anywhere.
 What can vary is only where the gateway learns a route's *capabilities*
 from, because not every provider's `/models` is equally informative.
 
-### Fully discovered (Kilo, OpenRouter)
+### Fully discovered (Kilo; OpenRouter as an example)
 
 The provider's `/models` response includes everything the gateway needs
 per model: whether it is free (`pricing.prompt == "0"`, more reliable than
@@ -102,13 +115,26 @@ general mechanism, not something special-cased to `chatgpt` -- **any**
 future provider whose `/models` is similarly bare (ids only, no metadata)
 can use it exactly the same way, by adding this one block to its entry.
 
-`chatgpt`'s own YAML entry filters out two more things at discovery time,
-both self-identified by the response itself, never by a hardcoded id list:
-legacy aliases the proxy adds for compatibility (their `description`
-starts with `"Alias → "`), and the id `auto` (and any `auto:<suffix>`) --
-reserved by the gateway itself, since a real route with that literal id
-would be permanently unreachable (`interpretar_pedido` always resolves
-`"auto"` and `"auto:*"` to the virtual alias, never to a literal model id).
+Two more filters apply here too, but they are **not** something declared
+in `chatgpt`'s YAML entry -- they live in `catalogo.normalizar()` /
+`catalogo.es_id_reservado()` and run against **every** provider's
+discovery pass, the same as the guardrail/meta-router filters two
+sections up. They just happen to matter for `chatgpt` specifically,
+because its catalog is the one that actually contains what they filter:
+
+- Legacy aliases the proxy adds for compatibility (`gpt-4o`,
+  `gpt-4o-mini`, ...), self-identified by `description` starting with
+  `"Alias → "` -- not by a hardcoded id list.
+- The id `auto` (and any `auto:<suffix>`), reserved by the gateway itself
+  regardless of which provider tries to publish it: a real route with
+  that literal id would be permanently unreachable, because
+  `interpretar_pedido` always resolves `"auto"` and `"auto:*"` to the
+  virtual alias first, never to a literal model id.
+
+Any other provider whose discovered catalog happened to contain an id
+matching either of these two shapes would have it filtered out exactly
+the same way -- it is a property of `catalogo.normalizar()`, not of any
+one provider's config.
 
 ## Other per-provider fields worth knowing about
 
@@ -129,12 +155,24 @@ would be permanently unreachable (`interpretar_pedido` always resolves
   these fences as a UI-mode artifact (today: only `chatgpt-proxy`, whose
   "canvas" mode does this).
 - **`timeout_s`** (default: unset, meaning "use the gateway's global
-  `TIMEOUT_S`", currently 90s): caps how long the gateway waits on a
-  single attempt against this specific provider, for both the
-  non-streaming and the streaming path. Set this for a provider you know
-  can hang rather than fail cleanly -- see `proveedores.yaml`'s own
-  comment on the `chatgpt` entry for a worked example of picking a number
-  from measured latency data, not a guess.
+  `TIMEOUT_S`", currently 90s): passed to httpx as a single scalar for
+  both the non-streaming and the streaming path, which httpx applies
+  uniformly to its `connect`/`write`/`read`/`pool` timeouts -- verified
+  directly: a scalar `timeout=45.0` shows up as
+  `{"connect": 45.0, "write": 45.0, "read": 45.0, "pool": 45.0}` in the
+  request's extensions. **The dimension that matters for "does this bound
+  a hang" is `read`, and `read` is a per-chunk timeout, not a wall-clock
+  deadline on the whole attempt.** It resets every time a chunk of data
+  arrives: a response that goes completely silent for `timeout_s` trips
+  it cleanly (the case this setting is meant to catch), but a *streaming*
+  response that keeps the connection alive by sending some chunk every
+  `timeout_s - ε` seconds, forever, would never trip it at all -- that
+  attempt could stay open far longer than `timeout_s` in total. Set this
+  for a provider you know can hang rather than fail cleanly -- see
+  `proveedores.yaml`'s own comment on the `chatgpt` entry for a worked
+  example of picking a number from measured latency data, not a guess --
+  but do not read it as a hard cap on how long any single attempt can
+  possibly run.
 
 ## Adding a new provider
 
@@ -146,11 +184,22 @@ Kilo/OpenRouter's), this really is config-only:
    API key).
 2. If its `/models` does not report capabilities, add
    `capacidades_por_defecto` instead of expecting discovery to work.
-3. If it is `tier: pago`, use `modelos_fijos` instead -- paid routes are
-   never probed, so there is no discovery loop to lean on for them.
+3. If its `/models` reports **neither** ids nor capabilities usefully
+   (MiniMax's shape), use `modelos_fijos` instead -- this is about what
+   the catalog endpoint can tell the gateway, not about `tier`. A `tier:
+   pago` provider with a `/models` as informative as Kilo's could use full
+   discovery exactly the same way a free one does; MiniMax happens to use
+   `modelos_fijos` because its `/models` is bare, and happens to also be
+   the paid one, but those are two independent facts about it. The one
+   thing that IS tied to `tier: pago`, unconditionally and regardless of
+   which registration pattern a provider uses: it is never probed (see
+   `sondeo.sondear_salud` / `sondear_calidad`, both filter to
+   `tier == "gratis"`) -- spending real money just to measure a route
+   would defeat the point of a free-first gateway.
 4. Restart (or wait for the next sync cycle): the new routes show up in
    `GET /v1/models` and start accumulating measurements in
-   `GET /v1/ranking` on their own.
+   `GET /v1/ranking` on their own (skipped for a `tier: pago` provider,
+   per the point above -- it only ever gets measured by real traffic).
 
 No code in `src/llm_libre/` needs to change for any of this -- if you find
 yourself editing a `.py` file to add a provider, something about that
