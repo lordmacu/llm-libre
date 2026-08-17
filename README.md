@@ -127,11 +127,11 @@ gasto de pago igual queda registrado y visible por otra vía: consultar
 
 | Endpoint | Qué hace |
 |---|---|
-| `POST /v1/chat/completions` | El contrato de chat de OpenAI, con `stream: true` opcional y las extensiones `x_*` de arriba |
+| `POST /v1/chat/completions` | El contrato de chat de OpenAI, con `stream: true` opcional y las extensiones `x_*` de arriba. Un modelo explícito que el proveedor real ya no sirve (404 en vivo, aunque siga en el catálogo local) devuelve `404` con sugerencias en vez del `503` genérico — solo en el camino sin streaming |
 | `GET /v1/models` | El catálogo normalizado (formato OpenAI) más los alias `auto*` |
 | `GET /v1/ranking` | Puntaje de cada ruta (con `prioridad`) y sus componentes desglosados, **ordenado con la misma clave que usa el router** — cooldown incluido: una ruta castigada (`en_cooldown_hasta` en la fila) va al final, aunque puntúe mejor que todas — para auditar por qué el router eligió lo que eligió, sin que la fila de arriba contradiga a `X-Ruta-Usada` |
 | `GET /v1/uso` | Consumo de pago del día para la llave que llama, contra su tope diario |
-| `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. No requiere llave |
+| `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. Una ruta cuenta como viva por **evidencia positiva** (un éxito reciente, o una sonda de salud reciente exitosa, o ninguna telemetría todavía) — no por un promedio de confiabilidad, que un solo cliente puede envenenar. No requiere llave |
 
 ## Configuración
 
@@ -224,9 +224,10 @@ sondea aproximadamente una vez al día— vuelve a cero.
   - Dos entradas se filtran del descubrimiento de `chatgpt`, las dos por lo
     que la propia respuesta dice de sí misma, nunca por una lista de ids:
     los alias legacy que el proxy agrega (`gpt-4o`, `gpt-4o-mini`, `gpt-4`,
-    `gpt-3.5-turbo`) traen `description: "Alias → <target>"`; y `auto`,
-    reservado por el propio `interpretar_pedido` de llm-libre (colisiona con
-    su alias `auto`), se descarta como id reservado.
+    `gpt-3.5-turbo`) traen `description: "Alias → <target>"`; y `auto` (y
+    cualquier alias compuesto `auto:rapido` / `auto:potente` / `auto:tools` /
+    `auto:vision`), reservado por el propio `interpretar_pedido` de
+    llm-libre (colisiona con sus alias), se descarta como id reservado.
 - Cada ruta (proveedor + modelo) se sondea por **salud** cada
   `SONDEO_SALUD_HORAS` (default 5 h) y, de las rutas gratis vivas, por
   **calidad** cada `SONDEO_CALIDAD_CADA_N_CICLOS` ciclos (default 5, o sea
@@ -274,36 +275,62 @@ sondea aproximadamente una vez al día— vuelve a cero.
   global, 90 s) para acotar el peor caso de uno que se sepa lento, sin
   bajarle el timeout a todos — aplica igual al camino síncrono y al de
   streaming.
-- **La regla para un `4xx` es de ATRIBUCIÓN, no de si es reintentable:**
-  un código cuenta como evidencia del *pedido* (y por lo tanto no cuenta
-  hacia cooldown ni confiabilidad) solo si el **mismo pedido fallaría
-  idéntico contra una ruta sana**, y un **pedido distinto tendría éxito
-  contra esta misma ruta**. `400` (payload inválido) y `422` (validación
-  semántica) cumplen las dos: siguen sin contar — contarlos convertiría el
-  error de un cliente en un apagón para todos (verificado: tres pedidos
-  malformados seguidos bastan para dejar las cinco rutas en cooldown si se
-  cuentan). Todo lo demás es evidencia de la *ruta*, y cuenta igual que un
-  `500` — incluidos cuatro códigos que una versión anterior de esta regla
-  clasificaba mal por razonar "no es reintentable, así que no cuenta":
-  `401` (la clave venció), `402` (sin crédito), `403` (cuenta suspendida o
-  moderación del proveedor) y **`404`** (`model_not_found` — literalmente
-  el problema que este proyecto existe para detectar). Medido el costo de
-  esa clasificación anterior: con las 5 rutas devolviendo `401`, el
-  cliente recibía `503` en el 100 % de los pedidos mientras `/health`
-  seguía en `ok` — un apagón con luz verde, sin ningún backstop para
-  MiniMax (nunca sondeado). `408` y `425` también quedan del lado de la
-  ruta (el upstream colgado, una nuance de protocolo), pero por la misma
-  razón de atribución, no porque sean "reintentables" — para esos dos las
-  dos preguntas coinciden, que es por qué el error anterior no se notó ahí.
-  El evento se sigue guardando siempre (queda diagnosticable — un operador
-  viendo la tabla `eventos` ve todos los códigos igual), pero la
+- **La regla para un `4xx` es de ATRIBUCIÓN, no de si es reintentable — y el
+  default está INVERTIDO: un `4xx` cuenta como evidencia de la *ruta* (igual
+  que un `500`) salvo que esté en una lista corta y justificada de códigos
+  que son evidencia genuina del *pedido*.** No siempre fue así: hasta una
+  quinta revisión el default era el opuesto ("todo `4xx` es del pedido salvo
+  estos siete códigos"), y ese default esconde en silencio cualquier código
+  en el que nadie pensó — probado agregando `405` a la lista de "sí cuenta"
+  (lo que la propia regla exigía) y viendo la suite entera seguir en verde,
+  porque nada fijaba el eje, solo la lista. **Principio: cuando no se puede
+  saber de quién es la culpa, hay que contarlo** — una falsa alarma se
+  recupera sola, una salida silenciosa no, y los costos son asimétricos.
+  La lista corta, con su justificación: `400` (Bad Request — el cuerpo ni
+  se pudo interpretar), `413` (Payload Too Large — el tamaño de *este*
+  pedido) y `422` (Unprocessable Entity — inválido para *este* pedido
+  puntual). Ninguno de los tres cuenta hacia cooldown ni confiabilidad —
+  contarlos convertiría el error de un cliente en un apagón para todos
+  (verificado: tres pedidos malformados seguidos bastan para dejar las
+  cinco rutas en cooldown si se cuentan). **Todo lo demás cuenta como
+  evidencia de la ruta por default**, conocido hoy o no — incluidos cuatro
+  códigos que una versión anterior clasificaba mal por razonar "no es
+  reintentable, así que no cuenta": `401` (la clave venció), `402` (sin
+  crédito), `403` (cuenta suspendida o moderación del proveedor — ver más
+  abajo por qué esto solo no alcanza) y **`404`** (`model_not_found` —
+  literalmente el problema que este proyecto existe para detectar). Medido
+  el costo de la clasificación anterior: con las 5 rutas devolviendo `401`
+  (o, con el default viejo, con cualquier código que nadie hubiera
+  enumerado — `405`, `409`, `415`, `418`, `431`, `451`…), el cliente
+  recibía `503` en el 100 % de los pedidos mientras `/health` seguía en
+  `ok` — un apagón con luz verde, sin ningún backstop para MiniMax (nunca
+  sondeado). `408`, `425` y `429` también quedan del lado de la ruta, sin
+  necesitar mención especial en el código: bajo el default invertido caen
+  ahí solos. El evento se sigue guardando siempre (queda diagnosticable —
+  un operador viendo la tabla `eventos` ve todos los códigos igual), y la
   confiabilidad excluye por completo de su ventana los que son evidencia
   del pedido — verificado: 26 pedidos malformados seguidos de una sola
   llave bastan para tirar la confiabilidad de *todas* las rutas por el
-  piso si se cuentan, con `/health` en `caido` mientras una llave distinta
-  con un pedido válido sigue recibiendo `200`. Esto sería **peor** que un
-  503 simple en el despliegue real: Coolify usa `/health` como *health
-  check* y reinicia el contenedor cuando falla, pero la tabla `eventos`
-  vive en el volumen persistente `/datos` — un proceso nuevo contra la
-  misma base seguiría viendo los mismos fallos, así que el reinicio no lo
-  arreglaría.
+  piso si se cuentan.
+- **`/health` ya no promedia — exige evidencia positiva, y por eso ya no lo
+  puede envenenar un solo cliente.** `403` es genuinamente ambiguo: cuenta
+  suspendida (evidencia de la ruta, correcto contarlo arriba) o moderación
+  de contenido de un cliente puntual (evidencia del *pedido*) — y el
+  gateway no puede distinguirlos sin parsear el cuerpo específico de cada
+  proveedor. Incluso con la exclusión de `400`/`413`/`422`, 30 pedidos con
+  contenido flageado de una sola llave bastaban para tirar el *promedio* de
+  confiabilidad de todas las rutas por el piso, con `/health` en `caido`
+  para todas las llaves — y eso es **peor** que un `503` simple en el
+  despliegue real: Coolify usa `/health` como *health check* y reinicia el
+  contenedor cuando falla, pero la tabla `eventos` vive en el volumen
+  persistente `/datos`, así que un proceso nuevo contra la misma base
+  seguiría viendo los mismos eventos y el reinicio no arreglaría nada. Por
+  eso `/health` dejó de mirar el promedio: una ruta cuenta como viva si no
+  está en cooldown y, dentro de una ventana de 24 h, hubo un éxito real, o
+  una sonda de salud exitosa (la sonda es siempre confiable: el gateway
+  controla su propio payload), o directamente no hay telemetría real
+  todavía. Los fallos, solos, nunca alcanzan para declarar una ruta muerta.
+  **`/v1/ranking` no cambia — sigue usando el promedio de confiabilidad
+  exactamente como antes**: un ranking mal puntuado se autocorrige solo en
+  cuanto alguien lo mira; una ruta que `/health` declara muerta reinicia el
+  contenedor. La asimetría es a propósito.
