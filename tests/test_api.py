@@ -210,6 +210,122 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
     assert r.json()["estado"] != "ok"
 
 
+# --- Round 4 de Task 13, hallazgo HIGH. El fix de la ronda 3 saco el 4xx del
+#     CONTADOR de cooldown, pero seguia escribiendose como evento fallido
+#     comun -- y eso alimenta confiabilidad, que _viva() usa para el piso de
+#     /health. Reproducido: 26 pedidos malformados SEGUIDOS de UNA llave
+#     (un cliente reintentando el mismo error, algo que los SDK de OpenAI
+#     hacen solos) bastan para tirar la confiabilidad de TODAS las rutas por
+#     el piso, con /health en "caido"/503 mientras una llave DISTINTA con un
+#     pedido VALIDO sigue recibiendo 200 todo el tiempo. Peor que el 503 de
+#     la ronda anterior: Coolify usa /health como health check y REINICIA el
+#     contenedor cuando falla -- pero `eventos` vive en el volumen
+#     persistente de /datos, asi que un proceso nuevo contra la MISMA base
+#     sigue viendo los mismos 26 fallos y sigue reportando "caido". Loop de
+#     reinicios que reiniciar no puede cortar, contra un servicio que
+#     responde bien. ---
+
+def test_health_sigue_ok_tras_30_400_seguidos(estado_cliente):
+    estado, cliente = estado_cliente
+    ahora = time.time()
+
+    async def _mandar_400_treinta_veces():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(400, json={"error": "bad request"})))
+        for _ in range(30):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+
+    asyncio.run(_mandar_400_treinta_veces())
+    r = cliente.get("/health")
+    assert r.status_code == 200
+    assert r.json()["estado"] == "ok"
+
+
+def test_health_cae_con_30_500_seguidos_igual_que_antes(estado_cliente):
+    # Contraste directo: un fallo que SI es evidencia sobre la ruta sigue
+    # tirando /health, exactamente como antes de este fix.
+    estado, cliente = estado_cliente
+    ahora = time.time()
+
+    async def _mandar_500_treinta_veces():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(500)))
+        for _ in range(30):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+
+    asyncio.run(_mandar_500_treinta_veces())
+    r = cliente.get("/health")
+    assert r.status_code != 200
+    assert r.json()["estado"] != "ok"
+
+
+def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
+    # El caso del loop de reinicios: `eventos` vive en un archivo real (el
+    # volumen /datos), no en memoria de proceso. Un Almacen/Proxy/Estado
+    # SEGUNDO, contra la MISMA base, tiene que leer el mismo resultado que
+    # el primero -- si el fix dependiera de algun estado en memoria del
+    # proceso viejo, este test lo detectaria y el de arriba no.
+    ruta_db = str(tmp_path / "salud.sqlite3")
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    proxy1 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(400, json={"error": "bad request"}))))
+    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+
+    async def _mandar_400_treinta_veces():
+        rutas = almacen1.rutas_activas()
+        for _ in range(30):
+            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
+
+    asyncio.run(_mandar_400_treinta_veces())
+    cliente1 = TestClient(crear_app(estado1))
+    assert cliente1.get("/health").json()["estado"] == "ok"
+
+    # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base.
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    proxy2 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "hola"}}]}))))
+    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    r = cliente2.get("/health")
+    assert r.status_code == 200
+    assert r.json()["estado"] == "ok"
+
+
+def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
+    estado, cliente = estado_cliente
+    ahora = time.time()
+    antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+
+    async def _mandar(codigo, veces):
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(codigo, json={"error": "x"} if codigo < 500 else None)))
+        for _ in range(veces):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+
+    asyncio.run(_mandar(400, 30))
+    despues_400 = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert despues_400["confiabilidad"] == antes["confiabilidad"]
+    assert despues_400["puntaje"] == antes["puntaje"]
+
+    asyncio.run(_mandar(500, 30))
+    despues_500 = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert despues_500["confiabilidad"] < antes["confiabilidad"]
+    assert despues_500["puntaje"] < antes["puntaje"]
+
+
 def test_ranking_desglosa_los_componentes(cliente):
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     for campo in ("clave", "puntaje", "calidad", "confiabilidad", "ttft_p50_ms", "tier",
