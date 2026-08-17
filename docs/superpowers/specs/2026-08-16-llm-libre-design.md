@@ -155,7 +155,7 @@ Tres patrones, todos declarativos — ninguno cablea ids en código:
 
 | Patrón | Ids | Capacidades | Quién |
 |---|---|---|---|
-| Todo descubierto | `/models` | `/models` | Kilo, OpenRouter |
+| Todo descubierto | `/models` | `/models` | Kilo (OpenRouter también encajaba acá — ver la nota de Task 14 más abajo sobre por qué salió del registro real) |
 | Todo declarado | `modelos_fijos` | `modelos_fijos` | MiniMax |
 | Ids descubiertos, capacidades declaradas | `/models` | `capacidades_por_defecto` | chatgpt |
 
@@ -208,6 +208,45 @@ proveedores:
     clave_env: MINIMAX_API_KEY
     modelos_fijos: [MiniMax-M3]   # no se descubre: es de pago y no se sondea
 ```
+
+**Task 14 (2026-08-17): `openrouter` salió del registro real.** El bloque YAML de
+arriba es el diseño original de Task 13 y queda tal cual, como referencia del
+patrón "todo descubierto" — pero el `proveedores.yaml` que corre en producción
+YA NO tiene la entrada `openrouter`. `OPENROUTER_API_KEY` nunca se configuró:
+sus 16 rutas devolvían `401` en todo pedido, el sondeo lo confirmaba
+correctamente y el router las mandaba a cooldown — pero eran casi la mitad del
+catálogo (16 de ~34 rutas activas; 21 rutas en cooldown medidas en vivo, 16 de
+ellas `openrouter`), gastando cupo de sonda bajo demanda y espacio en
+`GET /v1/ranking` solo para reconfirmar, una y otra vez, que seguían muertas.
+Decisión del operador: sacarlo del registro en vez de conseguir la clave.
+
+Sacar la entrada del YAML no alcanza por sí solo: `sondeo.sincronizar_catalogo`
+da de baja rutas con el scope `proveedor=` de `Almacen.upsert_rutas` (§4,
+arriba), que solo corre para los proveedores que SIGUEN en la lista que carga
+`proveedores.cargar()` en cada ciclo — un proveedor que desaparece del todo del
+registro nunca vuelve a pasar por ese loop, así que sus rutas quedarían
+`activa = 1` para siempre: visibles en `GET /v1/models`, en `GET /v1/ranking`,
+y elegibles como candidatas de ruteo que fallarían siempre. Se agrega
+`Almacen.desactivar_proveedores_no_registrados(proveedores_conocidos)` — apaga
+(`activa = 0`, NUNCA borra, mismo principio que la baja de rutas individuales:
+el histórico sirve para detectar renombres) toda ruta cuyo `proveedor` no esté
+en el conjunto que recibe — y se la conecta en `sincronizar_catalogo`, ANTES
+del loop por proveedor, contra `{p.id for p in proveedores}` de ESA pasada.
+
+Como `proveedores.cargar()` se llama una sola vez, al arrancar el proceso
+(`principal.crear_estado`), un cambio en `proveedores.yaml` — sacar un
+proveedor, o volver a agregarlo — recién se refleja en la lista que
+`sincronizar_catalogo` ve después de un **reinicio del proceso**; el barrido
+en sí corre en cada ciclo de sondeo con la lista que el proceso tiene cargada
+en memoria, no relee el archivo por su cuenta. Guard agregado: un registro
+vacío (`proveedores.yaml` con `proveedores: []`) no dispara el barrido —
+`proveedores_conocidos` vacío se trata como "no se sabe nada todavía", no como
+"todos son huérfanos", porque lo contrario apagaría el catálogo entero de un
+archivo que casi seguro está mal, no vacío a propósito.
+
+`openrouter` sigue documentado en `docs/providers.md` (en inglés) como ejemplo
+válido del patrón "todo descubierto" — volver a agregarlo es una entrada de
+YAML más `OPENROUTER_API_KEY`, no un cambio de código.
 
 `prioridad` (Task 13, default `100` si no se declara) es un entero manual —
 ver la nota de vocabulario en §2 — que el router usa ANTES del puntaje, pero
@@ -332,9 +371,41 @@ Idéntico a OpenAI, con `stream: true`. El campo `model` acepta:
 
 Extensiones opcionales, que un SDK ajeno ignora sin romperse:
 
-- `x_requiere: ["tools", "vision"]` — capacidades obligatorias
+- `x_requiere: ["tools", "vision"]` — capacidades obligatorias (también acepta
+  un string suelto, `"tools"`, tratado como una lista de un elemento — ver
+  Task 14 más abajo)
 - `x_min_contexto: 100000` — ventana mínima
 - `x_permitir_pago: false` — desactiva el escape a pago para esta petición
+
+**Task 14, validación de entrada (`api.interpretar_pedido`).** Tres campos que
+este endpoint interpreta antes de usar (`model`, `x_requiere`,
+`x_min_contexto`) llegan del cliente sin tipo garantizado — son JSON crudo,
+consistente con que este endpoint es un passthrough que lee `await
+request.json()` a mano (§1, ninguna validación con Pydantic). Interpretarlos
+sin atrapar el tipo equivocado (`.strip()` sobre un número, `int()` sobre una
+lista, `set()` sobre un booleano o una lista-de-listas) escapaba como
+`500 Internal Server Error` opaco — encontrado primero en `x_min_contexto`
+(revisión de gate), después en `x_requiere` (el MISMO patrón, reinventado en
+la revisión siguiente), y una tercera vez en `model` cuando se buscó
+explícitamente el resto de la familia. La revisión final generaliza con un
+único punto de paso (`api._leer_campo`) en vez de parchear caso por caso: los
+tres devuelven `400` con la misma forma —
+`{"message": ..., "campo": "<nombre>", "valor_recibido": <lo que mandó el cliente>}` —
+en vez de un 500. Un cuarto campo que este endpoint gane en el futuro pasa por
+el mismo punto, sin reinventar el try/except.
+
+Por la misma revisión: un alias `"auto:<sufijo>"` cuyo sufijo NO es un perfil
+conocido (§2/§7) ni `"tools"`/`"vision"` — típicamente un typo de
+`"auto:tools"`, p.ej. `"auto:tolls"` — ahora da `400` nombrando el alias
+desconocido, con los cinco alias reales como `sugerencias`, en vez de
+degradarse en silencio a `"auto"` liso. Antes de esta revisión, un cliente que
+de verdad necesitaba una capacidad (p.ej. `tools`, para un agente que espera
+una `tool_call` estructurada) y escribía mal el sufijo recibía una respuesta
+"balanceada" común sin ningún aviso — el mismo peligro que ya motivó que
+`chatgpt` declare `tools: false` en vez de arriesgar prosa donde se espera una
+llamada estructurada (§3). `"auto"` sin sufijo, y `"auto:balanceado"`
+(redundante con `"auto"` liso, pero un alias válido — `"balanceado"` está en
+`PERFILES`), siguen resolviendo normalmente, sin pasar por esta rama.
 
 Toda respuesta lleva `X-Ruta-Usada: <proveedor>/<modelo>`, `X-Tier: gratis|pago` y
 `X-Intentos: <n>`. **El fallback de pago nunca es invisible.**
@@ -919,6 +990,8 @@ sondas bajo demanda: ver §7 para la justificacion completa.
 | Llave superó su tope de pago diario | `503`, nunca un cobro silencioso |
 | Modelo pedido explícitamente que ya no existe en el catálogo local | `404` con los ids vigentes más parecidos |
 | Modelo pedido explícitamente que SIGUE en el catálogo local pero el proveedor real devuelve `404` en vivo (sexta ronda, "la razón de ser del proyecto") | `404` con los ids vigentes más parecidos — camino síncrono únicamente; en streaming el `200`/cabeceras SSE ya salieron antes de saber si la ruta sirvió, así que se queda en el `503` genérico |
+| Alias `"auto:<sufijo>"` con un sufijo que no es un perfil conocido ni `tools`/`vision` (Task 14) | `400` nombrando el alias, con los cinco alias reales como `sugerencias` — nunca se degrada en silencio a `"auto"` |
+| `model` / `x_requiere` / `x_min_contexto` con un tipo que no se puede interpretar (Task 14, p.ej. `model: 5`, `x_requiere: 5`, `x_min_contexto: "cien mil"`) | `400` con `{"message", "campo", "valor_recibido"}` — nunca el `500` opaco que salía antes de que `api._leer_campo` generalizara el try/except |
 
 ## 10. Seguridad
 
@@ -943,8 +1016,21 @@ los 7 bots de WhatsApp de la misma máquina.
 Piezas que hay que configurar en la UI:
 
 - **Port** `8101`, **Build Pack** Dockerfile, **Health Check Path** `/health`
-- **Volumen persistente** montado en `/datos` — sin él el SQLite se borra en cada redeploy
-  y el ranking, que tarda días en construirse, vuelve a cero
+- **Volumen persistente** montado en `/datos` — sin él el SQLite se borra en cada redeploy.
+  **Corregido en Task 14**: esto NO significa que el ranking arranque en cero
+  por días. `planificador` corre su primer ciclo de sondeo completo — catálogo,
+  salud, Y la batería de calidad ENTERA, no solo salud — apenas arranca el
+  proceso, antes de su primer `sleep`: el contador arranca en `0`, y
+  `0 % SONDEO_CALIDAD_CADA_N_CICLOS == 0` para cualquier valor razonable de esa
+  variable. Verificado corriendo `sondeo.ciclo(estado, 0)` una vez contra un
+  `Almacen` recién creado: deja filas `sondas.tipo='salud'` Y
+  `sondas.tipo='calidad'` para cada ruta gratis en esa única pasada. Lo que sí
+  tarda en reconstruirse es el HISTORIAL que alimenta `confiabilidad` y la
+  latencia (ventana móvil de sondas + tráfico real, ver §7): esa parte recién
+  converge después de varios ciclos, y ahí sí importa la cadencia ~diaria de
+  la batería de calidad. Esto también implica que cada reinicio del proceso
+  vuelve a gastar una pasada completa de cuota gratis (ver §14) — no es gratis
+  en el otro sentido de la palabra.
 - Variables de entorno, con **`KILO_API_KEY` deliberadamente sin definir**: el tier anónimo
   necesita que no viaje ninguna cabecera `Authorization`
 
@@ -1051,6 +1137,26 @@ desarrollo.
   un modelo distinto del probado dejaría el test en verde con el YAML ya mintiendo, así
   que el test de `tools` ahora recorre TODOS los ids que el catálogo real trajo, no uno
   solo.
+- **Task 14 — barrido de proveedores huérfanos:** `test_almacen.py` prueba
+  `Almacen.desactivar_proveedores_no_registrados` aislado (apaga el huérfano,
+  no toca al que sigue registrado, no-op si nadie cambió, idempotente);
+  `test_sondeo.py` lo prueba a través de `sincronizar_catalogo` completo, con
+  un caso que usa un proveedor `modelos_fijos` (no depende de ningún mock
+  HTTP) para que "sigue registrado, no se apaga" no se pueda confundir con la
+  baja por-proveedor NORMAL (un proveedor que no se re-descubre en esta
+  pasada). Un test previo (`test_un_proveedor_sano_no_desactiva_rutas_de_otro_proveedor`)
+  tuvo que ajustarse: dependía de un proveedor AUSENTE de la lista que recibe
+  `sincronizar_catalogo` mientras afirmaba que sus rutas sobreviven — que es,
+  con el barrido nuevo, exactamente la condición que ahora las apaga a
+  propósito.
+- **Task 14 — validación de entrada:** `test_api.py` cubre los tres campos
+  (`model`, `x_requiere`, `x_min_contexto`) con valores de tipo inválido
+  (número, booleano, lista, dict según el campo), a nivel `interpretar_pedido`
+  y end-to-end vía `TestClient`, confirmando `400` con
+  `{"message", "campo", "valor_recibido"}` en vez del `500` que salía antes.
+  También cubre el alias `"auto:<sufijo-desconocido>"` (`400` con
+  `sugerencias`) y confirma que `"auto"` liso y `"auto:balanceado"` siguen
+  resolviendo sin pasar por esa rama.
 
 ## 13. Fuera de alcance
 

@@ -211,8 +211,20 @@ desarrollo.
 
 Necesita un **volumen persistente montado en `/datos`**: sin él, el archivo
 SQLite (catálogo de rutas + toda la telemetría de sondeo) se destruye en cada
-redeploy y el ranking —que tarda días en construirse porque la calidad se
-sondea aproximadamente una vez al día— vuelve a cero.
+redeploy. Eso **no** significa que el ranking arranque en cero por días
+(corregido, Task 14): `planificador` corre su primer ciclo de sondeo completo
+—catálogo, salud, Y la batería de calidad ENTERA, no solo salud— apenas
+arranca el proceso, antes de su primer `sleep`: el contador de ciclos empieza
+en `0`, y `0 % SONDEO_CALIDAD_CADA_N_CICLOS == 0` para cualquier valor sano de
+esa variable. Verificado corriendo `sondeo.ciclo(estado, 0)` una vez contra un
+`Almacen` recién creado: deja filas `sondas.tipo='salud'` Y
+`sondas.tipo='calidad'` para cada ruta gratis en esa única pasada. Lo que sí
+tarda días en reconstruirse es el **historial** que alimenta `confiabilidad` y
+la latencia (ventana móvil de sondas + tráfico real) — ahí sí importa la
+cadencia ~diaria de la batería de calidad. Consecuencia práctica: cada
+reinicio del proceso también vuelve a gastar una pasada completa de cuota
+gratis (ver "Cómo decide" más abajo, la sección de sondas), no solo la
+sincronización del catálogo.
 
 ## Cómo decide
 

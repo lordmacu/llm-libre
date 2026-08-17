@@ -28,6 +28,25 @@ what its own `/models` endpoint can tell the gateway:
 > *declared* on a provider without that provider's tier being optional in
 > practice. Re-adding it is a YAML entry plus `OPENROUTER_API_KEY`, not a
 > code change -- see "Adding a new provider" below.
+>
+> **Removing OpenRouter's YAML entry did not, by itself, deactivate its
+> already-discovered routes.** `sincronizar_catalogo` only deactivates
+> stale routes for the provider it is currently syncing (scoped by
+> `Almacen.upsert_rutas(..., proveedor=p.id)`) -- a provider dropped from
+> the registry entirely never gets synced again, so without something
+> else, its routes would stay `activa = 1` forever: still listed in
+> `GET /v1/models`, still shown in `GET /v1/ranking`, still eligible as
+> routing candidates that would fail every time. `Almacen.desactivar_proveedores_no_registrados`
+> closes that gap: it runs once per sondeo cycle, before the per-provider
+> loop, and deactivates (never deletes -- same "history detects renames"
+> principle as everything else) any route whose provider is absent from
+> the process's current registry. This is why OpenRouter's 16 rows
+> actually disappeared from `/v1/models` instead of lingering as
+> permanently-broken candidates.
+
+Adding or removing a provider both need a **restart** to take effect --
+see "Adding a new provider" below for why (`proveedores.cargar()` only
+runs once, at startup).
 
 All three are still "discovery" in the sense the project cares about
 (§1 of the design spec: *the catalog is discovered from `/models`,
@@ -196,10 +215,20 @@ Kilo/OpenRouter's), this really is config-only:
    `sondeo.sondear_salud` / `sondear_calidad`, both filter to
    `tier == "gratis"`) -- spending real money just to measure a route
    would defeat the point of a free-first gateway.
-4. Restart (or wait for the next sync cycle): the new routes show up in
-   `GET /v1/models` and start accumulating measurements in
-   `GET /v1/ranking` on their own (skipped for a `tier: pago` provider,
-   per the point above -- it only ever gets measured by real traffic).
+4. **Restart the process.** `proveedores.cargar()` only runs once, at
+   startup (`principal.crear_estado`) -- there is no mechanism that
+   re-reads `proveedores.yaml` on its own, so a YAML edit needs a restart
+   before anything downstream sees it. ("Wait for the next sync cycle"
+   alone does *not* work, despite `sincronizar_catalogo` running
+   periodically: it always operates on the same in-memory provider list
+   loaded at startup, never a fresh read of the file.) Once restarted, the
+   new routes show up in `GET /v1/models` and start accumulating
+   measurements in `GET /v1/ranking` on their own (skipped for a `tier:
+   pago` provider, per the point above -- it only ever gets measured by
+   real traffic). The same applies in reverse when removing a provider --
+   see the callout above on `desactivar_proveedores_no_registrados` for
+   what happens to its already-discovered routes once the process comes
+   back up with a shorter registry.
 
 No code in `src/llm_libre/` needs to change for any of this -- if you find
 yourself editing a `.py` file to add a provider, something about that

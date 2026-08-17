@@ -186,7 +186,11 @@ _ESQUEMA_CUERPO_CHAT = {
                 "whole ranked candidate list, paid fallback included if "
                 "allowed. An `auto:` prefix with anything else after it (e.g. "
                 "a typo like `auto:tolls`) returns `400` naming the unrecognized "
-                "alias, instead of silently falling back to plain `auto`."
+                "alias, instead of silently falling back to plain `auto`. "
+                "Omitting `model` entirely (or sending `null`) defaults to "
+                "`auto`; sending it as anything other than a string (a "
+                "number, a boolean, an array, an object) returns `400` "
+                "naming this field."
             ),
         },
         "messages": {
@@ -231,11 +235,14 @@ _ESQUEMA_CUERPO_CHAT = {
                 "Gateway extension, interpreted here and never forwarded "
                 "upstream. Capabilities the chosen route MUST advertise. Only "
                 "`\"tools\"` and `\"vision\"` currently have any effect; other "
-                "values are accepted but ignored. Equivalent to (and "
+                "*string* values are accepted but ignored. Equivalent to (and "
                 "combinable with) the `auto:tools` / `auto:vision` aliases. A "
                 "single bare string (`\"tools\"`, not `[\"tools\"]`) is also "
                 "accepted, as a convenience, and treated the same as a "
-                "one-element list."
+                "one-element list. Anything that is neither a string nor a "
+                "list of strings (a number, a boolean, a list containing a "
+                "non-string) returns `400` naming this field, instead of a "
+                "generic server error."
             ),
         },
         "x_min_contexto": {
@@ -438,7 +445,9 @@ stripping entirely.
                  "match what was asked (an impossible capability/context "
                  "combination), or the request itself is malformed in a way "
                  "this gateway checks for (an unrecognized `auto:<suffix>` "
-                 "alias, a non-numeric `x_min_contexto`)."),
+                 "alias, or `model` / `x_requiere` / `x_min_contexto` sent "
+                 "with the wrong type -- these three always answer with the "
+                 "same `{message, campo, valor_recibido}` shape)."),
              "content": {"application/json": {"examples": {
                  "impossible_capability": {
                      "summary": "No route can ever satisfy this combination",
@@ -459,6 +468,16 @@ stripping entirely.
                      "value": {"detail": {
                          "message": "x_min_contexto debe ser un numero entero",
                          "campo": "x_min_contexto", "valor_recibido": "cien mil"}}},
+                 "invalid_x_requiere": {
+                     "summary": "x_requiere is neither a string nor a list of strings",
+                     "value": {"detail": {
+                         "message": "x_requiere debe ser un string o una lista de strings",
+                         "campo": "x_requiere", "valor_recibido": 5}}},
+                 "invalid_model_type": {
+                     "summary": "model is not a string",
+                     "value": {"detail": {
+                         "message": "model debe ser un string",
+                         "campo": "model", "valor_recibido": 5}}},
              }}}},
         401: {"description": "Missing or invalid API key.",
              "content": {"application/json": {"example": {"detail": "llave invalida"}}}},
