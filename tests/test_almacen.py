@@ -96,6 +96,96 @@ def test_la_confiabilidad_mezcla_sondas_y_eventos(almacen):
     assert 0.0 < m.confiabilidad < 1.0
 
 
+# --- Re-revision (round 4) de Task 13: un 4xx del cliente ya no castiga la
+#     ruta (round 3), pero SEGUIA escribiendose como evento fallido, y eso
+#     alimenta confiabilidad -- que /health usa para declarar una ruta
+#     muerta. Reproducido: 26 pedidos malformados seguidos de UNA llave
+#     bastan para tirar la confiabilidad de TODAS las rutas por el piso, con
+#     /health en "caido" mientras una llave DISTINTA sigue recibiendo 200.
+#     `registrar_evento` gana `es_error_cliente`, y _confiabilidad excluye
+#     esas filas de eventos POR COMPLETO -- ni suman como fallo, ni cuentan
+#     para la ventana -- para que un 4xx sea evidencia sobre el PEDIDO, no
+#     sobre la ruta. Se mantienen escritas (no se descartan) para que sigan
+#     siendo diagnosticables. ---
+
+def test_confiabilidad_ignora_eventos_marcados_como_error_del_cliente(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 400, 100.0 + i,
+                                 es_error_cliente=True)
+    m = almacen.metricas()["kilo/a:free"]
+    # Sin ninguna otra observacion, la ventana queda VACIA (no las 30 filas
+    # contando como fallo): confiabilidad cae al neutro, no a 0.
+    assert m.confiabilidad == pytest.approx(0.8)   # CONFIABILIDAD_NEUTRA
+
+
+def test_confiabilidad_sigue_cayendo_con_fallos_que_no_son_del_cliente(almacen):
+    # Regresion directa: un 500 (es_error_cliente=False, el default) tiene
+    # que seguir contando como antes.
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
+    m = almacen.metricas()["kilo/a:free"]
+    assert m.confiabilidad == pytest.approx(0.0)
+
+
+def test_confiabilidad_mezcla_error_del_cliente_e_ignora_solo_esos(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
+    for i in range(10):
+        almacen.registrar_evento("kilo/a:free", False, 0, 400, 101.0 + i,
+                                 es_error_cliente=True)
+    m = almacen.metricas()["kilo/a:free"]
+    # El unico evento que "cuenta" es el exito: los 10 de error del cliente
+    # quedan completamente afuera de la ventana.
+    assert m.confiabilidad == pytest.approx(1.0)
+
+
+_ESQUEMA_VIEJO_SIN_ES_ERROR_CLIENTE = """
+CREATE TABLE rutas (
+    clave TEXT PRIMARY KEY, proveedor TEXT NOT NULL, modelo_id TEXT NOT NULL,
+    tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
+    contexto INTEGER NOT NULL, max_salida INTEGER NOT NULL,
+    visto_por_ultima_vez REAL NOT NULL, activa INTEGER NOT NULL DEFAULT 1,
+    prioridad INTEGER NOT NULL DEFAULT 100);
+CREATE TABLE eventos (
+    clave TEXT NOT NULL, momento REAL NOT NULL, ok INTEGER NOT NULL,
+    ttft_ms INTEGER, codigo_http INTEGER, latencia_ms INTEGER);
+"""
+
+
+def test_migra_una_base_vieja_sin_es_error_cliente_con_filas(tmp_path):
+    ruta_db = str(tmp_path / "vieja_sin_flag.sqlite3")
+    con = sqlite3.connect(ruta_db)
+    con.executescript(_ESQUEMA_VIEJO_SIN_ES_ERROR_CLIENTE)
+    con.execute(
+        """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
+               contexto, max_salida, visto_por_ultima_vez, activa, prioridad)
+           VALUES ('kilo/vieja:free','kilo','vieja:free','gratis',1,0,1000,100,50.0,1,100)""")
+    con.execute(
+        """INSERT INTO eventos (clave, momento, ok, ttft_ms, codigo_http, latencia_ms)
+           VALUES ('kilo/vieja:free', 60.0, 0, 0, 400, 20)""")
+    con.commit()
+    con.close()
+
+    almacen = Almacen(ruta_db)
+    almacen.crear_esquema()   # no debe reventar (ALTER TABLE, no CREATE)
+
+    # La fila vieja, escrita ANTES de que existiera es_error_cliente, migra
+    # a 0 (comportamiento historico: SI cuenta como fallo) -- no se puede
+    # reclasificar retroactivamente un evento que no distinguia la causa.
+    fila = almacen._con.execute(
+        "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free'").fetchone()
+    assert fila[0] == 0
+
+    # Y la base migrada sigue siendo escribible con el flag nuevo.
+    almacen.registrar_evento("kilo/vieja:free", False, 0, 400, 70.0, es_error_cliente=True)
+    filas = almacen._con.execute(
+        "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free' "
+        "ORDER BY momento").fetchall()
+    assert [f[0] for f in filas] == [0, 1]
+
+
 def test_una_ruta_sin_datos_recibe_metricas_neutras(almacen):
     almacen.upsert_rutas([_ruta()], momento=100.0)
     m = almacen.metricas()["kilo/a:free"]

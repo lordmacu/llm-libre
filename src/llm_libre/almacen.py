@@ -19,7 +19,8 @@ CREATE INDEX IF NOT EXISTS ix_sondas ON sondas(clave, tipo, momento DESC);
 
 CREATE TABLE IF NOT EXISTS eventos (
     clave TEXT NOT NULL, momento REAL NOT NULL, ok INTEGER NOT NULL,
-    ttft_ms INTEGER, codigo_http INTEGER, latencia_ms INTEGER);
+    ttft_ms INTEGER, codigo_http INTEGER, latencia_ms INTEGER,
+    es_error_cliente INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS ix_eventos ON eventos(clave, momento DESC);
 
 CREATE TABLE IF NOT EXISTS uso_pago (
@@ -65,12 +66,19 @@ class Almacen:
         """`CREATE TABLE IF NOT EXISTS` no agrega columnas a una tabla que ya
         existe: una base viva (la del volumen de /datos, que a proposito
         sobrevive a los redeploys) se quedaria sin `eventos.latencia_ms` --
-        o, desde Task 13, sin `rutas.prioridad`. Mismo patron para las dos:
-        detectar la columna faltante y agregarla con un default que no
-        rompa las filas que ya existen."""
+        o, desde Task 13, sin `rutas.prioridad` ni `eventos.es_error_cliente`.
+        Mismo patron para las tres: detectar la columna faltante y agregarla
+        con un default que no rompa las filas que ya existen. Las filas
+        VIEJAS de `eventos` (escritas antes de que existiera la distincion)
+        migran a `es_error_cliente=0` -- siguen contando como fallo de la
+        ruta, como contaban antes: no hay forma de reclasificar
+        retroactivamente algo que nunca se distinguio al escribirlo."""
         columnas_eventos = {f[1] for f in self._con.execute("PRAGMA table_info(eventos)")}
         if "latencia_ms" not in columnas_eventos:
             self._con.execute("ALTER TABLE eventos ADD COLUMN latencia_ms INTEGER")
+        if "es_error_cliente" not in columnas_eventos:
+            self._con.execute(
+                "ALTER TABLE eventos ADD COLUMN es_error_cliente INTEGER NOT NULL DEFAULT 0")
         columnas_rutas = {f[1] for f in self._con.execute("PRAGMA table_info(rutas)")}
         if "prioridad" not in columnas_rutas:
             self._con.execute(
@@ -134,14 +142,32 @@ class Almacen:
 
     def registrar_evento(self, clave: str, ok: bool, ttft_ms: int,
                          codigo_http: int, momento: float,
-                         latencia_ms: int | None = None) -> None:
+                         latencia_ms: int | None = None,
+                         es_error_cliente: bool = False) -> None:
         """`ttft_ms` solo lo escribe quien pudo medir un time-to-first-token de
         verdad (el camino de streaming); el resto pasa 0 y manda su round-trip
-        en `latencia_ms`. Ver el comentario de arriba del archivo."""
+        en `latencia_ms`. Ver el comentario de arriba del archivo.
+
+        `es_error_cliente` (revision de Task 13, ronda 4): un 4xx que no sea
+        429 es evidencia sobre el PEDIDO, no sobre la ruta -- proxy.py ya
+        no lo cuenta hacia el cooldown de fallos duros (ronda 3), pero
+        SEGUIA escribiendose como evento fallido comun, y eso alimenta
+        `_confiabilidad`, que `/health` usa para declarar una ruta muerta.
+        Reproducido: 26 pedidos malformados seguidos de UNA llave bastaban
+        para tirar la confiabilidad de TODAS las rutas por el piso, con
+        /health en "caido" mientras una llave DISTINTA seguia recibiendo
+        200 todo el tiempo -- peor que el 503 que la ronda 3 ya arreglo,
+        porque en el volumen persistente de /datos un reinicio del proceso
+        NO limpia el historial: sigue reportando "caido" contra la misma
+        base. La fila se GUARDA igual (queda diagnosticable: un operador
+        viendo `eventos` puede ver los 4xx) pero `_confiabilidad` la
+        excluye de la ventana por completo -- ni cuenta como fallo, ni
+        ocupa un lugar en las ultimas VENTANA observaciones."""
         self._con.execute(
-            """INSERT INTO eventos (clave, momento, ok, ttft_ms, codigo_http, latencia_ms)
-               VALUES (?,?,?,?,?,?)""",
-            (clave, momento, int(ok), ttft_ms, codigo_http, latencia_ms))
+            """INSERT INTO eventos (clave, momento, ok, ttft_ms, codigo_http, latencia_ms,
+                   es_error_cliente)
+               VALUES (?,?,?,?,?,?,?)""",
+            (clave, momento, int(ok), ttft_ms, codigo_http, latencia_ms, int(es_error_cliente)))
         self._con.commit()
 
     def metricas(self) -> dict[str, Metricas]:
@@ -177,10 +203,18 @@ class Almacen:
         return fila[0] if fila else None
 
     def _confiabilidad(self, clave: str) -> float:
+        # `eventos.es_error_cliente = 0` excluye los 4xx del cliente (ver el
+        # docstring de registrar_evento): no cuentan como fallo NI ocupan un
+        # lugar en la ventana, como si ese pedido nunca le hubiera llegado a
+        # esta ruta. `sondas` no tiene esta columna -- las sondas las genera
+        # el propio gateway con un payload fijo, nunca son "culpa del
+        # cliente" en este sentido -- asi que se incluyen todas, como antes.
         filas = self._con.execute(
             """SELECT ok FROM (
                    SELECT momento, ok FROM sondas WHERE clave = ?
-                   UNION ALL SELECT momento, ok FROM eventos WHERE clave = ?
+                   UNION ALL
+                   SELECT momento, ok FROM eventos
+                   WHERE clave = ? AND es_error_cliente = 0
                ) ORDER BY momento DESC LIMIT ?""", (clave, clave, VENTANA)).fetchall()
         if not filas:
             return CONFIABILIDAD_NEUTRA
