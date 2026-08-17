@@ -18,11 +18,44 @@ PERFILES = {"rapido", "balanceado", "potente"}
 ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
 
 
+def _leer_campo(campo: str, valor_bruto, mensaje: str, calcular):
+    """Corre `calcular` (una funcion de cero argumentos que interpreta
+    `valor_bruto` -- un valor que vino TAL CUAL del cuerpo JSON del
+    cliente, nunca algo que el gateway arma) y convierte cualquier
+    `TypeError`/`ValueError`/`AttributeError` -- la familia de excepciones
+    que dispara un campo con el TIPO equivocado (`.strip()` sobre un
+    numero, `int()` sobre una lista, `set()` sobre un booleano o sobre una
+    lista que contiene una lista) -- en un 400 uniforme, en vez de
+    dejarla escapar sin atrapar hasta el manejador generico de FastAPI
+    como un 500 opaco.
+
+    Revision post-Task-14 (segundo gate): el mismo bug penetro dos veces
+    seguidas -- primero en `x_min_contexto` (arreglado a mano con un
+    try/except puntual), despues en `x_requiere` (el mismo patron,
+    reinventado) -- y una tercera instancia (`model`, via `.strip()`)
+    seguia sin atrapar cuando se encontraron las otras dos. El eje real
+    nunca fue "este campo puntual", fue "cualquier campo que este
+    endpoint interpreta antes de usarlo llega crudo del cliente, sin
+    tipo garantizado" -- ver el docstring de `armar_peticion`, el mismo
+    principio de "esto es passthrough, no confiar en la forma". Esta
+    funcion es el punto UNICO por el que pasa esa interpretacion de aca
+    en mas, para que un cuarto campo (si este endpoint gana uno) no
+    tenga que reinventar el try/except ni arriesgarse a olvidarlo."""
+    try:
+        return calcular()
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(400, {
+            "message": mensaje, "campo": campo, "valor_recibido": valor_bruto})
+
+
 def interpretar_pedido(cuerpo: dict) -> Pedido:
     # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
     # colarse como si fuera un id explicito (quedaria vacio tras el strip y
     # produciria un 404 confuso sobre el modelo '').
-    modelo_pedido = (cuerpo.get("model") or "").strip() or "auto"
+    modelo_bruto = cuerpo.get("model")
+    modelo_pedido = _leer_campo(
+        "model", modelo_bruto, "model debe ser un string",
+        lambda: (modelo_bruto or "").strip()) or "auto"
     modelo, perfil = None, "balanceado"
     requiere_tools = bool(cuerpo.get("tools"))
     requiere_vision = False
@@ -55,37 +88,31 @@ def interpretar_pedido(cuerpo: dict) -> Pedido:
     else:
         modelo = modelo_pedido
 
-    exigidas_raw = cuerpo.get("x_requiere") or []
-    if isinstance(exigidas_raw, str):
-        # Revision post-Task-14 (gate): `x_requiere: "tools"` (un string
-        # suelto, en vez de la lista documentada) pasaba silencioso por
-        # `set(cuerpo.get("x_requiere") or [])`, que sobre un STRING itera
-        # caracter por caracter -- set("tools") = {'t','o','l','s'} -- asi
-        # que "tools" in exigidas daba False y la exigencia de capacidad
-        # se ignoraba entera, sin error y sin avisar. Un cliente que manda
-        # la forma comun de "un solo valor, no una lista de uno" (valida en
-        # muchas APIs REST) merece que funcione iguial, no que se lo trague
-        # en silencio.
-        exigidas_raw = [exigidas_raw]
-    exigidas = set(exigidas_raw)
+    def _normalizar_exigidas():
+        # `x_requiere: "tools"` (un string suelto, en vez de la lista
+        # documentada) se acepta como un valor unico -- una API REST
+        # comun. Cualquier otra cosa que no sea un string ni una lista (o
+        # una lista con un elemento no-hasheable, como `[["tools"]]`)
+        # revienta ADENTRO de este `set(...)` con TypeError -- eso es lo
+        # que `_leer_campo` atrapa y convierte en 400. `set("tools")`
+        # (sin el envoltorio de arriba) iteraria caracter por caracter
+        # -- {'t','o','l','s'} -- y la exigencia se ignoraria en
+        # silencio; por eso el string se envuelve en una lista ANTES del
+        # set(), no despues.
+        valor = cuerpo.get("x_requiere") or []
+        if isinstance(valor, str):
+            valor = [valor]
+        return set(valor)
+    exigidas = _leer_campo(
+        "x_requiere", cuerpo.get("x_requiere"),
+        "x_requiere debe ser un string o una lista de strings",
+        _normalizar_exigidas)
 
     x_min_contexto_bruto = cuerpo.get("x_min_contexto")
-    try:
-        min_contexto = int(x_min_contexto_bruto) if x_min_contexto_bruto else 0
-    except (TypeError, ValueError):
-        # Revision post-Task-14 (gate): `int(cuerpo.get("x_min_contexto")
-        # or 0)` sin atrapar reventaba con ValueError/TypeError ante
-        # cualquier valor que no fuera un numero (p.ej. "cien mil", o una
-        # lista) -- eso escapa SIN atrapar hasta el manejador generico de
-        # FastAPI, que lo convierte en un 500 Internal Server Error opaco.
-        # Un campo de ESTE gateway mal formado es evidencia del PEDIDO, no
-        # una falla interna: se nombra el campo y se devuelve 400, igual
-        # que cualquier otro error de validacion de esta funcion.
-        raise HTTPException(400, {
-            "message": "x_min_contexto debe ser un numero entero",
-            "campo": "x_min_contexto",
-            "valor_recibido": x_min_contexto_bruto,
-        })
+    min_contexto = _leer_campo(
+        "x_min_contexto", x_min_contexto_bruto,
+        "x_min_contexto debe ser un numero entero",
+        lambda: int(x_min_contexto_bruto) if x_min_contexto_bruto else 0)
 
     return Pedido(
         modelo=modelo,

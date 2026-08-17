@@ -129,6 +129,42 @@ def test_x_min_contexto_numerico_como_string_sigue_funcionando():
     assert p.min_contexto == 100000
 
 
+# --- Revision post-Task-14 (tercer gate): la MISMA familia de bug que
+#     x_min_contexto (un cast sin atrapar sobre un campo del cliente
+#     revienta con TypeError/AttributeError, escapa como 500) penetro dos
+#     veces mas -- x_requiere con un valor ni string ni lista (set() sobre
+#     un int/bool/float/lista-de-listas) y model con cualquier cosa que no
+#     sea un string (.strip() sobre un numero, una lista, un dict). El fix
+#     generaliza con _leer_campo en vez de parchear el tercer sitio a
+#     mano -- estos tests cubren los dos nuevos y confirman la MISMA forma
+#     de error (message/campo/valor_recibido) que ya establecio
+#     x_min_contexto. ---
+
+@pytest.mark.parametrize("valor", [5, True, 3.5, [["tools"]]])
+def test_x_requiere_no_string_ni_lista_da_400_nombrando_el_campo(valor):
+    with pytest.raises(HTTPException) as exc:
+        interpretar_pedido({"model": "auto", "x_requiere": valor})
+    assert exc.value.status_code == 400
+    assert exc.value.detail["campo"] == "x_requiere"
+    assert exc.value.detail["valor_recibido"] == valor
+
+
+@pytest.mark.parametrize("valor", [5, True, 3.5, ["a"], {"a": 1}])
+def test_model_no_string_da_400_nombrando_el_campo(valor):
+    with pytest.raises(HTTPException) as exc:
+        interpretar_pedido({"model": valor})
+    assert exc.value.status_code == 400
+    assert exc.value.detail["campo"] == "model"
+    assert exc.value.detail["valor_recibido"] == valor
+
+
+def test_model_ausente_o_nulo_sigue_cayendo_a_auto_sin_dar_400():
+    # Regresion directa del fix de arriba: None (ausente) sigue siendo
+    # valido -- solo un valor PRESENTE con el tipo equivocado debe dar 400.
+    assert interpretar_pedido({}).modelo is None
+    assert interpretar_pedido({"model": None}).modelo is None
+
+
 @pytest.fixture
 def cliente():
     almacen = Almacen(":memory:")
@@ -214,6 +250,25 @@ def test_completions_con_x_requiere_como_string_aplica_la_exigencia(cliente):
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "x_requiere": "tools", "messages": []})
     assert r.status_code == 200
+
+
+# --- Revision post-Task-14 (tercer gate): mismos dos defectos que arriba
+#     (x_requiere no-string-ni-lista, model no-string), a traves del
+#     cliente HTTP completo -- confirma que interpretar_pedido esta
+#     conectado al camino real, no solo probado aislado. ---
+
+def test_completions_con_x_requiere_de_tipo_invalido_da_400_no_500(cliente):
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "x_requiere": 5, "messages": []})
+    assert r.status_code == 400
+    assert r.json()["detail"]["campo"] == "x_requiere"
+
+
+def test_completions_con_model_de_tipo_invalido_da_400_no_500(cliente):
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": 5, "messages": []})
+    assert r.status_code == 400
+    assert r.json()["detail"]["campo"] == "model"
 
 
 # --- Task 14 (documentacion): la regla que manda es que ENRIQUECER
