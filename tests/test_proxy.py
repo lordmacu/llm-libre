@@ -985,19 +985,25 @@ async def test_las_rutas_de_pago_castigan_directo_sin_ninguna_sonda():
 #     llave. Flat, capped -- igual que _castigar_429. ---
 
 async def test_el_castigo_directo_de_pago_es_flat_no_escala_con_golpes_repetidos():
+    # Tolerancia chica (no exacta): `ahora_del_castigo` (HIGH 2, round 9) se
+    # estampa con AHORA + latencia REAL del intento, no con el `ahora` crudo
+    # -- con MockTransport eso son 0-1ms de jitter segun la carga de la
+    # maquina. Da igual para lo que este test prueba: si el castigo
+    # escalara (round 9's _castigar), la segunda ronda saldria a 120s, muy
+    # por fuera de una tolerancia de medio segundo.
     p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
     ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
     ahora = 0.0
     for i in range(UMBRAL_SOSPECHA):
         await p.completar([ruta_pago], CUERPO, ahora=ahora + i)
-    primero = p.cooldowns["minimax/m1"]
-    assert primero == ahora + (UMBRAL_SOSPECHA - 1) + COOLDOWN_PAGO_DIRECTO_S
+    primero = p.cooldowns["minimax/m1"] - (ahora + (UMBRAL_SOSPECHA - 1))
+    assert primero == pytest.approx(COOLDOWN_PAGO_DIRECTO_S, abs=0.5)
 
     ahora = 1000.0
     for i in range(UMBRAL_SOSPECHA):
         await p.completar([ruta_pago], CUERPO, ahora=ahora + i)
-    segundo = p.cooldowns["minimax/m1"]
-    assert segundo == ahora + (UMBRAL_SOSPECHA - 1) + COOLDOWN_PAGO_DIRECTO_S  # el MISMO flat, no mayor
+    segundo = p.cooldowns["minimax/m1"] - (ahora + (UMBRAL_SOSPECHA - 1))
+    assert segundo == pytest.approx(COOLDOWN_PAGO_DIRECTO_S, abs=0.5)  # el MISMO flat, no mayor
 
 
 async def test_menos_del_umbral_no_castiga_una_ruta_de_pago():
