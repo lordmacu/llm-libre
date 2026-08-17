@@ -146,6 +146,40 @@ def test_un_modelo_explicito_que_ya_no_existe_da_404_con_sugerencias(cliente):
     assert "sugerencias" in str(r.json())
 
 
+# --- ALSO de la revision round 6: el caso de arriba cubre un id que YA NO
+#     esta en el catalogo. Este otro es distinto y es, textualmente, "la
+#     razon de ser del proyecto" -- un id que SIGUE en el catalogo pero que
+#     el proveedor real ya no sirve (404 genuino, en vivo). La ruta ya se
+#     lleva el golpe de confiabilidad (404 es evidencia de la ruta por
+#     default, Parte 1), pero hasta este fix el cliente solo veia un 503
+#     generico ("detalle": "HTTP 404") -- indistinguible de cualquier otra
+#     indisponibilidad transitoria, durante la ventana de hasta 5h antes del
+#     proximo sync de catalogo (nunca para rutas de pago, que no se
+#     sondean). ---
+
+def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente):
+    estado, cliente = estado_cliente
+    estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "a:free", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 404
+    assert "a:free" in str(r.json())
+    assert "sugerencias" in str(r.json())
+
+
+def test_modelo_auto_con_404_upstream_sigue_siendo_503(estado_cliente):
+    # En modo "auto" no hay un id EXPLICITO que nombrar -- pedido.modelo es
+    # None -- asi que este caso se queda con el 503 generico de siempre, no
+    # con el 404 nuevo (que exige un modelo puntual sobre el cual sugerir).
+    estado, cliente = estado_cliente
+    estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 503
+
+
 def test_health_dice_ok_si_hay_ruta_viva(cliente):
     assert cliente.get("/health").json()["estado"] == "ok"
 

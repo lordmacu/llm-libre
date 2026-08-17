@@ -139,6 +139,31 @@ def crear_app(estado: Estado) -> FastAPI:
                     en_ruta_comprometida=_contar_si_sirvio_de_pago),
                 media_type="text/event-stream")
         r = await estado.proxy.completar(rutas, cuerpo, ahora, crudo)
+        if r.estado == 503 and r.codigo_upstream == 404 and pedido.modelo is not None:
+            # ALSO de la revision round 6 -- literalmente la razon de ser
+            # del proyecto: `pedido.modelo` SIGUE en nuestro catalogo (paso
+            # el check 404 de `_rutas_para`, mas arriba) pero el proveedor
+            # real ya no lo tiene: un 404 genuino, en vivo. La ruta ya se
+            # llevo el golpe de confiabilidad (404 es evidencia de la ruta
+            # por default, ver proxy._es_error_del_cliente), pero sin este
+            # chequeo el cliente solo veia un 503 generico
+            # ("detalle": "HTTP 404") -- indistinguible de cualquier otra
+            # indisponibilidad transitoria, durante toda la ventana de hasta
+            # 5h antes del proximo sync de catalogo (nunca para rutas de
+            # pago, que no se sondean).
+            #
+            # Solo con un modelo EXPLICITO: en modo "auto" `pedido.modelo`
+            # es None, no hay un id puntual sobre el cual sugerir, y la ruta
+            # que fallo no es necesariamente la unica candidata razonable --
+            # ese caso se queda con el 503 de siempre.
+            #
+            # Solo el camino sincronico: en streaming el status 200 y las
+            # cabeceras SSE ya salieron antes de que el proxy sepa si la
+            # ruta sirvio, asi que no hay margen HTTP para cambiarlo a 404.
+            raise HTTPException(404, {
+                "message": f"el modelo '{pedido.modelo}' ya no existe",
+                "sugerencias": _parecidos(pedido.modelo, estado.almacen.rutas_activas()),
+            })
         if r.ruta is not None and r.ruta.tier == "pago":
             estado.almacen.sumar_uso_pago(
                 llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
