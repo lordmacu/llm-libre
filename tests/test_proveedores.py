@@ -242,6 +242,18 @@ def test_base_url_env_agrega_el_sufijo_si_la_variable_no_lo_trae():
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
+def test_base_url_env_con_query_string_no_le_astilla_el_sufijo_adentro():
+    # LOW de la revision: el sufijo se agregaba por concatenacion de texto,
+    # asi que una URL con path vacio pero CON query string terminaba con el
+    # sufijo pegado DENTRO del valor de la query
+    # ("...:8888?token=abc" -> "...:8888?token=abc/v1"). Hay que parsear la
+    # URL y reconstruirla, no concatenar strings.
+    chatgpt = next(
+        p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888?token=abc"})
+        if p.id == "chatgpt")
+    assert chatgpt.base_url == "https://blog.test:8888/v1?token=abc"
+
+
 def test_base_url_env_no_duplica_el_sufijo_si_ya_lo_trae():
     chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
                    if p.id == "chatgpt")

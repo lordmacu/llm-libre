@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
@@ -81,14 +81,19 @@ def _resolver_base_url(p: dict, entorno: dict) -> str:
     sufijo = urlsplit(p["base_url"]).path.rstrip("/")
     if not sufijo:
         return desde_entorno
-    ruta_entorno = urlsplit(desde_entorno).path.rstrip("/")
+    partes = urlsplit(desde_entorno)
+    ruta_entorno = partes.path.rstrip("/")
     if not ruta_entorno:
         log.warning(
             "%s: %s='%s' no trae ninguna ruta; se agrega el sufijo '%s' que "
-            "proveedores.yaml declara para este proveedor (%s%s). Definir la "
+            "proveedores.yaml declara para este proveedor. Definir la "
             "variable con el sufijo ya incluido evita este aviso.",
-            p["id"], env_var, desde_entorno, sufijo, desde_entorno, sufijo)
-        return desde_entorno + sufijo
+            p["id"], env_var, desde_entorno, sufijo)
+        # Se PARSEA y reconstruye (urlsplit/urlunsplit), no se concatena
+        # texto crudo: una URL con path vacio pero CON query string
+        # ("...:8888?token=abc") terminaria con el sufijo pegado DENTRO del
+        # valor de la query ("...:8888?token=abc/v1") si se concatenara.
+        return urlunsplit(partes._replace(path=sufijo))
     if ruta_entorno != sufijo:
         log.warning(
             "%s: %s='%s' trae una ruta ('%s') distinta del sufijo '%s' que "
