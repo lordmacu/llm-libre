@@ -334,13 +334,24 @@ class Almacen:
             # un solo fallo, o un fallo justo despues de un exito, todavia
             # no alcanza.
             return not (len(senales) >= 2 and not senales[1][0])
-        cualquier_telemetria = self._con.execute(
-            """SELECT 1 FROM eventos WHERE clave = ? AND es_error_cliente = 0
-               UNION ALL
-               SELECT 1 FROM sondas WHERE clave = ?
-               LIMIT 1""",
-            (clave, clave)).fetchone()
-        return cualquier_telemetria is None
+        # Round 10, MEDIUM del gate: este chequeo de respaldo (nada dentro
+        # de la ventana, ni exito ni sonda) miraba CUALQUIER evento real
+        # -- exito O FALLO -- para decidir "hay historia, declarar
+        # muerta". Un fallo real, sin ninguna sonda que lo confirme, NUNCA
+        # deberia ser autoritativo: es el mismo principio que motiva
+        # sospecha+sonda desde round 8 (el trafico de un cliente solo
+        # puede pedirle al gateway que vaya a mirar, nunca excluir el
+        # mismo). Medido: UN pedido real fallido bastaba para tirar
+        # /health a "caido" sin que NINGUNA sonda hubiera corrido --
+        # menos de UMBRAL_SOSPECHA, asi que ninguna sonda bajo demanda
+        # llega a dispararse para rescatarla. Contradice directamente el
+        # principio del modulo: "mil fallos de un mismo cliente no
+        # prueban que la ruta este rota". Ahora SOLO una SONDA (period
+        # ica o bajo demanda, exitosa o no) cuenta como "hay historia" --
+        # un evento real, exito o fallo, nunca alcanza por si solo.
+        cualquier_sonda = self._con.execute(
+            "SELECT 1 FROM sondas WHERE clave = ? LIMIT 1", (clave,)).fetchone()
+        return cualquier_sonda is None
 
     def _ttft_p50(self, clave: str) -> float:
         """p50 de time-to-first-token. Solo entran observaciones que de verdad

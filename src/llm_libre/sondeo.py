@@ -134,8 +134,18 @@ async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None
         # distinguir "el proveedor esta caido" de "el proveedor dijo 200 y vino
         # vacio" -- justo la diferencia que hacia falta para diagnosticar por
         # que el ping de 8 tokens mataba rutas sanas.
-        almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
-                                r.codigo_upstream, 0, 0, ahora)
+        #
+        # Round 10, fix chico: un 429 contra la sonda NO se graba aca -- ya
+        # tiene su propio castigo proporcional (Proxy._castigar_429, adentro
+        # de completar()), y es evidencia de que la ruta esta rate-limitada
+        # AHORA, no de que este rota. Grabarlo tambien como sonda de salud
+        # fallida la confundiria con una ruta caida: dos 429 seguidos
+        # bastarian para que tiene_evidencia_de_vida (round 9) la de por
+        # muerta -- una senal de capacidad momentanea no es evidencia de
+        # muerte.
+        if r.codigo_upstream != 429:
+            almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
+                                    r.codigo_upstream, 0, 0, ahora)
 
 
 async def sondear_calidad(proxy, almacen, rutas: list[Ruta], ahora: float) -> None:
@@ -154,7 +164,15 @@ async def sondear_calidad(proxy, almacen, rutas: list[Ruta], ahora: float) -> No
                 # se llama al proxy y no cuenta ni para pasados ni para totales.
                 continue
             cuerpo = dict(caso.cuerpo)
-            r = await proxy.completar([ruta], cuerpo, ahora)
+            # Round 10, fix chico: mismo hueco de wiring que HIGH 1 (round
+            # 9), una funcion mas alla. `caso.cuerpo` es tan gateway-autor
+            # como `PING` -- son CASOS fijos de bateria.py, nunca algo que
+            # un cliente real escriba -- asi que un fallo aca es evidencia
+            # de la ruta igual de inequivoca. Sin `es_sonda=True`, un fallo
+            # de bateria alimentaba `_sospechar` (pensada para trafico de
+            # CLIENTE) y gastaba cupo del presupuesto de sondas bajo
+            # demanda, escaso y compartido con el trafico real.
+            r = await proxy.completar([ruta], cuerpo, ahora, es_sonda=True)
             resultados.append(r.estado == 200 and caso.verificar(r.json))
         pasados, totales = evaluar(resultados)
         almacen.registrar_sonda(ruta.clave, "calidad", pasados > 0, 0, 0, 200,

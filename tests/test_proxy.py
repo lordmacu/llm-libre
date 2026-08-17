@@ -8,7 +8,8 @@ from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.almacen import Almacen
 from llm_libre.proveedores import Proveedor
 from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAXIMO_S,
-                             COOLDOWN_BASE_S, LIMITE_PROBE_BAJO_DEMANDA_S,
+                             COOLDOWN_BASE_S, COOLDOWN_PAGO_DIRECTO_S,
+                             LIMITE_PROBE_BAJO_DEMANDA_S,
                              LIMITE_PROBE_GLOBAL_POR_MINUTO, UMBRAL_SOSPECHA,
                              VENTANA_PROBE_GLOBAL_S, Proxy, _es_error_del_cliente)
 
@@ -976,6 +977,29 @@ async def test_las_rutas_de_pago_castigan_directo_sin_ninguna_sonda():
     assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
+# --- Round 10, MEDIUM del gate: el castigo directo de pago reutilizaba el
+#     backoff exponencial de _castigar (existe para SONDAS CONFIRMADAS,
+#     que un castigo de pago nunca tiene) -- el MISMO defecto que el 429
+#     tenia antes de round 9, en otro lugar. Medido a traves de la API
+#     real: 60->120->240->480->960->1920->3600s en 24 pedidos de una
+#     llave. Flat, capped -- igual que _castigar_429. ---
+
+async def test_el_castigo_directo_de_pago_es_flat_no_escala_con_golpes_repetidos():
+    p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
+    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    ahora = 0.0
+    for i in range(UMBRAL_SOSPECHA):
+        await p.completar([ruta_pago], CUERPO, ahora=ahora + i)
+    primero = p.cooldowns["minimax/m1"]
+    assert primero == ahora + (UMBRAL_SOSPECHA - 1) + COOLDOWN_PAGO_DIRECTO_S
+
+    ahora = 1000.0
+    for i in range(UMBRAL_SOSPECHA):
+        await p.completar([ruta_pago], CUERPO, ahora=ahora + i)
+    segundo = p.cooldowns["minimax/m1"]
+    assert segundo == ahora + (UMBRAL_SOSPECHA - 1) + COOLDOWN_PAGO_DIRECTO_S  # el MISMO flat, no mayor
+
+
 async def test_menos_del_umbral_no_castiga_una_ruta_de_pago():
     p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
     ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
@@ -1081,6 +1105,45 @@ async def test_una_sonda_no_arranca_si_la_ruta_ya_esta_en_cooldown():
     assert llamadas_ping == []
 
 
+# --- Round 10, HIGH del gate: el cupo global (round 9) se repartia por
+#     orden de llegada -- pero `completar()` recorre la cadena SIEMPRE en
+#     el mismo orden (prioridad, confiabilidad), asi que las primeras N
+#     rutas de la cadena se llevaban el cupo SIEMPRE, y una ruta con la
+#     confiabilidad colapsada (que `clave_de_orden` manda al FINAL) podia
+#     no conseguir sonda NUNCA. Medido: victima en la posicion 5 de 6 o 11
+#     de 12, cero sondas en 60 minutos simulados -- el 5h periodico como
+#     unico backstop, degradando la deteccion de ~2s a horas. ---
+
+async def test_una_ruta_al_final_de_un_catalogo_de_11_no_es_starveada_por_el_cupo_global():
+    def handler(req):
+        cuerpo = json.loads(req.content)
+        modelo = cuerpo["model"]
+        es_ping = cuerpo["messages"][0]["content"] == "ping"
+        if modelo == "victima:free":
+            return httpx.Response(500)  # rota para CUALQUIER payload, incluida la sonda
+        if es_ping:
+            return httpx.Response(200, json=_ok())  # las demas: sanas contra su propia sonda
+        return httpx.Response(500)  # pero el trafico real sigue fallando para todas
+
+    p = _proxy(handler)
+    # La victima al FINAL de la cadena/catalogo -- justo donde cae una ruta
+    # con confiabilidad colapsada.
+    rutas = _multi(*[f"m{i}:free" for i in range(10)]) + [_ruta("victima:free")]
+
+    ahora = 0.0
+    for _ in range(4):   # ceil(11/5)=3 rondas de admision + margen
+        for i in range(UMBRAL_SOSPECHA):
+            r = await p.completar(rutas, CUERPO, ahora=ahora)
+            assert r.estado == 503  # nada sirvio -- las 11 fallan siempre para trafico real
+            ahora += 1.0
+        await p.esperar_sondas_pendientes()
+        if "kilo/victima:free" in p.cooldowns:
+            break
+        ahora += VENTANA_PROBE_GLOBAL_S + 5.0  # deja que el cupo global se libere
+
+    assert p.cooldowns.get("kilo/victima:free", 0.0) > 0.0
+
+
 # --- Round 9, MEDIUM 6 del gate: el limite de sondas bajo demanda era POR
 #     RUTA -- el AGREGADO no estaba acotado. Medido: 11 rutas, 15.840
 #     pedidos extra por dia. Tope global, independiente de cuantas rutas
@@ -1161,3 +1224,48 @@ async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas
     assert "kilo/a:free" not in p.cooldowns  # sin veredicto, no muerta por accidente
     assert "sonda bajo demanda" in caplog.text  # quedo logueado, no silencioso
     assert "kilo/a:free" not in p._sospechas  # no queda trabada esperando para siempre
+
+
+# --- Round 10, fixes chicos del gate. ---
+
+async def test_retry_after_negativo_o_no_finito_cae_al_default():
+    # Un `Retry-After` hostil o roto (-5, nan) NO puede volver un cooldown
+    # de 0s -- un proveedor diciendo explicitamente "parate" (un 429 es tan
+    # inequivoco como una sonda) terminaria martillado de inmediato otra
+    # vez.
+    for valor in ("-5", "nan", "inf", "-inf", "no-es-un-numero"):
+        p = _proxy(lambda req, v=valor: httpx.Response(429, headers={"Retry-After": v}))
+        await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+        assert p.cooldowns["kilo/a:free"] == COOLDOWN_429_DEFAULT_S, valor
+
+
+async def test_un_429_contra_la_sonda_no_se_registra_como_sonda_de_salud_fallida():
+    # Un rate-limit contra la sonda YA tiene su propio castigo proporcional
+    # (_castigar_429, adentro de completar()) -- no es evidencia de que la
+    # ruta este ROTA, es evidencia de que esta rate-limitada AHORA MISMO.
+    # Grabarlo tambien como sonda de salud fallida lo confundiria con una
+    # ruta genuinamente caida.
+    p = _proxy(lambda req: httpx.Response(429))
+    await p._probar_bajo_demanda(_ruta("a:free"), ahora=100.0)
+    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    # Pero SI castigo -- el 429 tiene su propio camino, sin pasar por sondas.
+    assert "kilo/a:free" in p.cooldowns
+
+
+async def test_la_fila_de_sonda_se_estampa_con_la_resolucion_no_la_programacion():
+    # Misma clase de bug que HIGH 2 (round 9), un escalon mas arriba: para
+    # una ruta colgada, la fila de `sondas` quedaba fechada hasta
+    # TIMEOUT_S=90s en el pasado, pudiendo des-ordenar el
+    # `ORDER BY momento DESC` que usa tiene_evidencia_de_vida.
+    demora_s = 0.05
+
+    async def handler(req):
+        await asyncio.sleep(demora_s)
+        return httpx.Response(500)
+
+    p = _proxy(handler)
+    ahora = 1000.0
+    await p._probar_bajo_demanda(_ruta("a:free"), ahora=ahora)
+    fila = p.almacen._con.execute(
+        "SELECT momento FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila[0] >= ahora + demora_s

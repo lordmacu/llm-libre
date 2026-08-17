@@ -389,12 +389,33 @@ def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
 
 
-def test_no_tiene_evidencia_de_vida_con_solo_fallos_reales(almacen):
-    # El caso "genuinamente muerta": solo fallos que SI son evidencia de la
-    # ruta (es_error_cliente=0, el default), sin exito en ningun lado.
+# --- Round 10, MEDIUM del gate: el chequeo de respaldo ("nada dentro de la
+#     ventana") miraba CUALQUIER evento real -- exito o FALLO -- para
+#     decidir "hay historia, declarar muerta". Medido: un solo pedido real
+#     fallido (menos que UMBRAL_SOSPECHA, asi que ninguna sonda bajo
+#     demanda llega a dispararse) bastaba para tirar /health a "caido" --
+#     contradice el principio del modulo, "mil fallos de un mismo cliente
+#     no prueban que la ruta este rota". Ahora SOLO una SONDA (nunca un
+#     evento real, exito o fallo) cuenta como "hay historia". ---
+
+def test_fallos_reales_solos_sin_ninguna_sonda_no_declaran_muerta(almacen):
+    # El camino que el trafico real SOLO puede activar (sin ninguna sonda
+    # de por medio) ya no alcanza -- ni con 30 fallos.
     almacen.upsert_rutas([_ruta()], momento=100.0)
     for i in range(30):
         almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+
+
+def test_fallos_reales_con_dos_sondas_fallidas_confirmando_si_declaran_muerta(almacen):
+    # El camino REAL para llegar a "muerta": trafico real dispara sospecha
+    # (round 8), sospecha dispara sondas, y son DOS sondas fallidas
+    # consecutivas (round 9) las que confirman -- nunca el trafico solo.
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 131.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 132.0)
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
 
 
@@ -409,13 +430,23 @@ def test_tiene_evidencia_de_vida_si_los_fallos_son_todos_error_del_cliente(almac
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
 
 
-def test_no_tiene_evidencia_de_vida_si_el_exito_quedo_fuera_de_la_ventana(almacen):
+def test_un_exito_fuera_de_la_ventana_con_solo_fallos_reales_recientes_no_declara_muerta(almacen):
     from llm_libre.almacen import VENTANA_EVIDENCIA_VIDA_S
     almacen.upsert_rutas([_ruta()], momento=100.0)
     almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
     ahora = 100.0 + VENTANA_EVIDENCIA_VIDA_S + 1.0
     for i in range(30):
         almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora - 10.0 + i * 0.1)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is True
+
+
+def test_un_exito_fuera_de_la_ventana_con_dos_sondas_fallidas_recientes_declara_muerta(almacen):
+    from llm_libre.almacen import VENTANA_EVIDENCIA_VIDA_S
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
+    ahora = 100.0 + VENTANA_EVIDENCIA_VIDA_S + 1.0
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is False
 
 

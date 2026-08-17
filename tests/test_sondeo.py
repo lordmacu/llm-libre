@@ -378,6 +378,23 @@ async def test_la_sonda_de_calidad_guarda_casos_pasados_sobre_totales():
     assert 1 <= fila[0] < 5   # pasa aritmetica y formato, falla json y tools
 
 
+# --- Round 10, fix chico del gate: mismo hueco de wiring que HIGH 1
+#     (round 9), una funcion mas alla -- `sondear_calidad` llamaba
+#     completar() sin es_sonda=True, asi que un caso de bateria fallido
+#     alimentaba `_sospechar` (pensada para trafico de CLIENTE) y gastaba
+#     cupo del presupuesto de sondas bajo demanda, escaso y compartido con
+#     el trafico real. `caso.cuerpo` es tan gateway-autor como PING. ---
+
+async def test_la_sonda_de_calidad_castiga_directo_sin_pasar_por_sospecha():
+    p = _proxy(lambda req: httpx.Response(500))
+    await sondear_calidad(p, p.almacen, [_ruta()], ahora=100.0)
+    assert p.cooldowns["kilo/x:free"] > 0.0
+    # Directo -- nunca via sospecha (que necesitaria UMBRAL_SOSPECHA
+    # fallos, y ademas dispararia una sonda de tipo 'salud' aparte).
+    assert p.almacen._con.execute(
+        "SELECT COUNT(*) FROM sondas WHERE tipo='salud'").fetchone()[0] == 0
+
+
 async def test_la_calidad_no_sondea_rutas_de_pago():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "12"}}]}))
