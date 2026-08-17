@@ -423,3 +423,49 @@ def test_no_tiene_evidencia_de_vida_con_sonda_de_salud_reciente_fallida(almacen)
     almacen.upsert_rutas([_ruta()], momento=100.0)
     almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
+
+
+# --- Round 7, MEDIUM del gate: `tiene_evidencia_de_vida` solo miraba sondas
+#     EXITOSAS -- una sonda con `ok=0` era invisible para la funcion.
+#     Reproducido: las cinco rutas muertas, el ultimo exito real hace 20h
+#     (adentro de la ventana de 24h), pero CUATRO sondas de salud fallidas
+#     desde entonces (una cada 5h, el default de sondeo) -- la funcion
+#     encontraba el exito viejo, se quedaba con el, y jamas miraba lo que
+#     paso DESPUES. El argumento que ya justifica confiar en una sonda
+#     EXITOSA (el gateway controla su propio payload, asi que no hay
+#     ambiguedad posible de "esto es sobre el pedido") vale IGUAL para una
+#     sonda FALLIDA: es evidencia inequivoca de que la ruta esta rota, no
+#     solo de que esta viva. La ventana de 24h es defendible para una ruta
+#     de PAGO que nunca se sondea; no lo es para una ruta gratis sondeada
+#     cada 5h cuyos ultimos cuatro resultados son CONOCIDOS y se descartaban. ---
+
+def test_una_sonda_fallida_mas_reciente_que_un_exito_viejo_declara_la_ruta_muerta(almacen):
+    almacen.upsert_rutas([_ruta()], momento=0.0)
+    ahora = 100_000.0
+    veinte_horas = 20 * 3600.0
+    cinco_horas = 5 * 3600.0
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, ahora - veinte_horas)
+    # Cuatro sondas de salud FALLIDAS desde entonces, una cada 5h -- todas
+    # mas recientes que el exito de arriba, la ULTIMA hace apenas 1h.
+    for i in range(1, 5):
+        almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
+                                ahora - veinte_horas + i * cinco_horas)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is False
+
+
+def test_un_exito_real_mas_reciente_que_una_sonda_fallida_declara_la_ruta_viva(almacen):
+    # Simetrico al de arriba: si DESPUES de una sonda fallida hay un exito
+    # real (un cliente de verdad recibio respuesta), esa es la senal mas
+    # nueva y gana -- la ruta esta viva AHORA, sin importar el tropiezo
+    # anterior de la sonda.
+    almacen.upsert_rutas([_ruta()], momento=0.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, 150.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+
+
+def test_una_sonda_exitosa_mas_reciente_que_una_fallida_declara_la_ruta_viva(almacen):
+    almacen.upsert_rutas([_ruta()], momento=0.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True

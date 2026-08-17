@@ -232,57 +232,81 @@ class Almacen:
         return sum(f[0] for f in filas) / len(filas)
 
     def tiene_evidencia_de_vida(self, clave: str, ahora: float) -> bool:
-        """Para `/health` (Task 13, revision round 6, Parte 2) -- "evidencia
-        de vida", no "ausencia de muerte". `confiabilidad` (arriba) es un
-        PROMEDIO de las ultimas `VENTANA` observaciones, y un promedio puede
-        arrastrarse a 0 por cualquier patron de trafico repetido de UN
-        cliente. La clasificacion de codigos (Parte 1) no alcanza para
-        cerrar esto del todo: `403` es GENUINAMENTE ambiguo -- cuenta
-        suspendida (evidencia de la ruta) o contenido moderado (evidencia
-        del PEDIDO) -- y el gateway no puede distinguirlos sin parsear el
-        cuerpo especifico de cada proveedor, asi que clasificarlo como
-        evidencia de ruta (correcto para el primer caso) lo deja vulnerable
-        al segundo: 30 pedidos con contenido moderado de un cliente bastan
-        para tirar el promedio por el piso para TODOS.
+        """Para `/health` (Task 13, revision round 6, Parte 2; corregido en
+        round 7) -- "evidencia de vida", no "ausencia de muerte".
+        `confiabilidad` (arriba) es un PROMEDIO de las ultimas `VENTANA`
+        observaciones, y un promedio puede arrastrarse a 0 por cualquier
+        patron de trafico repetido de UN cliente. La clasificacion de
+        codigos (Parte 1) no alcanza para cerrar esto del todo: `403` es
+        GENUINAMENTE ambiguo -- cuenta suspendida (evidencia de la ruta) o
+        contenido moderado (evidencia del PEDIDO) -- y el gateway no puede
+        distinguirlos sin parsear el cuerpo especifico de cada proveedor,
+        asi que clasificarlo como evidencia de ruta (correcto para el
+        primer caso) lo deja vulnerable al segundo: 30 pedidos con
+        contenido moderado de un cliente bastan para tirar el promedio por
+        el piso para TODOS.
 
-        La pregunta correcta no es "cuantos fallos tuvo" sino "hay
-        evidencia de que puede servir": UN exito reciente prueba que la
-        ruta sirve; mil fallos de un mismo cliente no prueban que no
-        puede. Una ruta cuenta como viva si, dentro de
-        `VENTANA_EVIDENCIA_VIDA_S`:
-          - hubo un EXITO real reciente (`eventos.ok=1`), o
-          - hubo una SONDA DE SALUD reciente exitosa (`sondas.ok=1`,
-            `tipo='salud'`) -- la sonda es la senal mas confiable que
-            existe, porque el GATEWAY controla su propio payload: un 4xx
-            contra una sonda es SIEMPRE evidencia de la ruta, nunca hay
-            ambiguedad de "contenido del cliente" posible; o
-          - no hay NINGUNA telemetria todavia (ruta recien vista) -- no
-            nacio muerta, todavia no tuvo su primera oportunidad.
+        La pregunta correcta no es "cuantos fallos tuvo" sino "cual es la
+        SENAL MAS RECIENTE que se tiene sobre esta ruta": dentro de
+        `VENTANA_EVIDENCIA_VIDA_S`, se junta el ultimo EXITO real
+        (`eventos.ok=1`) con la ultima SONDA DE SALUD (`sondas.tipo='salud'`,
+        cualquier resultado) y gana la que tenga el `momento` mas nuevo.
 
-        Los fallos NUNCA son, por si solos, suficientes para declarar una
-        ruta muerta -- eso es lo que la vieja comparacion contra
-        confiabilidad permitia. Los eventos con `es_error_cliente=1`
-        (Parte 1) tampoco cuentan como telemetria "real" para el tercer
-        caso: una ruta que SOLO recibio pedidos malformados (400/413/422)
-        todavia no tuvo su primera oportunidad de verdad, igual que una
-        sin ningun trafico.
+          - Si la senal mas nueva es un exito real, o una sonda EXITOSA:
+            viva.
+          - Si la senal mas nueva es una sonda FALLIDA: muerta. La sonda es
+            la señal mas confiable que existe, porque el GATEWAY controla
+            su propio payload -- un resultado contra una sonda NUNCA es
+            ambiguo, en ningun sentido: si un 4xx contra una sonda es
+            SIEMPRE evidencia de la ruta (round 6), una sonda que directamente
+            fallo lo es igual, y round 7 corrige el bug de mirar solo la
+            mitad de ese argumento (`ok=1`) e ignorar la otra (`ok=0`).
+            Reproducido: exito real hace 20h (adentro de una ventana de
+            24h) pero CUATRO sondas fallidas desde entonces (una cada 5h,
+            el default de sondeo) -- la version anterior encontraba el
+            exito viejo, se quedaba con el, y jamas miraba que paso
+            DESPUES. La ventana de 24h es defendible para una ruta de PAGO
+            que nunca se sondea; no lo es para una ruta gratis sondeada
+            cada 5h cuyos ultimos resultados son CONOCIDOS y se
+            descartaban.
+          - Si no hay ninguna señal (ni exito ni sonda) dentro de la
+            ventana: cae al chequeo de "sin telemetria real en absoluto"
+            (mas abajo) -- una ruta recien vista no nacio muerta, todavia
+            no tuvo su primera oportunidad.
+
+        Los eventos FALLIDOS (`eventos.ok=0`) nunca contribuyen evidencia
+        de muerte de forma directa aca, solo indirectamente via el chequeo
+        de "sin telemetria": siguen siendo ambiguos (un 403 puede ser
+        moderacion de contenido de un cliente puntual) de una forma en que
+        una sonda -- pedido fijo, controlado por el propio gateway -- nunca
+        lo es. Los eventos con `es_error_cliente=1` (Parte 1) tampoco
+        cuentan como telemetria "real" para el chequeo de respaldo: una
+        ruta que SOLO recibio pedidos malformados (400/413/422) todavia no
+        tuvo su primera oportunidad de verdad, igual que una sin ningun
+        trafico.
 
         `/v1/ranking` NO usa esta senal -- sigue con `confiabilidad`
-        exactamente como antes: una ruta que puntua mal solo pierde
-        posicion y se autocorrige; una ruta que `/health` declara muerta
-        REINICIA EL CONTENEDOR (Coolify usa `/health` como health check).
-        La asimetria es el punto: el ranking puede permitirse ser
-        sensible, la salud no."""
+        exactamente como antes (y tambien la usa `router.ordenar`, que
+        ordena la cadena de intentos real -- no es SOLO el endpoint de
+        diagnostico): una ruta que puntua mal solo pierde posicion y se
+        autocorrige; una ruta que `/health` declara muerta REINICIA EL
+        CONTENEDOR (Coolify usa `/health` como health check). La asimetria
+        es el punto: el ranking puede permitirse ser sensible, la salud
+        no."""
         corte = ahora - VENTANA_EVIDENCIA_VIDA_S
-        exito = self._con.execute(
-            """SELECT 1 FROM eventos WHERE clave = ? AND ok = 1 AND momento >= ?
-               UNION ALL
-               SELECT 1 FROM sondas
-                   WHERE clave = ? AND tipo = 'salud' AND ok = 1 AND momento >= ?
+        senal_mas_reciente = self._con.execute(
+            """SELECT ok FROM (
+                   SELECT momento, 1 AS ok FROM eventos
+                       WHERE clave = ? AND ok = 1 AND momento >= ?
+                   UNION ALL
+                   SELECT momento, ok FROM sondas
+                       WHERE clave = ? AND tipo = 'salud' AND momento >= ?
+               )
+               ORDER BY momento DESC
                LIMIT 1""",
             (clave, corte, clave, corte)).fetchone()
-        if exito:
-            return True
+        if senal_mas_reciente is not None:
+            return bool(senal_mas_reciente[0])
         cualquier_telemetria = self._con.execute(
             """SELECT 1 FROM eventos WHERE clave = ? AND es_error_cliente = 0
                UNION ALL
