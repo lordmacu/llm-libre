@@ -252,6 +252,40 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
     assert r.json()["estado"] != "ok"
 
 
+# --- Round 7, MEDIUM (calidad de test) del gate: el test de arriba no pinea
+#     el leg de cooldown de `_viva()` en api.py -- borrar del todo la
+#     condicion `m.en_cooldown_hasta <= ahora` deja la suite completa en
+#     verde, porque la ruta de ese test NO tiene evidencia de vida propia
+#     (nunca hubo un exito real): `tiene_evidencia_de_vida()` la tira sola,
+#     sin que el cooldown tenga que intervenir. Con el redisenio de round 6
+#     ("evidencia de vida, no ausencia de fallos"), esa condicion es
+#     precisamente la que una limpieza futura borraria sin que nada lo
+#     note. Este test aisla el cooldown de la otra pata: la ruta SI tiene
+#     evidencia de vida (un exito reciente), y aun asi /health tiene que
+#     seguir diciendo no-ok mientras el cooldown siga activo. ---
+
+def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_cliente):
+    estado, cliente = estado_cliente
+    ahora = time.time()
+    estado.almacen.registrar_evento("kilo/a:free", True, 50, 200, ahora)
+
+    async def _forzar_429():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(429, json={"error": "rate limited"})))
+        await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+
+    asyncio.run(_forzar_429())
+    assert estado.proxy.cooldowns  # confirma que quedo en cooldown
+
+    # Aislado: sin el cooldown, esta ruta SI cuenta como viva por si sola.
+    assert estado.almacen.tiene_evidencia_de_vida("kilo/a:free", ahora) is True
+
+    r = cliente.get("/health")
+    assert r.status_code != 200
+    assert r.json()["estado"] != "ok"
+
+
 # --- Round 6 de Task 13, Parte 2. `403` es GENUINAMENTE ambiguo: cuenta
 #     suspendida (evidencia de la ruta, correcto contarlo -- Parte 1) vs.
 #     contenido moderado del lado del proveedor (evidencia del PEDIDO de UN
