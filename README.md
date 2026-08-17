@@ -325,12 +325,44 @@ sondea aproximadamente una vez al día— vuelve a cero.
   contenedor cuando falla, pero la tabla `eventos` vive en el volumen
   persistente `/datos`, así que un proceso nuevo contra la misma base
   seguiría viendo los mismos eventos y el reinicio no arreglaría nada. Por
-  eso `/health` dejó de mirar el promedio: una ruta cuenta como viva si no
-  está en cooldown y, dentro de una ventana de 24 h, hubo un éxito real, o
-  una sonda de salud exitosa (la sonda es siempre confiable: el gateway
-  controla su propio payload), o directamente no hay telemetría real
-  todavía. Los fallos, solos, nunca alcanzan para declarar una ruta muerta.
-  **`/v1/ranking` no cambia — sigue usando el promedio de confiabilidad
-  exactamente como antes**: un ranking mal puntuado se autocorrige solo en
-  cuanto alguien lo mira; una ruta que `/health` declara muerta reinicia el
-  contenedor. La asimetría es a propósito.
+  eso `/health` dejó de mirar el promedio: una ruta cuenta como viva según
+  la **señal más reciente** que se tenga de ella dentro de una ventana de
+  24 h — un éxito real, o el resultado de la última sonda de salud (`ok=1`
+  cuenta como viva, `ok=0` cuenta como **muerta**: una sonda nunca es
+  ambigua, el gateway controla su propio payload, y esto vale para un
+  resultado fallido igual que para uno exitoso) — o, si no hay ninguna
+  señal todavía, directamente no hay telemetría real. Los fallos *reales*
+  (`eventos.ok=0`), solos, nunca alcanzan para declarar una ruta
+  muerta — siguen siendo ambiguos de una forma en que una sonda no.
+  **`confiabilidad` sigue alimentando el ranking y la selección real de
+  rutas exactamente como antes** — no solo el endpoint de diagnóstico
+  `/v1/ranking`, también `router.ordenar` (la cadena de intentos real que
+  usa el proxy): un ranking mal puntuado pierde posición y se autocorrige
+  solo en cuanto alguien lo mira o el router recalcula; una ruta que
+  `/health` declara muerta reinicia el contenedor. La asimetría es a
+  propósito.
+- **Cooldown se decide a nivel de CADENA, no de respuesta — un solo cliente
+  ya no puede apagar rutas sanas.** La clasificación de arriba dice bien
+  qué código es de quién, pero `completar`/`completar_stream` juzgaban cada
+  ruta de la cadena SOLA: un `403` de moderación de contenido, un `451`
+  legal/geográfico, un timeout por un prompt gigante o un `200` sin
+  contenido de un modelo de razonamiento son, los cuatro, evidencia de la
+  ruta por la regla de arriba — pero también son deterministas, CUALQUIER
+  ruta le devuelve lo mismo a ESE pedido puntual. Medido: tres pedidos
+  IDÉNTICOS de una sola llave contra un gateway de 5 rutas SANAS bastaban
+  para poner las cinco en cooldown. **El principio "cuando no se sabe,
+  contar" es por-consumidor, no global**: `confiabilidad` es una medición
+  (una falsa alarma se autocorrige, así que ante la duda se cuenta);
+  `cooldown` es una exclusión (una falsa alarma ES la interrupción, así que
+  ante la duda **no se excluye**). `completar` recorre la cadena entera por
+  pedido, así que sabe algo que ninguna respuesta individual puede decir:
+  un fallo solo cuenta hacia el contador de fallos duros de SU ruta si, en
+  esa misma vuelta, alguna OTRA ruta de la cadena tuvo éxito; si la cadena
+  se agota entera sin ningún éxito y tiene más de una ruta, se descartan
+  todos los fallos de esa vuelta. `429` no se toca (sigue castigando de
+  inmediato, señal inequívoca de esa ruta), y una cadena de una sola ruta
+  (la sonda de salud siempre lo es) tampoco tiene con qué comparar, así que
+  sigue castigando de inmediato — es la salida de emergencia para una ruta
+  rota que ya no tiene ninguna hermana sana. Una ruta que de verdad está
+  rota (con una hermana sana en la misma cadena) sigue cayendo en el mismo
+  número de pedidos que antes.
