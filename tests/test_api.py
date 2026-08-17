@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 
@@ -11,7 +12,7 @@ from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.auth import LimitadorPorLlave
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.proveedores import Proveedor
-from llm_libre.proxy import Proxy
+from llm_libre.proxy import TOPE_PENDIENTES, UMBRAL_SOSPECHA, Proxy
 
 
 def _hoy() -> str:
@@ -607,6 +608,187 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     # con un transport SANO en el segundo proceso, para probar que la caida
     # viene de la TELEMETRIA ya persistida (eventos con es_error_cliente=0),
     # no de ningun trafico que este segundo proceso vuelva a generar.
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    proxy2 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "hola"}}]}))))
+    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    r2 = cliente2.get("/health")
+    assert r2.status_code != 200
+    assert r2.json()["estado"] != "ok"
+
+
+# --- Round 8. El gate encontro dos vectores que round 7 no cerraba, los dos
+#     escotillas de su propio diseno: una cadena de UNA sola ruta (forzable
+#     por el cliente con `model` explicito o `x_min_contexto`, sin ningun
+#     conocimiento interno) y la rama `if emitido:` de completar_stream
+#     (sin chequeo de cadena). Round 8 saca el eje de "cuantas rutas hay":
+#     trafico real NUNCA excluye una ruta directo, solo acumula sospecha;
+#     cruzar el umbral programa una sonda PROPIA (payload fijo `PING`, el
+#     mismo que sondeo.py) que es la unica que decide. Verificado end-to-end
+#     via /health, no solo en proxy.py -- ver test_proxy.py/
+#     test_proxy_stream.py para la cobertura mas granular. ---
+
+def _ping(cuerpo: bytes) -> bool:
+    mensajes = json.loads(cuerpo).get("messages") or []
+    return bool(mensajes) and mensajes[0].get("content") == "ping"
+
+
+def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
+    # estado_cliente ya tiene una sola ruta gratis -- exactamente el vector
+    # 1 del gate (un `model` explicito, o x_min_contexto, narrows a esto).
+    estado, cliente = estado_cliente
+    ahora = time.time()
+
+    def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "pong"}}]})
+        return httpx.Response(403, json={"error": "contenido flageado"})
+
+    async def _quince_pedidos_identicos():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        for i in range(15):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []},
+                                         ahora + i)
+        await estado.proxy.esperar_sondas_pendientes()
+
+    asyncio.run(_quince_pedidos_identicos())
+    assert cliente.get("/health").json()["estado"] == "ok"
+
+
+def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_cliente):
+    # El vector 2 del gate: la rama if emitido: (force-flush de
+    # TOPE_PENDIENTES) sin narrows de cadena -- "auto", sin extensiones.
+    estado, cliente = estado_cliente
+    ahora = time.time()
+    lineas = ['data: {"choices":[{"index":0,"delta":{"content":""},'
+             '"finish_reason":null}]}\n\n' for _ in range(TOPE_PENDIENTES + 6)]
+    lineas.append("data: [DONE]\n\n")
+    payload_sin_contenido = "".join(lineas).encode()
+
+    def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "pong"}}]})
+        return httpx.Response(200, content=payload_sin_contenido)
+
+    async def _quince_streams_identicos():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        cuerpo = {"model": "auto", "stream": True,
+                 "messages": [{"role": "user", "content": "piensa mucho"}]}
+        for i in range(15):
+            [ln async for ln in estado.proxy.completar_stream(rutas, cuerpo, ahora + i)]
+        await estado.proxy.esperar_sondas_pendientes()
+
+    asyncio.run(_quince_streams_identicos())
+    assert cliente.get("/health").json()["estado"] == "ok"
+
+
+def test_health_cae_rapido_con_una_ruta_rota_de_verdad_via_sonda_bajo_demanda(estado_cliente):
+    # Contraste: una ruta rota de verdad (le va mal tambien a la sonda) se
+    # enfria en UMBRAL_SOSPECHA pedidos + una sonda -- no en 5h.
+    estado, cliente = estado_cliente
+    ahora = time.time()
+
+    async def _umbral_pedidos():
+        rutas = estado.almacen.rutas_activas()
+        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(500)))
+        for i in range(UMBRAL_SOSPECHA):
+            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []},
+                                         ahora + i)
+        await estado.proxy.esperar_sondas_pendientes()
+
+    asyncio.run(_umbral_pedidos())
+    assert estado.proxy.cooldowns  # la sonda confirmo y castigo
+    r = cliente.get("/health")
+    assert r.status_code != 200
+    assert r.json()["estado"] != "ok"
+
+
+def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tmp_path):
+    ruta_db = str(tmp_path / "salud_sospecha_ok.sqlite3")
+    ahora = time.time()
+
+    def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "pong"}}]})
+        return httpx.Response(403, json={"error": "contenido flageado"})
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    proxy1 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+
+    async def _quince_pedidos():
+        rutas = almacen1.rutas_activas()
+        for i in range(15):
+            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
+        await proxy1.esperar_sondas_pendientes()
+
+    asyncio.run(_quince_pedidos())
+    cliente1 = TestClient(crear_app(estado1))
+    assert cliente1.get("/health").json()["estado"] == "ok"
+
+    # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
+    # sin que el proxy1 original (con su sonda ya resuelta) intervenga.
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    proxy2 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    assert cliente2.get("/health").json()["estado"] == "ok"
+
+
+def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_path):
+    # La contracara: la SONDA BAJO DEMANDA (no la periodica) escribio la fila
+    # de `sondas` que declara la ruta muerta -- tiene que persistir igual.
+    ruta_db = str(tmp_path / "salud_sospecha_caida.sqlite3")
+    ahora = time.time()
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    proxy1 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(500))))   # rota para CUALQUIER payload, incluida la sonda
+    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+
+    async def _umbral_pedidos():
+        rutas = almacen1.rutas_activas()
+        for i in range(UMBRAL_SOSPECHA):
+            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
+        await proxy1.esperar_sondas_pendientes()
+
+    asyncio.run(_umbral_pedidos())
+    cliente1 = TestClient(crear_app(estado1))
+    r1 = cliente1.get("/health")
+    assert r1.status_code != 200
+    assert r1.json()["estado"] != "ok"
+
+    fila = almacen1._con.execute(
+        "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila == ("salud", 0)
+
+    # Segundo proceso, con un transport SANO -- para probar que "caido"
+    # viene de la sonda YA persistida, no de trafico nuevo que este proceso
+    # genere.
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(

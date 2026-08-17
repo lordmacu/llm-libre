@@ -252,12 +252,12 @@ def crear_app(estado: Estado) -> FastAPI:
     @app.get("/health")
     def health():
         # Honesto: mira si hay una ruta VIVA y servible, no si el proceso esta
-        # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (lo
-        # dispara un 429 de inmediato, o TOPE_FALLOS_SEGUIDOS fallos NO-429
-        # seguidos -- ver Proxy._castigar/_registrar_fallo; un 4xx del
-        # cliente, en cambio, NUNCA cuenta hacia esto, ver
-        # _es_error_del_cliente) Y evidencia POSITIVA de que sirve
-        # (`Almacen.tiene_evidencia_de_vida`).
+        # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (round
+        # 8: SOLO lo dispara un 429 de inmediato, o una SONDA -- periodica o
+        # bajo demanda -- que confirma que la ruta esta rota; el trafico de
+        # un cliente real nunca excluye una ruta directo, ver el comentario
+        # de cabecera de UMBRAL_SOSPECHA en proxy.py) Y evidencia POSITIVA de
+        # que sirve (`Almacen.tiene_evidencia_de_vida`).
         #
         # Task 13, revision round 6, Parte 2: ESTO YA NO MIRA `confiabilidad`.
         # `confiabilidad` es un promedio de trafico reciente, y un promedio se

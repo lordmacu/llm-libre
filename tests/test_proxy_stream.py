@@ -489,51 +489,71 @@ async def test_avisa_cuando_la_retencion_se_desborda(caplog):
     assert "kilo/a:free" in caplog.text
 
 
-# --- Hallazgo 2 de la revision (streaming): el mismo mecanismo de cooldown
-#     por fallos duros seguidos, probado sobre los TRES caminos de falla de
+# --- Hallazgo 2 de la revision (streaming), y su rediseno final en round 8
+#     -- ver el comentario de cabecera de UMBRAL_SOSPECHA en proxy.py para
+#     la regla completa. Probado sobre los TRES caminos de falla de
 #     completar_stream (status != 200, stream sin contenido util, error de
-#     red). ---
+#     red): ningun fallo de trafico real castiga directo, solo acumula
+#     sospecha; cruzar el umbral dispara una sonda propia en segundo plano,
+#     que es la que decide. ---
 
-async def test_n_status_no_200_seguidos_en_streaming_pone_la_ruta_en_cooldown():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
-    p = _proxy(lambda req: httpx.Response(500))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
+def _ok():
+    return {"choices": [{"message": {"role": "assistant", "content": "hola"}}]}
+
+
+def _ping(cuerpo: bytes) -> bool:
+    """True si el pedido que le llego al mock es la sonda -- el mismo
+    payload fijo `PING` (proxy.py). La sonda bajo demanda usa completar()
+    (NO streaming), asi que la respuesta que le corresponde es un JSON
+    normal, no un cuerpo SSE."""
+    mensajes = json.loads(cuerpo).get("messages") or []
+    return bool(mensajes) and mensajes[0].get("content") == "ping"
+
+
+async def test_n_status_no_200_seguidos_en_streaming_castiga_via_sonda():
+    from llm_libre.proxy import UMBRAL_SOSPECHA
+    p = _proxy(lambda req: httpx.Response(500))   # rota para CUALQUIER payload
+    for i in range(UMBRAL_SOSPECHA):
         [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
-    assert p.cooldowns["kilo/a:free"] > float(TOPE_FALLOS_SEGUIDOS - 1)
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns["kilo/a:free"] > 0.0
 
 
-async def test_n_streams_sin_contenido_util_seguidos_pone_la_ruta_en_cooldown():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+async def test_n_streams_sin_contenido_util_seguidos_castiga_via_sonda():
+    from llm_libre.proxy import UMBRAL_SOSPECHA
     vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
     p = _proxy(lambda req: httpx.Response(200, content=vacio))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
+    for i in range(UMBRAL_SOSPECHA):
         [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
-    assert p.cooldowns["kilo/a:free"] > float(TOPE_FALLOS_SEGUIDOS - 1)
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns["kilo/a:free"] > 0.0
 
 
-async def test_un_exito_en_streaming_limpia_los_fallos_duros_seguidos():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+async def test_un_exito_en_streaming_limpia_la_sospecha_acumulada():
+    from llm_libre.proxy import UMBRAL_SOSPECHA
     estado = {"n": 0}
 
     def handler(req):
         estado["n"] += 1
-        if estado["n"] <= TOPE_FALLOS_SEGUIDOS - 1:
+        if estado["n"] <= UMBRAL_SOSPECHA - 1:
             return httpx.Response(500)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    for i in range(TOPE_FALLOS_SEGUIDOS):
+    for i in range(UMBRAL_SOSPECHA):
         [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
+    await p.esperar_sondas_pendientes()
     assert "kilo/a:free" not in p.cooldowns
 
 
-async def test_tres_400_seguidos_en_streaming_no_castigan():
+async def test_tres_400_seguidos_en_streaming_no_disparan_sospecha():
     # Misma correccion HIGH que en completar(): un 4xx (no 429) es un error
     # DETERMINISTA del cliente, no una senal de que la ruta este rota.
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+    from llm_libre.proxy import UMBRAL_SOSPECHA
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
+    for i in range(UMBRAL_SOSPECHA):
         [l async for l in p.completar_stream([_ruta("a:free")], CUERPO, float(i))]
+    await p.esperar_sondas_pendientes()
     assert "kilo/a:free" not in p.cooldowns
 
 
@@ -580,68 +600,132 @@ async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_
     assert vistos[0]["read"] == 90.0   # TIMEOUT_S
 
 
-# --- Round 7: la misma atribucion a nivel de CADENA que en completar()
-#     (test_proxy.py), probada sobre los tres caminos de falla del
-#     streaming (status != 200, stream sin contenido util, error de red).
-#     Ver el comentario de cabecera de TOPE_FALLOS_SEGUIDOS en proxy.py para
-#     la regla completa. ---
-
 def _multi(*modelos):
     return [_ruta(m) for m in modelos]
 
 
-async def test_status_no_200_identico_en_toda_la_cadena_no_castiga_en_streaming():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
-    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
-    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
-        [l async for l in p.completar_stream(rutas, CUERPO, float(i))]
+# --- Round 8. El gate encontro DOS vectores que round 7 no cerraba, los dos
+#     escotillas del propio diseno de esa ronda:
+#
+#     1. Una cadena de UNA sola ruta -- el cliente la fuerza con `model`
+#        explicito o `x_min_contexto` (publicado por ruta en /v1/ranking),
+#        sin ningun conocimiento interno.
+#     2. La rama `if emitido:` de mas abajo (el force-flush de
+#        TOPE_PENDIENTES): commiteaba de inmediato SIN chequear si habia
+#        una hermana con exito y SIN mirar la longitud de la cadena --
+#        alcanzaba con `{"model":"auto","stream":true}` (nada de
+#        extensiones, ningun id) y un prompt que agota el presupuesto de
+#        razonamiento sin emitir texto nunca: 15 pedidos, apagon total, en
+#        una cadena de 5 rutas SANAS.
+#
+#     Round 8 saca el eje de "cuantas rutas hay" y "por que rama salio":
+#     CUALQUIER fallo de trafico real, en CUALQUIER rama (incluida
+#     `if emitido:`), solo acumula sospecha -- nunca castiga directo. Los
+#     tests de abajo reproducen los dos vectores con el mock devolviendole a
+#     la SONDA (payload fijo, no streaming: la sonda bajo demanda usa
+#     completar()) una respuesta distinta de la que le da al cliente. ---
+
+async def test_status_no_200_identico_en_cadena_de_una_sola_ruta_no_castiga_sana():
+    def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json=_ok())
+        return httpx.Response(403, json={"error": "contenido flageado"})
+
+    p = _proxy(handler)
+    for i in range(15):
+        [l async for l in p.completar_stream(_multi("a:free"), CUERPO, float(i))]
+    await p.esperar_sondas_pendientes()
     assert p.cooldowns == {}
 
 
-async def test_stream_sin_contenido_util_identico_en_toda_la_cadena_no_castiga():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+async def test_stream_sin_contenido_util_identico_en_cadena_de_una_sola_ruta_no_castiga():
     vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
-    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
-    p = _proxy(lambda req: httpx.Response(200, content=vacio))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
-        [l async for l in p.completar_stream(rutas, CUERPO, float(i))]
-    assert p.cooldowns == {}
-
-
-async def test_error_de_red_identico_en_toda_la_cadena_no_castiga_en_streaming():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
 
     def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json=_ok())
+        return httpx.Response(200, content=vacio)
+
+    p = _proxy(handler)
+    for i in range(15):
+        [l async for l in p.completar_stream(_multi("a:free"), CUERPO, float(i))]
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns == {}
+
+
+async def test_error_de_red_identico_en_cadena_de_una_sola_ruta_no_castiga_en_streaming():
+    def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json=_ok())
         raise httpx.ReadTimeout("prompt gigante", request=req)
+
+    p = _proxy(handler)
+    for i in range(15):
+        [l async for l in p.completar_stream(_multi("a:free"), CUERPO, float(i))]
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns == {}
+
+
+def _sse_solo_estructura(n: int) -> bytes:
+    """`n` chunks de streaming reales que solo traen senal estructural
+    (`finish_reason` presente, aunque null -- exactamente como lo manda un
+    proveedor real en cada chunk intermedio) y JAMAS contenido visible: el
+    patron de un modelo de razonamiento que se gasta el presupuesto
+    pensando sin llegar a emitir texto nunca. Con `n > TOPE_PENDIENTES`
+    dispara el force-flush (`emitido=True`) sin pasar nunca por
+    `util=True` -- exactamente la rama `if emitido:` que este round deja
+    de tratar como una excepcion."""
+    lineas = ['data: {"choices":[{"index":0,"delta":{"content":""},'
+             '"finish_reason":null}]}\n\n' for _ in range(n)]
+    lineas.append("data: [DONE]\n\n")
+    return "".join(lineas).encode()
+
+
+async def test_flood_de_chunks_sin_contenido_util_no_castiga_una_ruta_sana():
+    # El vector 2 exacto del gate: ni siquiera hace falta narrows la cadena
+    # -- "auto", sin extensiones, contra 5 rutas sanas.
+    from llm_libre.proxy import TOPE_PENDIENTES
+    payload_sin_contenido = _sse_solo_estructura(TOPE_PENDIENTES + 6)
+
+    def handler(req):
+        if _ping(req.content):
+            return httpx.Response(200, json=_ok())
+        return httpx.Response(200, content=payload_sin_contenido)
 
     rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
     p = _proxy(handler)
-    for i in range(TOPE_FALLOS_SEGUIDOS):
-        [l async for l in p.completar_stream(rutas, CUERPO, float(i))]
+    cuerpo_auto = {"model": "auto", "stream": True,
+                  "messages": [{"role": "user", "content": "piensa mucho antes de responder"}]}
+    for i in range(15):
+        [l async for l in p.completar_stream(rutas, cuerpo_auto, float(i))]
+    await p.esperar_sondas_pendientes()
     assert p.cooldowns == {}
 
 
-async def test_una_ruta_rota_con_hermana_sana_sigue_castigando_en_streaming():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
+async def test_una_ruta_rota_de_verdad_con_hermana_sana_sigue_castigando_rapido_en_streaming():
+    from llm_libre.proxy import UMBRAL_SOSPECHA
 
     def handler(req):
+        if _ping(req.content):
+            return httpx.Response(500)   # la sonda tambien la ve rota
         cuerpo = json.loads(req.content)
         if cuerpo["model"] == "a:free":
             return httpx.Response(500)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    for i in range(TOPE_FALLOS_SEGUIDOS):
+    for i in range(UMBRAL_SOSPECHA):
         texto = await _juntar(p.completar_stream(_multi("a:free", "b:free"), CUERPO, float(i)))
         assert texto == "bien"
+    await p.esperar_sondas_pendientes()
     assert "kilo/a:free" in p.cooldowns
     assert "kilo/b:free" not in p.cooldowns
 
 
-async def test_una_cadena_de_una_sola_ruta_sigue_castigando_de_inmediato_en_streaming():
-    from llm_libre.proxy import TOPE_FALLOS_SEGUIDOS
-    p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
+async def test_una_ruta_rota_de_verdad_en_cadena_de_una_sola_ruta_se_enfria_rapido_en_streaming():
+    from llm_libre.proxy import UMBRAL_SOSPECHA
+    p = _proxy(lambda req: httpx.Response(500))   # rota para CUALQUIER payload
+    for i in range(UMBRAL_SOSPECHA):
         [l async for l in p.completar_stream(_multi("a:free"), CUERPO, float(i))]
+    await p.esperar_sondas_pendientes()
     assert "kilo/a:free" in p.cooldowns

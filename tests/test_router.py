@@ -161,9 +161,9 @@ def test_la_prioridad_no_rompe_el_invariante_de_pago_al_final():
 # --- Hallazgo 2 de la revision de Task 13: `prioridad` no tenia escape para
 #     una ruta persistentemente rota -- con chatgpt en prioridad 0, ordenar()
 #     la seguia poniendo primero SIEMPRE, sin mirar su salud, mientras el
-#     cooldown (que ahora tambien cubre fallos duros seguidos, no solo 429,
-#     ver proxy.Proxy._registrar_fallo) sea la UNICA salida de esa trampa: se
-#     filtra ANTES de que la prioridad importe. ---
+#     cooldown (round 8: lo dispara un 429 de inmediato o una SONDA que
+#     confirma la ruta rota, ver proxy.Proxy._sospechar) sea la UNICA salida
+#     de esa trampa: se filtra ANTES de que la prioridad importe. ---
 
 # --- Hallazgo 5 de la revision: `prioridad` y "nunca medida" en la clave de
 #     orden se podian intercambiar de posicion sin que ningun test existente

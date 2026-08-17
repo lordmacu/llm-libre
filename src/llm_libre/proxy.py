@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -6,6 +7,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from llm_libre.bateria import TOPE_CORTO
 from llm_libre.cliente import armar_peticion
 from llm_libre.modelos import Ruta
 from llm_libre.razonamiento import RecortadorStreamCompuesto, recortar
@@ -16,6 +18,102 @@ COOLDOWN_BASE_S = 60.0
 COOLDOWN_TOPE_S = 3600.0
 TIMEOUT_S = 90.0
 
+# El PING de salud comparte el tope de la bateria (TOPE_CORTO) por la MISMA
+# razon, y no puede quedarse atras cuando ese numero se mueve.
+#
+# Tenia `max_tokens: 8`, cuatro veces menos que los 32 que la bateria ya
+# demostro insuficientes. Mientras un 200 vacio contaba como exito eso era
+# inofensivo; desde que un 200 sin respuesta adentro es (con razon) un intento
+# FALLIDO, un ping que no deja pensar al modelo FABRICA el fallo que dice
+# medir: la sonda declara muerta a una ruta sana. Medido contra Kilo con
+# max_tokens=8, una pasada sobre las 11 rutas gratis daba 5 sanas; entre las
+# "muertas" estaban cohere/north-mini-code:free -- la que sirve `auto` en el
+# arranque en frio -- y tencent/hy3:free, que saca 5/5 en la bateria.
+#
+# El dano no es solo un /health pesimista: `_confiabilidad` mira las ultimas 50
+# observaciones y las sondas son ~125 por dia, asi que el trafico real no
+# alcanza a desmentirlas. El ranking terminaria ordenando por quien contesta
+# mas corto, que es exactamente la premisa que este proyecto elimino.
+#
+# Vive ACA (round 8), no en sondeo.py: es proxy quien ahora TAMBIEN dispara
+# sondas por su cuenta (ver UMBRAL_SOSPECHA mas abajo), asi que el payload
+# fijo que las hace inequivocas tiene que estar donde se usa. sondeo.py lo
+# importa de aca (`from llm_libre.proxy import PING`) para que la sonda
+# PERIODICA y la sonda BAJO DEMANDA sigan siendo, literalmente, el mismo
+# pedido.
+PING = {"messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": TOPE_CORTO, "temperature": 0}
+
+# Round 8. Seis rondas del mismo mecanismo (retryability, una lista de
+# codigos, la lista con el default invertido, atribucion a nivel de
+# respuesta, atribucion a nivel de cadena) cayeron cada una por un vector
+# nuevo -- y los dos ultimos (round 8) eran ESCOTILLAS DEL PROPIO DISENO de
+# round 7: una cadena de una sola ruta (el cliente la fuerza con un `model`
+# explicito o con `x_min_contexto`; `/v1/ranking` publica `contexto` por
+# ruta, asi que no hace falta ningun conocimiento interno) y la rama
+# `if emitido:` de completar_stream (sin hermana con quien comparar, y sin
+# chequeo de longitud de cadena). Cuando las fugas estan en las EXCEPCIONES
+# que uno mismo escribio a proposito, el eje esta mal, no sub-enumerado.
+#
+# El cambio: TRAFICO DE UN CLIENTE REAL NUNCA EXCLUYE UNA RUTA DIRECTAMENTE.
+# Solo puede acumular SOSPECHA -- que no excluye nada y no es visible en
+# ningun lado que importe. Cruzar el umbral programa una SONDA PROPIA, con
+# el mismo payload fijo (`PING`, arriba) que ya usa la sonda periodica de
+# `sondeo.py`. Esa sonda -- nunca el pedido del cliente -- decide: si falla,
+# la ruta se castiga (mismo backoff/tope que siempre, `_castigar`); si pasa,
+# la sospecha se limpia y la ruta sigue en rotacion.
+#
+# Por que una sonda SI puede excluir sin ambiguedad y una respuesta real
+# NUNCA puede: el payload de la sonda lo escribe EL GATEWAY. No hay nada que
+# atribuir -- si la sonda falla, la ruta esta rota, punto. Ninguno de los
+# vectores de las seis rondas anteriores (contenido flageado, prompt
+# gigante, modelo de razonamiento que se gasta el presupuesto, una cadena
+# corta, un early-return de streaming) puede tocar el payload de una sonda,
+# porque el cliente nunca lo escribe.
+#
+# `429` sigue siendo la excepcion, y sigue INTACTO: es el proveedor mismo
+# diciendo "pariate" -- evidencia de la ruta tan inequivoca como una sonda,
+# sin necesitar que se confirme con una. Su backoff ya esta probado; este
+# round no lo toca.
+UMBRAL_SOSPECHA = 3  # cuantos fallos de TRAFICO REAL, dentro de la ventana
+                      # de decaimiento de abajo, hacen falta para programar
+                      # una sonda propia contra esa ruta. El mismo numero que
+                      # el viejo TOPE_FALLOS_SEGUIDOS de round 7 -- no es
+                      # sagrado, pero mantiene la intuicion de "tres
+                      # seguidos" que el spec/README ya usan en otros lados.
+
+VENTANA_SOSPECHA_S = 600.0  # 10 min. La sospecha DECAE: solo cuentan los
+                             # fallos de los ultimos 10 minutos, no todos los
+                             # que una ruta acumulo alguna vez. Mucho mas
+                             # corta que "horas" a proposito -- fallos de un
+                             # incidente real disperso a lo largo de horas
+                             # nunca se suman para disparar una sonda
+                             # espuria -- pero sigue siendo generosa para
+                             # trafico real que no llega en una rafaga
+                             # perfecta.
+
+LIMITE_PROBE_BAJO_DEMANDA_S = 60.0  # como maximo UNA sonda bajo demanda por
+                                     # ruta cada 60s, sin importar cuantos
+                                     # pedidos sospechosos lleguen mientras
+                                     # tanto. Justificacion del numero: una
+                                     # sonda gasta la MISMA cuota gratis que
+                                     # el trafico real (el mismo endpoint,
+                                     # el mismo limite por minuto del
+                                     # proveedor), asi que el costo extra
+                                     # que UN cliente hostil puede imponerle
+                                     # a UNA ruta queda topeado en, como
+                                     # mucho, 60 pedidos extra por hora --
+                                     # sin importar cuantos pedidos mande
+                                     # el cliente (podria mandar miles y el
+                                     # tope sigue siendo el mismo). Y como
+                                     # el payload de esa sonda es del
+                                     # gateway, el cliente jamas puede hacer
+                                     # que ese pedido extra FALLE: una ruta
+                                     # sana pasa la sonda siempre, asi que
+                                     # el peor resultado posible para el
+                                     # atacante es gastar ese cupo fijo sin
+                                     # lograr nunca que una ruta sana caiga.
+
 # Revision de Task 13, hallazgo 2. Solo un 429 castigaba (con backoff
 # exponencial, ver _castigar): un 500, un timeout o un error de red no
 # dejaban NUNCA un cooldown, asi que una ruta persistentemente rota o
@@ -23,60 +121,9 @@ TIMEOUT_S = 90.0
 # su prioridad, para siempre -- con TIMEOUT_S=90 eso son hasta 5*90s=450s
 # por pedido en la cadena mas larga, y /health sigue en "ok" mientras haya
 # UNA ruta viva. `blog` es una maquina saturada: colgado-no-rechazado es el
-# modo de falla realista, no un 500 limpio.
-#
-# Un hiccup aislado no debe sacar una ruta sana de rotacion -- por eso el
-# castigo no es INMEDIATO como el del 429 (que si es una senal inequivoca:
-# el proveedor esta pidiendo que se lo deje de llamar). Recien al superar
-# TOPE_FALLOS_SEGUIDOS fallos NO-429 SEGUIDOS (sin ningun exito en el medio)
-# se aplica el MISMO backoff exponencial que ya usa el 429 (comparten
-# _castigos/_castigar): la diferencia es CUANDO se dispara, no cuanto dura.
-TOPE_FALLOS_SEGUIDOS = 3
-
-# Round 7. La atribucion de mas arriba (que codigo cuenta como evidencia del
-# PEDIDO, Parte 1) se aplicaba solo a nivel de RESPUESTA -- cada ruta se
-# juzgaba sola, sin mirar que paso con sus hermanas en la MISMA cadena. Pero
-# `completar`/`completar_stream` recorren la cadena entera por pedido, asi
-# que saben algo que ninguna respuesta individual puede decir: si el MISMO
-# pedido falla en TODAS las rutas de la cadena, el factor comun es el
-# pedido, no todas las rutas a la vez -- y eso vale incluso para fallas que
-# `_es_error_del_cliente` no puede clasificar como evidencia del pedido
-# (un 403 de moderacion, un 451 legal/geografico, un timeout por un prompt
-# gigante, un 200 sin contenido de un modelo de razonamiento): las cuatro
-# son, correctamente, evidencia de LA RUTA por Parte 1 -- pero tambien las
-# cuatro son deterministas, CUALQUIER ruta le devuelve lo mismo a ESTE
-# pedido puntual.
-#
-# Regla: un fallo solo se COMMITEA hacia el contador de fallos duros de SU
-# ruta si, en esa MISMA vuelta de la cadena, alguna OTRA ruta tuvo exito --
-# evidencia real de que esa ruta en particular fallo, no el pedido. Si la
-# cadena se agota entera sin ningun exito Y tiene mas de una ruta, se
-# DESCARTAN todos los fallos de esa vuelta: con esta unica senal no hay
-# forma de distinguir "el pedido esta envenenado" de "las rutas fallaron
-# todas a la vez de verdad".
-#
-# Por que descartar y no, por ejemplo, contar la mitad: COOLDOWN ES UNA
-# EXCLUSION, lo contrario de confiabilidad (una MEDICION). Parte 1 le puso
-# el default "cuando no se sabe, contar" a confiabilidad porque ahi una
-# falsa alarma se autocorrige sola -- alguien mira el ranking, ve que la
-# ruta esta bien, sigue. Una ruta sana EXCLUIDA por error, en cambio, es
-# exactamente el apagon con luz verde que el mecanismo de cooldown existe
-# para prevenir -- asi que ante la misma duda, el default tiene que ser el
-# contrario: no excluir.
-#
-# `429` no pasa por este mecanismo -- sigue castigando de inmediato
-# (`_castigar`, sin pasar por `_fallos_seguidos`), sin importar el resto de
-# la cadena: es una senal inequivoca de la capacidad de ESA ruta ahora
-# mismo, no algo que un payload pueda inducir identico en varios
-# proveedores independientes a la vez.
-#
-# Una cadena de UNA sola ruta (la sonda de salud SIEMPRE lo es, ver
-# sondeo.py -- y tambien un pedido con un unico candidato posible) no tiene
-# con que compararse: sigue commiteando de inmediato, sin cambios. Es,
-# ademas, la salida de emergencia para una ruta genuinamente rota que ya no
-# tiene ninguna hermana sana en su cadena: la sonda (payload fijo, que
-# controla el propio gateway -- nunca ambiguo) la sigue enfriando aunque el
-# trafico real deje de poder hacerlo.
+# modo de falla realista, no un 500 limpio. Round 8 sigue resolviendo esto,
+# solo que ahora la ruta se excluye cuando SU PROPIA sonda confirma que esta
+# rota (arriba), no cuando el conteo de fallos del cliente llega a un tope.
 
 
 # Cuantos chunks sin nada util (role inicial, finish_reason, razonamiento
@@ -121,10 +168,10 @@ _SOBRE_ELECCION = frozenset({"index"})
 # salida silenciosa de la revision 3, con un codigo distinto cada vez.
 #
 # PRINCIPIO: cuando no se puede saber de quien es la culpa, HAY QUE
-# CONTARLO. Una falsa alarma se recupera sola -- alguien mira el ranking o
-# /health, ve que la ruta esta bien, sigue. Una salida silenciosa NO --
-# nadie mira nunca. Los costos son asimetricos, y el default tiene que
-# inclinarse hacia notar, no hacia callar.
+# CONTARLO -- para CONFIABILIDAD (una MEDICION, ver Almacen.registrar_evento
+# y _confiabilidad). Round 8 separa esto de EXCLUSION (cooldown): ver el
+# comentario de cabecera de UMBRAL_SOSPECHA para el principio opuesto que le
+# corresponde a esa otra pregunta.
 #
 # Por eso el default esta INVERTIDO: un 4xx es evidencia de LA RUTA salvo
 # que este en esta lista CORTA, y cada entrada tiene que poder justificarse
@@ -148,18 +195,18 @@ def _es_error_del_cliente(codigo: int) -> bool:
     """True SOLO si `codigo` esta en `_CODIGOS_EVIDENCIA_DE_PEDIDO` --
     evidencia GENUINA sobre el pedido, nunca sobre la ruta. Cualquier otro
     codigo (401, 403, 404, 405, 409, o el que un proveedor invente manana)
-    es evidencia de la ruta por DEFAULT y cuenta igual que un 500 hacia el
-    cooldown de fallos duros y hacia confiabilidad (ver
-    Almacen.registrar_evento) -- ver el comentario de cabecera del
-    conjunto para el principio completo ("cuando no se puede saber de
-    quien es la culpa, hay que contarlo").
+    es evidencia de la ruta por DEFAULT y cuenta igual que un 500 hacia
+    confiabilidad (ver Almacen.registrar_evento) -- ver el comentario de
+    cabecera del conjunto para el principio completo ("cuando no se puede
+    saber de quien es la culpa, hay que contarlo"). Desde round 8 esto ya
+    NO decide directamente ningun cooldown -- ver UMBRAL_SOSPECHA: esa es
+    una pregunta distinta, con un default distinto.
 
-    Solo los tres codigos de la lista corta NI cuentan hacia el cooldown NI
-    hacia confiabilidad: contarlos convertiria el error de UN cliente en un
-    apagon para TODOS. Verificado contra el registro real de 5 rutas: tres
-    pedidos malformados (400) seguidos bastan para dejar las cinco en
-    cooldown si se cuentan, con una llave DISTINTA recibiendo 503 mientras
-    tanto."""
+    Solo los tres codigos de la lista corta no cuentan hacia confiabilidad:
+    contarlos convertiria el error de UN cliente en una medicion mala para
+    TODOS. Verificado contra el registro real de 5 rutas: tres pedidos
+    malformados (400) seguidos bastaban para arrastrar la confiabilidad de
+    las cinco antes de que existiera esta exclusion."""
     return codigo in _CODIGOS_EVIDENCIA_DE_PEDIDO
 
 
@@ -232,20 +279,31 @@ class Proxy:
         self.http = cliente_http
         self.cooldowns: dict[str, float] = {}
         self._castigos: dict[str, int] = {}
-        self._fallos_seguidos: dict[str, int] = {}
+        # Round 8: marcas de tiempo de fallos de TRAFICO REAL por ruta,
+        # podadas a VENTANA_SOSPECHA_S en cada llamada -- ver _sospechar().
+        self._sospechas: dict[str, list[float]] = {}
+        self._ultimo_probe_bajo_demanda: dict[str, float] = {}
+        # Sondas bajo demanda en vuelo (asyncio.Task), por clave -- evita
+        # disparar dos sondas superpuestas contra la MISMA ruta si varios
+        # pedidos concurrentes cruzan el umbral casi al mismo tiempo, y le
+        # da a los tests un lugar donde esperar (`esperar_sondas_pendientes`).
+        self._sondas_en_curso: dict[str, asyncio.Task] = {}
 
     async def completar(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
-                        crudo: bool = False) -> Respuesta:
+                        crudo: bool = False, es_sonda: bool = False) -> Respuesta:
+        """`es_sonda=True` es exclusivamente para uso INTERNO (sondeo
+        periodico via `sondeo.sondear_salud`, y la sonda bajo demanda de
+        `_probar_bajo_demanda` -- nunca lo pasa un pedido de un cliente
+        real): cambia como se interpreta un fallo NO-429. Con
+        `es_sonda=False` (el default, todo trafico real) un fallo solo
+        acumula SOSPECHA (`_sospechar`, ver UMBRAL_SOSPECHA). Con
+        `es_sonda=True` un fallo castiga la ruta de inmediato
+        (`_castigar`), sin pasar por sospecha ni programar otra sonda:
+        una sonda ya ES la verificacion, no hay nada mas que confirmar."""
         intentos = 0
         ultimo_error = None
         ultimo_codigo = 0
         claves_del_pedido = {ruta.clave for ruta in rutas}
-        # Ver el comentario de cabecera de TOPE_FALLOS_SEGUIDOS (round 7):
-        # los fallos duros de esta vuelta se acumulan aca SIN commitear hacia
-        # `_fallos_seguidos` todavia -- recien se sabe si son evidencia de SU
-        # ruta (una hermana tuvo exito) o del pedido (la cadena entera
-        # fallo) al terminar de recorrerla.
-        fallos_pendientes: list[str] = []
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
@@ -306,26 +364,17 @@ class Proxy:
 
             if exito:
                 self._limpiar_castigo(ruta.clave)
-                # Una hermana tuvo exito en ESTA MISMA cadena: los fallos
-                # anteriores de esta vuelta SI son evidencia de sus rutas
-                # (no del pedido, que a esta ruta le fue bien) -- se
-                # commitean recien ahora.
-                self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
+                self._sospechas.pop(ruta.clave, None)
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
                 self._castigar(ruta.clave, ahora)
             elif not _es_error_del_cliente(codigo):
-                fallos_pendientes.append(ruta.clave)
+                if es_sonda:
+                    self._castigar(ruta.clave, ahora)
+                else:
+                    self._sospechar(ruta, ahora)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
-
-        # La cadena se agoto SIN NINGUN exito. Con una sola ruta no hay
-        # hermana con quien comparar -- se commitea igual que siempre (ver
-        # el comentario de cabecera de TOPE_FALLOS_SEGUIDOS). Con mas de
-        # una, el fallo es IDENTICO en todas: el factor comun es el pedido,
-        # no que las rutas hayan fallado todas a la vez -- se descartan.
-        if len(rutas) <= 1:
-            self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
 
         # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
         # mas alla de una sola llamada y puede tener castigadas rutas ajenas a
@@ -359,12 +408,13 @@ class Proxy:
         arriba) y ahi no hubo servicio real. Sirve para que el llamador pueda
         contar uso de pago (u otra cosa) atado a "esta ruta sirvio", sin
         arriesgarse a contar de mas ni de menos.
-        """
-        # Ver el comentario de cabecera de TOPE_FALLOS_SEGUIDOS (round 7) y
-        # el mismo mecanismo en completar(): se acumulan aca sin commitear
-        # hasta saber si son evidencia de la ruta (una hermana tuvo exito EN
-        # ESTA MISMA cadena) o del pedido (la cadena entera fallo igual).
-        fallos_pendientes: list[str] = []
+
+        Nunca se llama con `es_sonda` (round 8: sondeo.py jamas streamea) --
+        todo fallo aca es TRAFICO REAL, y CADA rama de fallo (status != 200,
+        stream sin contenido util, error de red, y el corte por
+        `if emitido:` que no puede seguir la cadena) pasa por `_sospechar`
+        por igual. Ninguna es un atajo que comprometa una ruta directo --
+        ese era justo el vector que motivo este round."""
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
@@ -389,11 +439,7 @@ class Proxy:
                         200, ahora)
                     evento_registrado = True
                     self._limpiar_castigo(ruta.clave)
-                    # Esta ruta tuvo exito: los fallos anteriores de ESTA
-                    # MISMA cadena si son evidencia de sus rutas (no del
-                    # pedido, que aca le fue bien) -- se commitean recien
-                    # ahora.
-                    self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
+                    self._sospechas.pop(ruta.clave, None)
                     if en_ruta_comprometida is not None:
                         en_ruta_comprometida(ruta)
 
@@ -404,7 +450,7 @@ class Proxy:
                         if resp.status_code == 429:
                             self._castigar(ruta.clave, ahora)
                         elif not _es_error_del_cliente(resp.status_code):
-                            fallos_pendientes.append(ruta.clave)
+                            self._sospechar(ruta, ahora)
                         self.almacen.registrar_evento(
                             ruta.clave, False, 0, resp.status_code, ahora,
                             es_error_cliente=_es_error_del_cliente(resp.status_code))
@@ -509,7 +555,7 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
-                            fallos_pendientes.append(ruta.clave)
+                            self._sospechar(ruta, ahora)
                         if pendientes:
                             # Lo retenido se va a la basura junto con el intento.
                             # Es lo correcto (nada de eso llego al cliente, asi
@@ -522,11 +568,11 @@ class Proxy:
                         if emitido:
                             # Ya se solto lo retenido (ver TOPE_PENDIENTES): no
                             # se puede empalmar otra ruta encima sin mezclar
-                            # dos respuestas. Se corta la cadena aca, no se
-                            # llega a saber si el resto tambien fallaba --
-                            # se commitea de inmediato (no es "la cadena se
-                            # agoto sola", es "se decidio no seguir").
-                            self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
+                            # dos respuestas. Round 8: este ERA el escape hatch
+                            # que comprometia la ruta sin comparar con nadie --
+                            # ahora es igual que cualquier otra rama de fallo,
+                            # `_sospechar` de arriba ya la registro, no hay
+                            # nada mas que commitear aca.
                             yield "data: [DONE]\n\n"
                             return
                         continue
@@ -537,20 +583,11 @@ class Proxy:
             except httpx.HTTPError:
                 if not evento_registrado:
                     self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
-                    fallos_pendientes.append(ruta.clave)
+                    self._sospechar(ruta, ahora)
                 if emitido:
-                    # Idem arriba: se corta la cadena aca, no se agoto sola.
-                    self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
                     yield "data: [DONE]\n\n"
                     return
                 continue
-
-        # La cadena se agoto SIN NINGUN exito. Mismo criterio que completar():
-        # con una sola ruta no hay hermana con quien comparar, se commitea
-        # igual que siempre; con mas de una, el fallo es identico en todas
-        # -- el factor comun es el pedido, se descartan.
-        if len(rutas) <= 1:
-            self._comprometer_fallos_pendientes(fallos_pendientes, ahora)
 
         yield 'data: {"error":{"message":"sin rutas disponibles"}}\n\n'
         yield "data: [DONE]\n\n"
@@ -561,45 +598,83 @@ class Proxy:
         self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_TOPE_S)
 
     def _limpiar_castigo(self, clave: str) -> None:
-        """Un exito borra TODO rastro de castigo previo -- 429 y fallos duros
-        por igual. Factorizado para que completar() y completar_stream()
-        (con su _registrar_exito_una_vez) no puedan desincronizarse en
-        cuales de los tres diccionarios limpian."""
+        """Un exito borra TODO rastro de castigo previo -- 429 y sondas
+        fallidas por igual. Factorizado para que completar() y
+        completar_stream() (con su _registrar_exito_una_vez) no puedan
+        desincronizarse en cuales diccionarios limpian."""
         self._castigos.pop(clave, None)
         self.cooldowns.pop(clave, None)
-        self._fallos_seguidos.pop(clave, None)
 
-    def _registrar_fallo(self, clave: str, ahora: float) -> None:
-        """Cuenta un intento fallido que NO fue un 429 (ese ya castiga solo,
-        ver _castigar). Un hiccup aislado no saca a una ruta sana de la
-        rotacion: recien al llegar a TOPE_FALLOS_SEGUIDOS fallos SEGUIDOS
-        (sin exito en el medio) se la castiga -- y el contador se reinicia
-        para exigir otra racha completa antes de volver a castigar.
+    def _sospechar(self, ruta: Ruta, ahora: float) -> None:
+        """Round 8: un fallo de TRAFICO REAL nunca excluye una ruta el
+        mismo -- solo acumula sospecha. Al cruzar UMBRAL_SOSPECHA dentro de
+        VENTANA_SOSPECHA_S, programa una sonda BAJO DEMANDA (mismo payload
+        fijo `PING` que la sonda periodica) EN SEGUNDO PLANO
+        (`asyncio.create_task`): no bloquea la respuesta al cliente que
+        disparo el umbral -- ese cliente no tiene por que pagar la latencia
+        extra de investigar una ruta ajena, y bloquear ahi ademas
+        arriesgaria colgar el pedido entero si la ruta esta de verdad
+        trabada (justo el escenario de TIMEOUT_S=90s que este mecanismo
+        existe para evitar). Es esa sonda -- nunca este metodo, nunca el
+        pedido del cliente -- la que decide si la ruta se castiga
+        (`completar(..., es_sonda=True)`, en `_probar_bajo_demanda`).
 
-        Privado a proposito (round 7): NO se llama directo desde
-        completar()/completar_stream() en el momento en que ocurre el fallo
-        -- eso fue el bug (cada ruta se juzgaba sola, sin mirar la cadena).
-        Los llamadores acumulan en una lista `fallos_pendientes` y recien la
-        pasan por `_comprometer_fallos_pendientes` cuando se sabe si son
-        evidencia de la ruta o del pedido. Ver el comentario de cabecera de
-        TOPE_FALLOS_SEGUIDOS para la regla completa."""
-        n = self._fallos_seguidos.get(clave, 0) + 1
-        if n >= TOPE_FALLOS_SEGUIDOS:
-            self._castigar(clave, ahora)
-            self._fallos_seguidos.pop(clave, None)
-        else:
-            self._fallos_seguidos[clave] = n
+        Las rutas de PAGO quedan AFUERA de este mecanismo por completo,
+        deliberadamente (ver el decisivo mas abajo): nunca se sondean (§8
+        del diseno, sondeo.py), y una sonda bajo demanda gastaria PLATA
+        REAL contra un proveedor de pago sin un dueno natural de esa
+        cuenta -- el tope diario (TOPE_PAGO_DIARIO) es POR LLAVE, no por
+        ruta, asi que no hay contra que cargarlo aca. Sin sonda posible,
+        no tiene sentido acumular sospecha que nunca se va a resolver: se
+        descarta antes de tocar `_sospechas`. Van ULTIMAS en la cadena de
+        todos modos (§7), asi que solo importan cuando TODO lo gratis ya
+        fallo o esta en cooldown -- el mismo escenario en el que `/health`
+        ya reporta el apagon (Task 13, ronda 6). Solo el 429 (que no pasa
+        por aca) las sigue pudiendo castigar."""
+        if ruta.tier == "pago":
+            return
+        marcas = self._sospechas.setdefault(ruta.clave, [])
+        marcas.append(ahora)
+        corte = ahora - VENTANA_SOSPECHA_S
+        marcas[:] = [m for m in marcas if m >= corte]
+        if len(marcas) < UMBRAL_SOSPECHA:
+            return
+        if ruta.clave in self._sondas_en_curso:
+            return  # ya hay una sonda en vuelo para esta ruta -- no duplicar
+        ultimo = self._ultimo_probe_bajo_demanda.get(ruta.clave, float("-inf"))
+        if ahora - ultimo < LIMITE_PROBE_BAJO_DEMANDA_S:
+            return  # rate-limitada -- la sospecha queda para la proxima oportunidad
+        self._ultimo_probe_bajo_demanda[ruta.clave] = ahora
+        tarea = asyncio.create_task(self._probar_bajo_demanda(ruta, ahora))
+        self._sondas_en_curso[ruta.clave] = tarea
+        tarea.add_done_callback(lambda _t, clave=ruta.clave: self._sondas_en_curso.pop(clave, None))
 
-    def _comprometer_fallos_pendientes(self, fallos_pendientes: list[str], ahora: float) -> None:
-        """Commitea hacia `_registrar_fallo` cada clave acumulada en
-        `fallos_pendientes` (mutandola en el llamador: la vacia al
-        terminar) -- el otro extremo del mecanismo de atribucion a nivel de
-        cadena, ver TOPE_FALLOS_SEGUIDOS. Un no-op sobre una lista vacia
-        (el caso comun: la enorme mayoria de las cadenas o tienen exito
-        directo o son de una sola ruta, donde el llamador commitea distinto)."""
-        for clave in fallos_pendientes:
-            self._registrar_fallo(clave, ahora)
-        fallos_pendientes.clear()
+    async def _probar_bajo_demanda(self, ruta: Ruta, ahora: float) -> None:
+        """La sonda que `_sospechar` programa. Reutiliza completar() con
+        `es_sonda=True` sobre una cadena de UNA sola ruta -- el mismo
+        camino que ya castiga/limpia de forma inequivoca -- y ademas dejo
+        constancia en `sondas` (tabla que alimenta tanto confiabilidad como
+        `Almacen.tiene_evidencia_de_vida`), exactamente como
+        `sondeo.sondear_salud` para la periodica: para el resto del
+        sistema, una sonda bajo demanda y una periodica son
+        indistinguibles, solo cambia quien la disparo."""
+        t0 = time.monotonic()
+        r = await self.completar([ruta], dict(PING), ahora, es_sonda=True)
+        ms = int((time.monotonic() - t0) * 1000)
+        self.almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
+                                     r.codigo_upstream, 0, 0, ahora)
+        self._sospechas.pop(ruta.clave, None)
+
+    async def esperar_sondas_pendientes(self) -> None:
+        """Solo para tests: las sondas bajo demanda corren en segundo plano
+        (ver _sospechar) para no sumarle latencia al pedido del cliente que
+        las disparo. Awaitear esto deja que las que esten en vuelo AHORA
+        terminen antes de afirmar sobre cooldowns/sondas -- sin esto, un
+        test que revisa `p.cooldowns` justo despues de disparar el umbral
+        puede correr antes de que la sonda en background haya corrido."""
+        tareas = list(self._sondas_en_curso.values())
+        if tareas:
+            await asyncio.gather(*tareas)
 
     @staticmethod
     def _limpiar(datos: dict, desenvolver_canvas: bool) -> str:

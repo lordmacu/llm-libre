@@ -70,8 +70,9 @@ def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
 
     El filtro de cooldown (mas abajo) va ANTES de mirar cualquiera de estos
     criterios: una ruta persistentemente rota o colgada no puede quedar
-    primera solo por tener la prioridad mas alta (ver Proxy._registrar_fallo,
-    que ahora tambien castiga fallos duros seguidos, no solo 429).
+    primera solo por tener la prioridad mas alta (round 8: el cooldown lo
+    dispara un 429 de inmediato o una SONDA que confirma que la ruta esta
+    rota -- ver Proxy._sospechar en proxy.py -- nunca el trafico real solo).
     """
     candidatas = compatibles(rutas, pedido)
     if not pedido.permitir_pago:
