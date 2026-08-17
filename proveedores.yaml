@@ -99,11 +99,16 @@ proveedores:
   # Decision del operador: sacarlo en vez de conseguir la clave. Las rutas ya
   # sincronizadas de "openrouter" NO quedan huerfanas -- ver
   # Almacen.desactivar_proveedores_no_registrados, que sondeo.sincronizar_catalogo
-  # llama en cada ciclo con el conjunto de ids que este archivo trae en ESE
-  # momento: un proveedor que ya no esta aca se apaga (activa=0, nunca se
-  # borra) solo, sin reiniciar nada a mano. El patron sigue documentado en
-  # docs/providers.md como ejemplo de registro "todo descubierto" con clave
-  # opcional -- volver a agregarlo es una entrada de YAML, no un cambio de
+  # llama en cada ciclo con el conjunto de ids que el PROCESO tiene cargado
+  # de este archivo: un proveedor que ya no esta aca se apaga (activa=0,
+  # nunca se borra) solo, sin tocar codigo. OJO (revision de gate): esta
+  # lista se carga UNA vez, al arrancar (`proveedores.cargar()` en
+  # `principal.crear_estado`) -- un edit a este archivo recien surte efecto
+  # despues de reiniciar el proceso; el barrido en si, una vez cargada la
+  # lista nueva, ya no necesita ninguna intervencion manual mas alla de ese
+  # reinicio. El patron sigue documentado en docs/providers.md como ejemplo
+  # de registro "todo descubierto" con clave opcional -- volver a agregarlo
+  # es una entrada de YAML, no un cambio de
   # codigo.
 
   - id: minimax

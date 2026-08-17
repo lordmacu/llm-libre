@@ -127,6 +127,19 @@ def test_desactivar_proveedores_no_registrados_es_idempotente(almacen):
     assert segunda == 0
 
 
+def test_desactivar_proveedores_no_registrados_con_conjunto_vacio_no_apaga_nada(almacen):
+    # Revision de gate: un `proveedores.yaml` sintacticamente valido pero
+    # con `proveedores: []` (mas probable un archivo truncado/mal editado
+    # que una decision real de "sin proveedores") no debe apagar el
+    # catalogo ENTERO en el primer ciclo -- un conjunto vacio se trata como
+    # "todavia no se sabe nada", no como "todos son huerfanos".
+    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo"),
+                          _ruta("c:free", proveedor="chatgpt")], momento=50.0)
+    apagadas = almacen.desactivar_proveedores_no_registrados(set())
+    assert apagadas == 0
+    assert {r.clave for r in almacen.rutas_activas()} == {"kilo/a:free", "chatgpt/c:free"}
+
+
 def test_la_calidad_sale_de_la_ultima_sonda_de_calidad(almacen):
     almacen.upsert_rutas([_ruta()], momento=100.0)
     almacen.registrar_sonda("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)

@@ -150,13 +150,36 @@ class Almacen:
         una llave que ya no existe, por ejemplo), sin que nada las apague.
 
         Se llama una vez por ciclo de sondeo, desde `sondeo.sincronizar_catalogo`,
-        con el conjunto de ids que `proveedores.yaml` trae EN ESE MOMENTO --
-        no una lista fija -- asi que sacar (o volver a agregar) un proveedor
-        del registro se refleja solo, en el proximo ciclo, sin tocar codigo
-        ni reiniciar a mano. Devuelve cuantas filas se apagaron, para que el
-        llamador pueda dejar un `log.warning` (un proveedor que desaparece
-        del registro es una decision del operador, pero vale la pena que
-        quede visible en los logs cuando de verdad tiene efecto)."""
+        con el conjunto de ids que el PROCESO tiene cargado de
+        `proveedores.yaml` en ese momento -- no una lista fija dentro de esta
+        funcion. Ojo con la precision de esa frase (revision de gate): esto
+        NO significa que un edit al YAML se refleje solo, sin reiniciar --
+        `proveedores.cargar()` se llama UNA sola vez, al arrancar el proceso
+        (`principal.crear_estado`), asi que ese conjunto queda fijo en
+        memoria hasta el proximo reinicio. Lo que SI es cierto: dado ese
+        conjunto (fijo hasta reiniciar), el barrido corre en CADA ciclo de
+        sondeo, asi que sacar (o volver a agregar) un proveedor se refleja
+        sin tocar codigo -- solo hace falta reiniciar el proceso una vez para
+        que cargue la lista nueva, despues de lo cual el barrido ya no
+        necesita ninguna intervencion manual adicional. Devuelve cuantas
+        filas se apagaron, para que el llamador pueda dejar un
+        `log.warning` (un proveedor que desaparece del registro es una
+        decision del operador, pero vale la pena que quede visible en los
+        logs cuando de verdad tiene efecto).
+
+        `proveedores_conocidos` vacio es un caso especial, a proposito
+        (LOW de una revision de gate): un `proveedores.yaml` sintacticamente
+        valido pero con `proveedores: []` (un archivo truncado o mal editado
+        a mano, mas probable que una decision real de "sin proveedores") NO
+        dispara el barrido -- se trata como "todavia no se sabe nada", no
+        como "todos son huerfanos", porque lo segundo apagaria el catalogo
+        ENTERO en el primer ciclo de sondeo despues de un typo de config,
+        sin ningun otro sintoma previo que avisara. Alcanzable solo con un
+        edit deliberado del YAML, y totalmente recuperable (las rutas se
+        reactivan solas en el proximo ciclo si el registro vuelve a traerlas)
+        -- pero el guard es gratis."""
+        if not proveedores_conocidos:
+            return 0
         filas = self._con.execute(
             "SELECT DISTINCT proveedor FROM rutas WHERE activa = 1").fetchall()
         huerfanos = [p for (p,) in filas if p not in proveedores_conocidos]

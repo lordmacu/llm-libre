@@ -363,6 +363,19 @@ async def test_sincronizar_no_desactiva_rutas_de_proveedores_que_siguen_registra
     assert claves == {"kilo/x:free", "minimax/MiniMax-M3"}
 
 
+async def test_sincronizar_con_registro_vacio_no_apaga_el_catalogo_entero():
+    # Revision de gate: `proveedores=[]` (un `proveedores.yaml` sintacticamente
+    # valido pero truncado/mal editado, mas probable que "sin proveedores" a
+    # proposito) no debe disparar el barrido de huerfanos -- ver el guard en
+    # Almacen.desactivar_proveedores_no_registrados.
+    almacen = _almacen()
+    almacen.upsert_rutas([_ruta("previa:free", proveedor="kilo")], momento=50.0)
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=CATALOGO)))
+    await sincronizar_catalogo(http, [], almacen, ahora=100.0)
+    assert {r.clave for r in almacen.rutas_activas()} == {"kilo/previa:free"}
+
+
 async def test_sincronizar_catalogo_no_deja_escapar_la_excepcion_de_un_proveedor_roto():
     # Dos formas distintas de "proveedor roto" (cuerpo no-JSON y JSON con forma
     # inesperada) conviviendo con uno sano: si la excepcion escapara, este
