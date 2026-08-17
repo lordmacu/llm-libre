@@ -537,84 +537,99 @@ async def test_un_500_se_registra_sin_marca_de_error_del_cliente():
     assert fila == (0, 0)
 
 
-# --- Round 4: 408 y 425 excluidos de "error del cliente". Round 5: ese
-#     fix estaba en el EJE EQUIVOCADO -- "es reintentable?" en vez de "de
-#     quien es la culpa, el pedido o la ruta?". Para 408/425 los dos ejes
-#     coinciden (por eso el resultado era correcto), pero para
-#     401/402/403/404 DIVERGEN: no son reintentables Y SI son evidencia de
-#     la ruta a la vez, y quedaban mal archivados del lado del cliente.
-#     Medido: las 5 rutas devolviendo 401 dejaba al cliente con 503 en el
-#     100% de los pedidos mientras /health seguia en "ok" -- el apagon con
-#     luz verde que /health existe para prevenir, y sin otro backstop para
-#     las rutas de pago (nunca sondeadas).
+# --- Round 6: el EJE (atribucion) seguia siendo el correcto, pero la
+#     IMPLEMENTACION lo invertia -- "todo 4xx es evidencia del pedido SALVO
+#     estos siete codigos" es un default que oculta cualquier codigo en el
+#     que nadie penso todavia. La prueba: agregar 405 al conjunto de
+#     "evidencia de ruta" (o simplemente no pensarlo, que es lo que paso
+#     con 401/403/404 en la ronda 5) deja la suite en verde igual. Medido
+#     el costo: las 5 rutas devolviendo 405 (o 409/415/418/431/451,
+#     cualquier 4xx que nadie anticipo) dejaba al cliente con 503 en el
+#     100% de los pedidos, CERO cooldowns, y /health en 200 "ok" -- la
+#     ronda 3, verbatim, con otro codigo.
 #
-#     La pregunta que decide, para CUALQUIER codigo nuevo: ¿el MISMO pedido
-#     fallaria IDENTICO contra una ruta SANA? y ¿un pedido DISTINTO tendria
-#     EXITO contra ESTA MISMA ruta? Las dos "si" -> evidencia del PEDIDO. Si
-#     CUALQUIERA es "no" -> evidencia de LA RUTA, cuenta como un 500. ---
+#     PRINCIPIO (va en el codigo y en el spec S7): cuando no se puede saber
+#     de quien es la culpa, HAY QUE CONTARLO. Una falsa alarma se recupera
+#     sola -- alguien mira el ranking o /health, ve que la ruta esta bien,
+#     sigue. Una salida silenciosa NO -- nadie mira nunca. Los costos son
+#     asimetricos, y el default tiene que inclinarse hacia notar.
+#
+#     El default se invierte: un 4xx es evidencia de LA RUTA salvo que este
+#     en una lista CORTA y justificada de codigos genuinamente sobre el
+#     payload. 429/408/425 ya NO necesitan estar en ninguna lista: bajo el
+#     default invertido caen del lado de la ruta solos -- buena senal de
+#     que la forma es la correcta. ---
 
-def test_408_y_425_son_evidencia_de_la_ruta():
-    assert _es_error_del_cliente(408) is False
-    assert _es_error_del_cliente(425) is False
+def test_400_413_422_son_evidencia_del_pedido():
+    assert _es_error_del_cliente(400) is True    # Bad Request: ni se pudo interpretar
+    assert _es_error_del_cliente(413) is True    # Payload Too Large: el TAMAÑO de este pedido
+    assert _es_error_del_cliente(422) is True    # Unprocessable: invalido para ESTE pedido
 
 
-def test_401_402_403_404_son_evidencia_de_la_ruta_no_del_pedido():
-    # Pin del EJE, no de la lista de hoy: estos cuatro NO son reintentables
-    # en espiritu (lo opuesto de 408/425) pero SI son evidencia sobre la
-    # RUTA -- 401 la clave vencio o se roto, 402 sin credito (OpenRouter
-    # "insufficient credits"), 403 cuenta suspendida o moderacion del lado
-    # del proveedor, 404 model_not_found (literalmente el modelo que este
-    # proyecto existe para detectar que se pudrio). Si alguien los
-    # reclasifica de vuelta al lado del cliente razonando "no es
-    # reintentable => no cuenta" (el eje EQUIVOCADO que motivo esta
-    # ronda), este test se pone rojo.
-    for codigo in (401, 402, 403, 404):
+def test_el_default_es_evidencia_de_ruta_para_todo_el_rango_4xx():
+    # Pin del EJE, no de una lista: se recorre el rango 4xx COMPLETO (no una
+    # muestra de codigos que alguien penso hoy) contra una copia
+    # INDEPENDIENTE de la lista corta esperada -- no se importa
+    # _CODIGOS_EVIDENCIA_DE_PEDIDO para la comparacion. Si alguien agrega un
+    # codigo (405, el que uso el reviewer para probar el mutante de la
+    # ronda anterior; o cualquier otro, conocido o no) al conjunto real sin
+    # que este test tambien cambie, se pone rojo: fuerza que CUALQUIER
+    # ampliacion de la lista corta pase por una decision deliberada y
+    # documentada aca, no un cambio silencioso en proxy.py.
+    lista_corta_esperada = {400, 413, 422}
+    for codigo in range(400, 500):
+        si_es_pedido = codigo in lista_corta_esperada
+        assert _es_error_del_cliente(codigo) is si_es_pedido, codigo
+
+
+def test_401_402_403_404_408_425_429_siguen_como_evidencia_de_ruta():
+    # Regresion de las rondas 4/5: estos siete ya NO estan en ningun
+    # conjunto explicito (el default invertido los cubre solos), pero el
+    # comportamiento tiene que seguir siendo el mismo.
+    for codigo in (401, 402, 403, 404, 408, 425, 429):
         assert _es_error_del_cliente(codigo) is False, codigo
 
 
-def test_400_y_422_siguen_siendo_evidencia_del_pedido():
-    # El contraste: estos SI cumplen las dos preguntas -- un payload
-    # invalido (400) o una validacion semantica del cuerpo (422) rompe
-    # CUALQUIER ruta sana igual, y un pedido distinto (bien formado) andaria
-    # bien contra esta misma ruta.
-    for codigo in (400, 422):
-        assert _es_error_del_cliente(codigo) is True, codigo
+async def test_tres_405_seguidos_castigan_la_ruta():
+    # El codigo exacto que el reviewer uso para probar el mutante: nadie
+    # penso en 405 explicitamente, y bajo el default invertido eso ya no
+    # importa -- cualquier codigo no listado cuenta hacia el cooldown.
+    p = _proxy(lambda req: httpx.Response(405))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" in p.cooldowns
 
 
-async def test_tres_401_402_403_404_seguidos_castigan_la_ruta():
-    for codigo in (401, 402, 403, 404):
+async def test_405_se_registra_sin_marca_de_error_del_cliente():
+    p = _proxy(lambda req: httpx.Response(405))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    fila = p.almacen._con.execute(
+        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+    assert fila == (0, 0)
+
+
+async def test_tres_409_415_418_431_451_seguidos_castigan_la_ruta():
+    # Mas codigos que "nadie penso" -- 409 Conflict, 415 Unsupported Media
+    # Type, 418 (el teapot), 431 Request Header Fields Too Large, 451
+    # Unavailable For Legal Reasons. Ninguno esta en ninguna lista, y todos
+    # tienen que contar igual bajo el default invertido.
+    for codigo in (409, 415, 418, 431, 451):
         p = _proxy(lambda req, c=codigo: httpx.Response(c))
         for i in range(TOPE_FALLOS_SEGUIDOS):
             await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
         assert "kilo/a:free" in p.cooldowns, codigo
 
 
-async def test_401_402_403_404_se_registran_sin_marca_de_error_del_cliente():
-    for codigo in (401, 402, 403, 404):
-        p = _proxy(lambda req, c=codigo: httpx.Response(c))
-        await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
-        fila = p.almacen._con.execute(
-            "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
-        assert fila == (0, 0), codigo
+async def test_tres_400_422_seguidos_no_castigan():
+    for codigo in (400, 422):
+        p = _proxy(lambda req, c=codigo: httpx.Response(c, json={"error": "x"}))
+        for i in range(TOPE_FALLOS_SEGUIDOS):
+            await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+        assert "kilo/a:free" not in p.cooldowns, codigo
 
 
-async def test_tres_422_seguidos_no_castigan_la_ruta():
-    p = _proxy(lambda req: httpx.Response(422, json={"error": "unprocessable"}))
+async def test_tres_413_seguidos_no_castigan():
+    p = _proxy(lambda req: httpx.Response(413, json={"error": "payload too large"}))
     for i in range(TOPE_FALLOS_SEGUIDOS):
         await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
     assert "kilo/a:free" not in p.cooldowns
-
-
-async def test_tres_408_seguidos_si_castigan_la_ruta():
-    p = _proxy(lambda req: httpx.Response(408))
-    for i in range(TOPE_FALLOS_SEGUIDOS):
-        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
-    assert "kilo/a:free" in p.cooldowns
-
-
-async def test_un_408_se_registra_sin_marca_de_error_del_cliente():
-    p = _proxy(lambda req: httpx.Response(408))
-    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
-    fila = p.almacen._con.execute(
-        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
-    assert fila == (0, 0)

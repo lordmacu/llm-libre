@@ -63,65 +63,58 @@ _SOBRE_CHUNK = frozenset({"id", "object", "created", "model",
 _SOBRE_ELECCION = frozenset({"index"})
 
 
-# El eje de clasificacion es ATRIBUCION, no "es reintentable" (ese fue el
-# error de diseno de la revision anterior: 401/403/404 no son reintentables
-# Y SI son evidencia de la ruta a la vez, asi que quedaban mal archivados
-# del lado del cliente -- ver mas abajo).
+# El eje de clasificacion siempre fue ATRIBUCION ("de quien es la culpa, el
+# pedido o la ruta"), pero hasta la revision round 6 la IMPLEMENTACION lo
+# invertia: "todo 4xx es evidencia del pedido SALVO estos siete codigos".
+# Ese default oculta cualquier codigo en el que nadie penso todavia -- el
+# reviewer probo el mutante agregando 405 al conjunto de "si cuenta" y la
+# suite entera seguia en verde, porque nada pinneaba el DEFAULT, solo la
+# lista. Medido el costo: las 5 rutas devolviendo 405 (o 409/415/418/431
+# /451, cualquier 4xx que nadie anticipo) dejaba al cliente con 503 en el
+# 100% de los pedidos, CERO cooldowns, y /health en 200 "ok" -- la misma
+# salida silenciosa de la revision 3, con un codigo distinto cada vez.
 #
-# La pregunta que decide, para CUALQUIER codigo 4xx nuevo que un proveedor
-# empiece a devolver: ¿el MISMO pedido fallaria IDENTICO contra una ruta
-# SANA? y ¿un pedido DISTINTO tendria EXITO contra ESTA MISMA ruta? Si las
-# dos respuestas son "si" -> evidencia del PEDIDO (un payload invalido, un
-# parametro que el proveedor no soporta, una secuencia de roles invalida
-# rompen CUALQUIER ruta sana igual, y no dicen nada sobre si ESTA ruta esta
-# bien) -- va en `_CODIGOS_EVIDENCIA_DE_RUTA` NO. Si CUALQUIERA de las dos
-# es "no" -> evidencia de LA RUTA, y tiene que contar igual que un 500 hacia
-# el cooldown de fallos duros y hacia confiabilidad -- va SI en el frozenset
-# de aca abajo, con el motivo:
-_CODIGOS_EVIDENCIA_DE_RUTA = frozenset({
-    401,  # la clave del proveedor vencio o se roto -- OTRA clave andaria
-          # bien con el MISMO pedido; evidencia de la ruta, no del pedido.
-    402,  # sin credito (OpenRouter "insufficient credits") -- recargar
-          # arregla CUALQUIER pedido contra esta ruta, el pedido no importa.
-    403,  # cuenta suspendida o moderacion del lado del proveedor -- no es
-          # que el payload este mal, es que ESTA ruta no sirve mas.
-    404,  # model_not_found: literalmente "el modelo se pudrio", el
-          # problema central que este proyecto existe para detectar (§1 del
-          # diseno). Medido: hasta 5h entre sincronizaciones de catalogo sin
-          # otro backstop, y las rutas de pago (nunca sondeadas) no tienen
-          # NINGUN otro backstop.
-    408,  # el upstream se colgo esperando -- el mismo sintoma que motivo
-          # todo este cooldown de fallos duros, no una nuance del pedido.
-    425,  # nuance de protocolo/TLS (replay contra ESTA conexion), no un
-          # payload invalido.
-    429,  # rate-limit: tiene su propio castigo INMEDIATO (ver _castigar),
-          # no pasa por el cooldown de fallos duros -- pero conceptualmente
-          # tambien es evidencia de la ruta (su capacidad ahora mismo), no
-          # del pedido, y por eso vive en este mismo conjunto.
+# PRINCIPIO: cuando no se puede saber de quien es la culpa, HAY QUE
+# CONTARLO. Una falsa alarma se recupera sola -- alguien mira el ranking o
+# /health, ve que la ruta esta bien, sigue. Una salida silenciosa NO --
+# nadie mira nunca. Los costos son asimetricos, y el default tiene que
+# inclinarse hacia notar, no hacia callar.
+#
+# Por eso el default esta INVERTIDO: un 4xx es evidencia de LA RUTA salvo
+# que este en esta lista CORTA, y cada entrada tiene que poder justificarse
+# en una linea como evidencia GENUINA del payload -- nunca de la ruta. Todo
+# lo demas, conocido hoy o no, cuenta igual que un 500. `429`/`408`/`425`
+# ya NO necesitan estar en ninguna lista (antes SI, del lado de "no
+# cuenta"): bajo este default caen solos del lado de la ruta, que es una
+# buena senal de que la forma es la correcta.
+_CODIGOS_EVIDENCIA_DE_PEDIDO = frozenset({
+    400,  # Bad Request: el cuerpo no se pudo ni interpretar -- es sobre la
+          # SINTAXIS de este pedido, nunca sobre si la ruta sirve.
+    413,  # Payload Too Large: el TAMAÑO de ESTE pedido excede un limite --
+          # un pedido mas chico andaria bien contra la MISMA ruta.
+    422,  # Unprocessable Entity: sintacticamente valido pero invalido para
+          # ESTE pedido puntual (un parametro fuera de rango, un tipo
+          # equivocado) -- no dice nada sobre si la ruta esta sana.
 })
 
 
 def _es_error_del_cliente(codigo: int) -> bool:
-    """True si `codigo` es evidencia sobre el PEDIDO, no sobre la ruta --
-    ver `_CODIGOS_EVIDENCIA_DE_RUTA` para el eje completo (atribucion, no
-    "es reintentable") y el motivo de cada codigo que queda del otro lado.
-    Un error asi (400, 422, ...) NI cuenta hacia el cooldown de fallos
-    duros NI hacia confiabilidad (ver Almacen.registrar_evento): contarlo
-    convertiria el error de UN cliente en un apagon para TODOS.
+    """True SOLO si `codigo` esta en `_CODIGOS_EVIDENCIA_DE_PEDIDO` --
+    evidencia GENUINA sobre el pedido, nunca sobre la ruta. Cualquier otro
+    codigo (401, 403, 404, 405, 409, o el que un proveedor invente manana)
+    es evidencia de la ruta por DEFAULT y cuenta igual que un 500 hacia el
+    cooldown de fallos duros y hacia confiabilidad (ver
+    Almacen.registrar_evento) -- ver el comentario de cabecera del
+    conjunto para el principio completo ("cuando no se puede saber de
+    quien es la culpa, hay que contarlo").
 
-    Verificado contra el registro real de 5 rutas: tres pedidos malformados
-    seguidos bastan para dejar las cinco en cooldown, con una llave
-    DISTINTA recibiendo 503 mientras tanto; 26 pedidos malformados seguidos
-    de una llave bastan para tirar confiabilidad por el piso y dejar
-    /health en "caido" -- persistente en el volumen de /datos, asi que ni
-    un reinicio del proceso lo limpia; y las 5 rutas devolviendo 401 (mal
-    clasificado como error del cliente en una revision anterior) dejaba al
-    cliente con 503 en el 100% de los pedidos mientras /health seguia
-    diciendo "ok" -- el apagon con luz verde que /health existe para
-    prevenir, y para MiniMax (nunca sondeado) sin ningun otro backstop.
-    Antes del cooldown de fallos duros (Task 13) un 400 solo perjudicaba al
-    cliente que lo mando; tiene que seguir siendo asi."""
-    return 400 <= codigo < 500 and codigo not in _CODIGOS_EVIDENCIA_DE_RUTA
+    Solo los tres codigos de la lista corta NI cuentan hacia el cooldown NI
+    hacia confiabilidad: contarlos convertiria el error de UN cliente en un
+    apagon para TODOS. Verificado contra el registro real de 5 rutas: tres
+    pedidos malformados (400) seguidos bastan para dejar las cinco en
+    cooldown si se cuentan, con una llave DISTINTA recibiendo 503 mientras
+    tanto."""
+    return codigo in _CODIGOS_EVIDENCIA_DE_PEDIDO
 
 
 def _timeout_de(proveedor) -> float:
