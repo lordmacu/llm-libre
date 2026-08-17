@@ -131,7 +131,7 @@ gasto de pago igual queda registrado y visible por otra vía: consultar
 | `GET /v1/models` | El catálogo normalizado (formato OpenAI) más los alias `auto*` |
 | `GET /v1/ranking` | Puntaje de cada ruta (con `prioridad`) y sus componentes desglosados, **ordenado con la misma clave que usa el router** — cooldown incluido: una ruta castigada (`en_cooldown_hasta` en la fila) va al final, aunque puntúe mejor que todas — para auditar por qué el router eligió lo que eligió, sin que la fila de arriba contradiga a `X-Ruta-Usada` |
 | `GET /v1/uso` | Consumo de pago del día para la llave que llama, contra su tope diario |
-| `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. Una ruta cuenta como viva por **evidencia positiva** (un éxito reciente, o una sonda de salud reciente exitosa, o ninguna telemetría todavía) — no por un promedio de confiabilidad, que un solo cliente puede envenenar. No requiere llave |
+| `GET /health` | Honesto: `ok` solo si hay al menos una ruta gratis viva; `degradado` si solo queda pago; `caido` si no hay nada servible. Una ruta cuenta como viva por **evidencia positiva** (un éxito reciente, o ninguna telemetría todavía) — no por un promedio de confiabilidad, que un solo cliente puede envenenar. Una sonda fallida sola no alcanza para declararla muerta: hacen falta dos consecutivas, sin éxito de por medio. No requiere llave |
 
 ## Configuración
 
@@ -360,28 +360,70 @@ sondea aproximadamente una vez al día— vuelve a cero.
   extensión.
 
   El cambio es estructural, no un séptimo predicado: un fallo de tráfico
-  real ya NO cuenta hacia ningún cooldown directamente — solo acumula
-  *sospecha*, que no excluye nada. Al cruzar un umbral (3 fallos en 10
-  minutos) se dispara, en segundo plano, una sonda PROPIA con el mismo
-  payload fijo (`PING`) que ya usa el sondeo periódico de salud — y es esa
-  sonda, nunca el pedido del cliente, la que decide: si falla, castiga (el
-  mismo backoff de siempre); si pasa, la sospecha se limpia. La razón por
-  la que esto cierra los seis vectores de una vez: el payload de una sonda
-  lo escribe el gateway — no hay nada que atribuir, así que un fallo contra
-  ella es evidencia inequívoca de la ruta, sin excepción posible. Las
-  sondas bajo demanda están *rate-limitadas* a una por ruta cada 60 s, así
-  que el costo extra que una sola llave hostil le puede imponer a una ruta
-  queda topeado sin importar cuántos pedidos mande — y como el payload es
-  del gateway, esa llave jamás puede hacer que la sonda falle. **Costo para
-  el atacante: como mucho, sondeo extra acotado (≤60 pedidos/hora por
-  ruta) — nunca la caída de una ruta sana.**
+  real ya NO cuenta hacia ningún cooldown directamente — solo incrementa un
+  contador de fallos CONSECUTIVOS por ruta (*sospecha*, que no excluye
+  nada y se reinicia a 0 en cualquier éxito, **sin ventana de tiempo** —
+  una versión anterior contaba "3 fallos en 10 minutos", y tráfico más
+  lento que esa ventana nunca juntaba el umbral: medido, 80 fallos
+  consecutivos espaciados apenas más que la ventana no disparaban ninguna
+  sonda, dejando una ruta muerta de un despliegue de tráfico bajo primera
+  en la cola para siempre). Al llegar al umbral (3) se dispara, en segundo
+  plano, una sonda PROPIA con el mismo payload fijo (`PING`) que ya usa el
+  sondeo periódico de salud — y es esa sonda, nunca el pedido del cliente,
+  la que decide: si falla, castiga; si pasa, la sospecha se limpia. La
+  razón por la que esto cierra los seis vectores de una vez: el payload de
+  una sonda lo escribe el gateway — no hay nada que atribuir, así que un
+  fallo contra ella es evidencia inequívoca de la ruta, sin excepción
+  posible. Una sonda exitosa nunca cancela un cooldown MÁS NUEVO que ella
+  (p.ej. un 429 real que llegó mientras la sonda seguía en vuelo) — si no,
+  un cliente podría usar una sonda para cancelar el "paráte" explícito de
+  un proveedor.
 
-  `429` sigue exactamente igual (castiga de inmediato, sin pasar por
-  sospecha ni sonda: es evidencia inequívoca por sí solo). Las rutas de
-  **pago** quedan afuera del mecanismo entero, deliberadamente: nunca se
-  sondean, y una sonda bajo demanda gastaría plata real sin una llave
-  dueña de ese gasto — solo el `429` las sigue pudiendo castigar. Una ruta
-  genuinamente rota, con una hermana sana en su misma cadena, sigue
-  cayendo en el mismo número de pedidos que antes; una rota sin hermana
-  (o un *pool* entero genuinamente caído) se enfría en el orden de
-  segundos/pedidos vía su propia sonda, sin esperar el ciclo de 5 h.
+  Las sondas bajo demanda están *rate-limitadas* a una por ruta cada 60 s
+  **y, además, a un tope AGREGADO** (5/min, sumando todas las rutas): el
+  límite por ruta no acota el agregado cuando el catálogo tiene N rutas —
+  medido, 11 rutas sin tope global suman 15.840 pedidos extra por día
+  contra la misma cuota que necesita el tráfico real, y N no lo controla
+  el operador (sale del catálogo vivo). Con los dos límites, el costo
+  extra que una sola llave hostil le puede imponer queda topeado sin
+  importar cuántos pedidos mande ni cuántas rutas tenga el catálogo — y
+  como el payload es del gateway, esa llave jamás puede hacer que la sonda
+  falle. **Costo para el atacante: como mucho, sondeo extra acotado (≤60
+  pedidos/hora por ruta, también acotado en el agregado) — nunca la caída
+  de una ruta sana.**
+
+  `429` sigue castigando de inmediato, sin pasar por sospecha ni sonda —
+  evidencia inequívoca por sí solo — pero **ya no reutiliza el backoff
+  exponencial de una sonda confirmada** (que podía escalar hasta una
+  hora): se respeta el `Retry-After` del proveedor cuando lo manda, o un
+  default corto si no, siempre topeado bien por debajo de una hora —
+  medido, 12 pedidos de una llave alcanzaban para enfriar 3 rutas vía 429
+  real por mucho más tiempo del que la propia ventana de rate-limit del
+  proveedor justifica.
+
+  Las rutas de **pago** quedan afuera de sospecha+sonda (nunca se
+  sondean, y una sonda gastaría plata real sin una llave dueña de ese
+  gasto) — pero SÍ tienen un castigo directo propio, con el mismo umbral,
+  sin sonda: dejarlas totalmente afuera del mecanismo, sin reemplazo,
+  dejaba una ruta de pago rota facturando cada pedido para siempre sin que
+  nada la excluyera (medido: 40/40 llamadas facturables, cero cooldowns).
+  Bounded por ser el último escalón de la cadena. Uso de pago, además,
+  ahora se cuenta por lo FACTURABLE (cualquier `200` de una ruta de pago,
+  la sirva o no — un 200-vacío también genera tokens que el proveedor
+  cobra), no solo por lo exitoso: antes un 200-vacío se facturaba de
+  verdad y quedaba invisible para `/v1/uso` y el tope diario.
+
+  Una ruta genuinamente rota, con una hermana sana en su misma cadena,
+  sigue cayendo en el mismo número de pedidos que antes; una rota sin
+  hermana (o un *pool* entero genuinamente caído) se enfría en el orden de
+  segundos/pedidos vía su propia sonda, sin esperar el ciclo de 5 h — y el
+  cooldown que esa sonda deja se estampa con cuánto tardó la sonda, no con
+  cuándo arrancó (si no, una sonda que tarda el timeout completo nace con
+  ese tiempo ya "comido" del backoff).
+
+  Un cliente ahora controla, indirectamente, cuándo se sondea una ruta —
+  hasta 60/h vía sospecha, contra 1 cada `SONDEO_SALUD_HORAS` del ciclo
+  periódico, ~300× más muestreo posible — lo que sube la chance de agarrar
+  un blip transitorio del proveedor justo en una sonda. Por eso `/health`
+  exige **dos** sondas fallidas consecutivas (sin éxito de por medio), no
+  una sola, antes de tratarlo como evidencia de muerte.

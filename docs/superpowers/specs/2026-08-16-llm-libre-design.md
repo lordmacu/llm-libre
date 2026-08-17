@@ -446,21 +446,35 @@ resultado) y gana la que tenga el `momento` más nuevo:
   más confiable que existe porque el gateway controla su propio payload: un `4xx` contra
   una sonda es *siempre* evidencia de la ruta, nunca hay ambigüedad de "contenido del
   cliente" posible — la ruta cuenta como viva;
-- si la señal más nueva es una sonda **fallida** — la ruta cuenta como muerta. **Corregido
-  en una séptima revisión**: la versión anterior solo miraba sondas exitosas, así que un
+- si la señal más nueva es una sonda **fallida**, y la SEGUNDA más nueva (sin ningún éxito
+  entre las dos) TAMBIÉN es una sonda fallida — la ruta cuenta como muerta. **Corregido en
+  una séptima revisión**: la versión anterior solo miraba sondas exitosas, así que un
   éxito real dentro de la ventana (p.ej. hace 20 h) seguía contando como viva aunque
-  hubiera sondas fallidas *después* de ese éxito (cuatro, una cada 5 h, la última hace 1 h)
-  — el mismo argumento que ya justificaba confiar en una sonda exitosa (payload controlado
-  por el gateway, nunca ambiguo) vale igual para una fallida: es evidencia inequívoca de
-  que la ruta está rota, no solo de que está viva, y mirar solo la mitad del argumento
-  dejaba `/health` en `ok` durante toda la ventana mientras cada cliente real recibía `503`;
-- si no hay ninguna señal (ni éxito ni sonda) dentro de la ventana, se cae al chequeo de
-  **sin telemetría real en absoluto** — una ruta recién sincronizada no nace muerta,
-  todavía no tuvo su primera oportunidad (el mismo principio que ya regía con el valor
-  neutro de `confiabilidad`, ahora expresado sin depender de esa métrica). Los eventos con
-  `es_error_cliente=1` (400/413/422, ver §7) tampoco cuentan como telemetría real para este
-  chequeo: una ruta que solo recibió pedidos malformados está en el mismo lugar que una sin
-  tráfico.
+  hubiera sondas fallidas *después* de ese éxito — el mismo argumento que ya justificaba
+  confiar en una sonda exitosa (payload controlado por el gateway, nunca ambiguo) vale
+  igual para una fallida.
+
+  **Corregido de nuevo en una novena revisión: UNA sonda fallida sola ya no alcanza —
+  hacen falta DOS consecutivas.** Desde que el tráfico real puede disparar sondas BAJO
+  DEMANDA (§7), un cliente controla indirectamente CUÁNDO se muestrea una ruta — hasta
+  60/h, contra 1 cada `SONDEO_SALUD_HORAS` (5h por defecto) del ciclo periódico, un
+  aumento de ~300× en la frecuencia de muestreo posible. Más muestras significa más
+  chances de agarrar, por puro azar, un blip transitorio del proveedor justo en UNA
+  sonda — y que `/health` lo trate como veredicto definitivo, que sobrevive un reinicio
+  de contenedor. Exigir dos consecutivas (sin éxito de por medio) deja que un problema
+  genuinamente transitorio se resuelva solo (la próxima sonda o el próximo pedido real,
+  casi siempre exitosos) antes de que `/health` lo dé por muerto, sin perder detección
+  rápida de un apagón real — una ruta de verdad rota sigue fallando la SEGUNDA sonda
+  igual que la primera. Un éxito sigue alcanzando con uno solo: la asimetría
+  "un éxito prueba vida, un fallo aislado no prueba muerte" ahora también aplica DENTRO
+  de la comparación entre sondas, no solo entre sonda y evento real;
+- si no hay ninguna señal suficiente (ni éxito, ni dos sondas fallidas consecutivas)
+  dentro de la ventana, se cae al chequeo de **sin telemetría real en absoluto** — una
+  ruta recién sincronizada no nace muerta, todavía no tuvo su primera oportunidad (el
+  mismo principio que ya regía con el valor neutro de `confiabilidad`, ahora expresado
+  sin depender de esa métrica). Los eventos con `es_error_cliente=1` (400/413/422, ver
+  §7) tampoco cuentan como telemetría real para este chequeo: una ruta que solo recibió
+  pedidos malformados está en el mismo lugar que una sin tráfico.
 
 **Los fallos reales (`eventos.ok=0`), solos, nunca son suficientes para declarar una ruta
 muerta aquí** — siguen siendo ambiguos (un `403` puede ser moderación de contenido de un
@@ -674,50 +688,76 @@ Por ruta:
   modelo de razonamiento que se gasta el presupuesto, una cadena corta, un early-return de
   streaming) puede tocar el payload de una sonda, porque el cliente nunca lo escribe.
 
-  Mecánica (`Proxy._sospechar`, `Proxy._probar_bajo_demanda`):
+  Mecánica (`Proxy._sospechar`, `Proxy._sospechar_pago`, `Proxy._probar_bajo_demanda`):
 
   - Un fallo de tráfico real (no-429, no evidencia-de-pedido) ya NO se computa hacia
-    ningún cooldown — solo se agrega a una lista de marcas de tiempo por ruta
-    (`_sospechas`), que se poda a `VENTANA_SOSPECHA_S` (10 min) en cada llamada. La
-    sospecha DECAE a propósito: mucho más corta que "horas", así que fallos de un
-    incidente real disperso en el tiempo nunca se suman para disparar una sonda espuria.
-  - Al cruzar `UMBRAL_SOSPECHA` (3, el mismo número que el viejo `TOPE_FALLOS_SEGUIDOS`)
-    marcas dentro de la ventana, se programa — en SEGUNDO PLANO (`asyncio.create_task`,
-    sin bloquear la respuesta al cliente que disparó el umbral: ese cliente no tiene por
-    qué pagar la latencia de investigar una ruta ajena, y bloquear ahí arriesgaría colgar
-    el pedido si la ruta está de verdad trabada) — una sonda BAJO DEMANDA: el mismo
+    ningún cooldown — solo incrementa un CONTADOR de fallos CONSECUTIVOS por ruta
+    (`_sospechas`), que se reinicia a 0 en cualquier éxito.
+  - Al llegar a `UMBRAL_SOSPECHA` (3, el mismo número que el viejo `TOPE_FALLOS_SEGUIDOS`)
+    fallos consecutivos, se programa — en SEGUNDO PLANO (`asyncio.create_task`, sin
+    bloquear la respuesta al cliente que disparó el umbral: ese cliente no tiene por qué
+    pagar la latencia de investigar una ruta ajena, y bloquear ahí arriesgaría colgar el
+    pedido si la ruta está de verdad trabada) — una sonda BAJO DEMANDA: el mismo
     `completar()` de siempre, con el mismo payload `PING` que la sonda periódica, sobre una
     cadena de una sola ruta, con una bandera (`es_sonda=True`) que hace que UN fallo (sin
     necesitar sospecha, sin poder programar otra sonda anidada) castigue de inmediato.
-  - Si la sonda falla, `_castigar` corre exactamente igual que con un `429` (mismo backoff
-    exponencial, mismo tope). Si pasa, la sospecha se limpia y la ruta sigue en rotación.
-    La sonda deja además su propia fila en `sondas` — la misma tabla que ya lee
-    `Almacen.tiene_evidencia_de_vida` para `/health` — así que, para el resto del sistema,
-    una sonda bajo demanda y una periódica son indistinguibles: solo cambia quién la
-    disparó.
-  - **Rate limit por ruta: como máximo una sonda bajo demanda cada
-    `LIMITE_PROBE_BAJO_DEMANDA_S` (60 s).** Una sonda gasta la MISMA cuota gratis que el
-    tráfico real (el mismo endpoint, el mismo límite por minuto del proveedor), así que el
-    costo extra que UN cliente hostil puede imponerle a UNA ruta queda topeado en, como
-    mucho, 60 pedidos extra por hora — sin importar cuántos pedidos mande el cliente
-    (podría mandar miles y el tope sigue siendo el mismo). Y como el payload de esa sonda
-    es del gateway, el cliente jamás puede hacer que ese pedido extra FALLE: una ruta sana
-    pasa la sonda siempre, así que el peor resultado posible para el atacante es gastar ese
-    cupo fijo sin lograr nunca que una ruta sana caiga. **Costo para el atacante: con UNA
-    sola llave, lo peor que puede lograr es forzar sondeo extra acotado (como mucho 60
-    pedidos/hora por ruta) — nunca la caída de una ruta sana**, porque solo el gateway
+  - Si la sonda falla, `_castigar` corre con backoff exponencial (mismo tope de siempre).
+    Si pasa, la sospecha se limpia y la ruta sigue en rotación. La sonda deja además su
+    propia fila en `sondas` — la misma tabla que ya lee `Almacen.tiene_evidencia_de_vida`
+    para `/health` — así que, para el resto del sistema, una sonda bajo demanda y una
+    periódica son indistinguibles: solo cambia quién la disparó.
+  - **Rate limit por ruta y AGREGADO.** Como máximo una sonda bajo demanda por ruta cada
+    `LIMITE_PROBE_BAJO_DEMANDA_S` (60 s) — una sonda gasta la MISMA cuota gratis que el
+    tráfico real, así que el costo extra que UN cliente hostil puede imponerle a UNA ruta
+    queda topeado en, como mucho, 60 pedidos extra por hora, sin importar cuántos pedidos
+    mande. Y, además, un tope GLOBAL (`LIMITE_PROBE_GLOBAL_POR_MINUTO`, 5/min): el límite
+    por ruta no acota el AGREGADO cuando el catálogo tiene N rutas — con N sin controlar
+    por el operador (sale del catálogo vivo), el peor caso sin tope global es N × 60
+    sondas/hora (medido: 11 rutas, 15.840 pedidos extra/día contra la misma cuota que
+    necesita el tráfico real). El tope global es independiente de N. Y como el payload de
+    la sonda es del gateway, el cliente jamás puede hacer que ese pedido extra FALLE: una
+    ruta sana pasa la sonda siempre. **Costo para el atacante: con UNA sola llave, lo peor
+    que puede lograr es forzar sondeo extra acotado (≤60 pedidos/hora por ruta, acotado
+    también en el agregado) — nunca la caída de una ruta sana**, porque solo el gateway
     escribe el payload que de verdad decide.
-  - `429` sigue exactamente igual que siempre — no pasa por sospecha, no dispara ninguna
-    sonda: es evidencia inequívoca de ESA ruta sin necesitar confirmación.
-  - **Las rutas de PAGO quedan afuera del mecanismo entero, deliberadamente.** Nunca se
-    sondean (§8), así que una sonda bajo demanda gastaría PLATA REAL contra un proveedor de
-    pago sin un dueño natural de esa cuenta (`TOPE_PAGO_DIARIO` es por LLAVE, no por ruta).
-    Sin sonda posible, tampoco tiene sentido acumular sospecha que nunca se va a resolver.
-    Van últimas en la cadena de todos modos, así que solo importan cuando TODO lo gratis ya
-    falló o está en cooldown — el mismo escenario en el que `/health` ya reporta el apagón.
-    Solo el `429` las sigue pudiendo castigar. (La alternativa considerada —una sonda bajo
-    demanda que cuente contra el tope diario— quedó descartada: no hay una llave "dueña"
-    natural de ese gasto para una sonda que dispara el propio gateway.)
+  - **La sospecha NO decae por tiempo, solo se reinicia en un éxito.** Contarla "dentro de
+    una ventana de tiempo" (como en la primera versión de este mecanismo) hace que
+    tráfico más lento que el tamaño de esa ventana nunca junte el umbral: medido, 80
+    fallos consecutivos espaciados apenas más que la ventana no disparaban ninguna sonda
+    — una ruta muerta en un despliegue de tráfico bajo se quedaba primera en `ordenar`
+    para siempre, el defecto original de la primera revisión, de vuelta. La protección
+    real contra "incidentes no relacionados que se suman" siempre fue el
+    reinicio-en-éxito, no el reloj.
+  - `429` sigue castigando de inmediato — no pasa por sospecha, no dispara ninguna sonda:
+    es evidencia inequívoca de ESA ruta sin necesitar confirmación — pero **ya no
+    reutiliza el backoff exponencial de una sonda confirmada** (que podía escalar hasta
+    el tope de una hora): con 429 se respeta el `Retry-After` del proveedor cuando lo
+    manda, o un default corto si no, siempre topeado bien por debajo de una hora (ver
+    `_castigar_429`/`COOLDOWN_429_*`) — medido, 12 pedidos de una llave alcanzaban para
+    enfriar 3 rutas vía 429 real por una duración muchísimo mayor que la ventana de
+    rate-limit que el propio proveedor suele resetear.
+  - Una sonda BAJO DEMANDA exitosa nunca cancela un cooldown MÁS NUEVO que ella (p.ej. un
+    429 real que llegó mientras la sonda seguía en vuelo) — de lo contrario un cliente
+    podría usar una sonda bajo demanda para cancelar el "paráte" explícito de un
+    proveedor y seguir martillando la llave compartida.
+  - **Las rutas de PAGO quedan afuera de sospecha+sonda, deliberadamente — pero SÍ tienen
+    un castigo directo propio (`_sospechar_pago`), con el mismo umbral, sin sonda.** Una
+    sonda bajo demanda gastaría PLATA REAL contra un proveedor de pago sin un dueño
+    natural de esa cuenta (`TOPE_PAGO_DIARIO` es por LLAVE, no por ruta) — pero excluir a
+    las rutas de pago del mecanismo entero, sin ningún reemplazo, dejaba una ruta de pago
+    rota facturando cada pedido para siempre sin que nada la sacara de rotación (medido:
+    40/40 llamadas facturables sin ningún cooldown). El castigo directo es bounded por ser
+    el último escalón de la cadena: solo entra en juego cuando ya se agotó todo lo
+    gratis.
+
+  **Facturación: se cuenta lo FACTURABLE, no solo lo exitoso.** Un `200` de una ruta de
+  pago es cobrable por el proveedor exista o no contenido útil adentro (un modelo de
+  razonamiento que se gasta el presupuesto también genera tokens) — contar uso de pago
+  solo en el éxito (`r.ruta`) dejaba un 200-vacío facturado por el proveedor e invisible
+  para `/v1/uso` y `TOPE_PAGO_DIARIO` (medido: 40/40 llamadas facturables con
+  `pago_hoy: 0`). `completar`/`completar_stream` exponen un callback
+  (`en_intento_facturable`) que se dispara en TODO intento `200` contra una ruta de pago,
+  la sirva o no.
 
   **Promptness, no solo corrección**: una ruta genuinamente rota, con una hermana sana en
   su misma cadena, sigue cayendo en el mismo número de pedidos que antes (round 7) —
@@ -725,7 +765,19 @@ Por ruta:
   Una cadena de una sola ruta que está rota de verdad también se enfría en
   `UMBRAL_SOSPECHA` pedidos más una sonda — segundos u órdenes de pedidos, nunca el ciclo
   de 5 h del sondeo periódico. Un *pool* genuinamente caído (todas las rutas rotas a la
-  vez) se excluye ruta por ruta con la misma rapidez, sin esperar horas.
+  vez) se excluye ruta por ruta con la misma rapidez, sin esperar horas — y el cooldown
+  que la sonda deja se estampa con cuánto tardó la sonda misma, no con cuándo arrancó: de
+  lo contrario una sonda que tarda hasta `TIMEOUT_S` (una ruta COLGADA, el caso que este
+  mecanismo entero existe para atrapar) nace con ese tiempo ya "comido" del backoff — se
+  midió exclusión efectiva de 0 s en el primer castigo.
+
+  **`/health` y la frecuencia de muestreo.** Un cliente ahora controla, indirectamente,
+  CUÁNDO se sondea una ruta (hasta 60/h vía sospecha, contra 1 cada `SONDEO_SALUD_HORAS`
+  del ciclo periódico — un aumento de ~300× en la frecuencia de muestreo posible). Más
+  muestras significa más chances de agarrar, por puro azar, un problema transitorio del
+  proveedor justo en UNA sonda. Por eso, desde esta revisión, `Almacen.tiene_evidencia_de_vida`
+  exige DOS señales consecutivas fallidas (sin éxito de por medio), no una sola, antes de
+  tratarlo como evidencia de muerte para `/health` — ver §6 para el detalle completo.
 
 `puntaje = calidad^wc · confiabilidad^wr · f(latencia)^wl`, con los pesos según el **perfil**
 pedido: `rapido` pondera latencia, `potente` pondera calidad y contexto, `balanceado` (el
