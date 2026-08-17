@@ -6,15 +6,30 @@ from llm_libre.proveedores import cargar, rutas_fijas
 YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
 
-def test_carga_los_tres_proveedores():
+def test_carga_los_proveedores_registrados():
     # openrouter se saco del registro (decision del operador, 2026-08-17):
     # nunca tuvo OPENROUTER_API_KEY configurada, asi que sus 16 rutas
     # 401-eaban siempre -- casi la mitad del catalogo, gastando cupo de
     # sonda y espacio en /v1/ranking solo para demostrar que seguian
     # muertas. Sigue documentado en docs/providers.md como ejemplo del
     # patron "todo descubierto" con clave opcional.
+    # perplexity entro el 2026-08-17 con UNA ruta declarada (`turbo`): su
+    # /v1/models publica 124 modelos pero en el flujo anonimo todos caen a
+    # turbo, asi que declarar el catalogo seria medir 124 clones.
     ps = cargar(YAML, {"MINIMAX_API_KEY": "mm"})
-    assert [p.id for p in ps] == ["chatgpt", "kilo", "minimax"]
+    assert [p.id for p in ps] == ["chatgpt", "perplexity", "kilo", "minimax"]
+
+
+def test_perplexity_declara_una_sola_ruta_sin_tools():
+    # Verificado contra el proxy real: no hay function calling, asi que una
+    # peticion con tools NUNCA debe rutearse aca -- lo garantiza esta
+    # declaracion, no el proveedor.
+    pplx = next(p for p in cargar(YAML, {}) if p.id == "perplexity")
+    rutas = rutas_fijas(pplx)
+    assert [r.clave for r in rutas] == ["perplexity/turbo"]
+    assert rutas[0].capacidades.tools is False
+    assert rutas[0].tier == "gratis"
+    assert pplx.base_url.endswith("/v1")   # sin el /v1 todo da 404
 
 
 def test_kilo_sin_clave_queda_con_clave_vacia_y_sigue_siendo_valido():

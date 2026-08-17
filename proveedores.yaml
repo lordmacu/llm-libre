@@ -81,6 +81,35 @@ proveedores:
     # interpretar_pedido), y catalogo.normalizar los descarta en tiempo de
     # descubrimiento -- ver IDS_RESERVADOS y _es_alias en catalogo.py.
 
+  - id: perplexity
+    tier: gratis
+    # Misma prioridad que kilo A PROPOSITO: no hay evidencia de que sea mejor ni
+    # peor, asi que decide el ranking medido, que es para lo que existe. La
+    # prioridad es preferencia manual, no una corazonada.
+    prioridad: 1
+    dialecto: openai
+    base_url_env: PERPLEXITY_PROXY_URL
+    base_url: http://127.0.0.1:8891/v1   # default; el /v1 es obligatorio (ver chatgpt)
+    # Su /v1/models publica 124 modelos (gpt5, claude46sonnet, grok4, gemini31pro...)
+    # pero en el flujo ANONIMO todos caen a `turbo`: verificado el 2026-08-17
+    # pidiendo cuatro de ellos y recibiendo `model: turbo` en los cuatro, con el
+    # propio modelo respondiendo "Perplexity". Declarar las 124 seria mentirle al
+    # ranking: mediria 124 nombres que son el mismo modelo y gastaria 124 veces la
+    # cuota de sondeo. Por eso va UNA ruta declarada, no catalogo descubierto.
+    modelos_fijos:
+      # tools:false verificado: no hay rastro de function calling en el proxy.
+      # vision:false: no soporta imagenes de entrada.
+      # contexto: piso conservador, el proxy ignora max_tokens de todas formas.
+      - id: turbo
+        tools: false
+        vision: false
+        contexto: 32000
+        max_salida: 4096
+    # Latencia medida (2026-08-17): 1.85-2.47s, mas rapido que chatgpt-proxy
+    # (3.5-4.4s). Aun asi 45s de techo, como chatgpt: acota un cuelgue sin
+    # cortar una generacion larga legitima.
+    timeout_s: 45
+
   - id: kilo
     tier: gratis
     prioridad: 1
