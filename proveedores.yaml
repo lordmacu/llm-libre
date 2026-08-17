@@ -110,6 +110,37 @@ proveedores:
     # cortar una generacion larga legitima.
     timeout_s: 45
 
+  - id: deepseek
+    tier: gratis
+    # Misma prioridad que kilo y perplexity: que decida el ranking medido.
+    prioridad: 1
+    dialecto: openai
+    base_url_env: DEEPSEEK_PROXY_URL
+    base_url: http://127.0.0.1:8892/v1
+    # Modelos declarados: su /v1/models es una lista fija de tres, sin metadatos.
+    # A diferencia de perplexity, aca los modelos SI difieren de verdad --
+    # verificado el 2026-08-17: deepseek-chat acerto la trampa del bate y la
+    # pelota (0.05) y el reasoner razona antes de responder.
+    modelos_fijos:
+      # tools:false verificado: manda las tools sin reventar pero nunca devuelve
+      # tool_calls, contesta en prosa -- mas peligroso que un 500, porque un
+      # cliente agentico recibiria texto donde espera una llamada estructurada.
+      - id: deepseek-chat
+        tools: false
+        vision: false
+        contexto: 64000
+        max_salida: 8192
+      - id: deepseek-reasoner
+        tools: false
+        vision: false
+        contexto: 64000
+        max_salida: 8192
+    # NO se declara deepseek-vision: no se verifico entrada de imagenes, y
+    # declarar una capacidad sin comprobarla es como enrutar a ciegas.
+    # Latencia medida: 4.2-4.5s. 60s de techo: el proof-of-work en WASM suma
+    # tiempo variable antes de que DeepSeek siquiera empiece a responder.
+    timeout_s: 60
+
   - id: kilo
     tier: gratis
     prioridad: 1

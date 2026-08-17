@@ -17,7 +17,7 @@ def test_carga_los_proveedores_registrados():
     # /v1/models publica 124 modelos pero en el flujo anonimo todos caen a
     # turbo, asi que declarar el catalogo seria medir 124 clones.
     ps = cargar(YAML, {"MINIMAX_API_KEY": "mm"})
-    assert [p.id for p in ps] == ["chatgpt", "perplexity", "kilo", "minimax"]
+    assert [p.id for p in ps] == ["chatgpt", "perplexity", "deepseek", "kilo", "minimax"]
 
 
 def test_perplexity_declara_una_sola_ruta_sin_tools():
@@ -382,3 +382,18 @@ def test_rutas_fijas_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_pa
     rutas = rutas_fijas(p)
     assert len(rutas) == 1
     assert rutas[0].prioridad == 77
+
+
+def test_deepseek_declara_dos_rutas_sin_tools():
+    # Verificado contra el proxy real (2026-08-17): manda tools sin reventar pero
+    # nunca devuelve tool_calls -- contesta en prosa. Un cliente agentico recibiria
+    # texto donde espera una llamada estructurada, asi que esta declaracion es lo
+    # unico que impide que el router le mande un pedido con herramientas.
+    # deepseek-vision NO se declara: no se verifico entrada de imagenes.
+    ds = next(p for p in cargar(YAML, {}) if p.id == "deepseek")
+    rutas = rutas_fijas(ds)
+    assert [r.modelo_id for r in rutas] == ["deepseek-chat", "deepseek-reasoner"]
+    assert all(r.capacidades.tools is False for r in rutas)
+    assert all(r.capacidades.vision is False for r in rutas)
+    assert ds.base_url.endswith("/v1")
+    assert ds.timeout_s == 60.0   # el proof-of-work en WASM suma tiempo variable
