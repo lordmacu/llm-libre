@@ -1,0 +1,699 @@
+{
+  "info": {
+    "_postman_id": "69bcad67-9a3b-48d3-9cdf-d05a9f3c4408",
+    "name": "llm-libre",
+    "description": "llm-libre: one OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) in front of several providers' FREE LLM tiers, with a paid fallback (MiniMax) as a last resort and a self-measured ranking that decides routing for you.\n\n## Setup\nFill in the two collection variables (top of this collection, or an environment): `base_url` (e.g. `https://llm-libre.example.com`, no trailing slash -- do NOT include `/v1`, each request adds its own path) and `api_key` (one of the deployment's `LLM_LIBRE_API_KEYS`).\n\n## Folders\n- **Chat completions** -- `auto*` aliases, an explicit model id, streaming, and one request per `x_*` gateway extension so its effect is discoverable on its own.\n- **Catalog & diagnostics** -- `GET /v1/models`, `GET /v1/ranking` (the operator's tool to explain a routing decision), `GET /v1/uso`, `GET /health` (no key needed).\n- **Error paths** -- missing key, an unknown model id, and an impossible capability requirement: half of what you need when something misbehaves is knowing what the failure looks like.\n\nBoth auth styles are represented: every request here uses `X-API-Key` except **Auth: Authorization Bearer**, which proves the OpenAI-SDK-compatible path (`Authorization: Bearer <key>`) works exactly the same.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://llm-libre.example.com",
+      "type": "string"
+    },
+    {
+      "key": "api_key",
+      "value": "REPLACE_ME",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Chat completions",
+      "item": [
+        {
+          "name": "auto (balanced profile)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Balanced profile: quality, reliability and latency weigh evenly. In production this is typically served by chatgpt/gpt-5-3-mini (prioridad: 0) -- check the response headers `X-Ruta-Usada` / `X-Tier: gratis` / `X-Intentos` to see who actually answered.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "auto:rapido",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Fast profile: latency weighs more in the score, some measured quality is traded off.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto:rapido\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "auto:potente",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Powerful profile: measured quality weighs more, some latency is traded off.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto:potente\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "auto:tools",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Balanced profile + requires function-calling support. In production this SKIPS every chatgpt route (they declare `tools: false` -- the anonymous backend does not support real function calling) and falls through to a Kilo/OpenRouter route that does, e.g. kilo/cohere/north-mini-code:free.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto:tools\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What's the weather in Bogota?\"\n    }\n  ],\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"get_weather\",\n        \"description\": \"Weather for a city\",\n        \"parameters\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"city\": {\n              \"type\": \"string\"\n            }\n          },\n          \"required\": [\n            \"city\"\n          ]\n        }\n      }\n    }\n  ],\n  \"tool_choice\": \"auto\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "auto:vision",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Balanced profile + requires image-input support.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto:vision\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"What is in this image?\"\n        },\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/320px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Explicit model id (real, from GET /v1/models)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "A real route id, exactly as GET /v1/models lists it (no provider prefix -- 'kilo/' in X-Ruta-Usada is added by the gateway, not part of the model id). Still fails over between every provider that happens to serve this same model.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"cohere/north-mini-code:free\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Write a haiku about databases.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Streaming (stream: true)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Server-Sent Events. IMPORTANT: streaming responses never carry X-Ruta-Usada / X-Tier / X-Intentos (headers go out before the failover chain resolves) -- check GET /v1/uso for paid spend, and the `model` field inside the chunks themselves for which model answered. In Postman, open the response in the 'Send and Download' / EventStream view to see chunks as they arrive instead of buffered as one blob.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto:rapido\",\n  \"stream\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Count from 1 to 5.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Extension: x_requiere",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Gateway extension, stripped before the request reaches the provider. Capabilities the chosen route MUST support -- here, function-calling. Equivalent to (and combinable with) the `auto:tools` / `auto:vision` aliases. Only \"tools\" and \"vision\" currently have any effect.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_requiere\": [\n    \"tools\"\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Extension: x_min_contexto",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Gateway extension, stripped before the request reaches the provider. Minimum context window (tokens) a route must advertise to be considered. Compare against the `contexto` field GET /v1/ranking publishes per route.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_min_contexto\": 100000,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Extension: x_permitir_pago (disable paid fallback)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Gateway extension, stripped before the request reaches the provider. Defaults to true (the gateway MAY silently fall back to the paid MiniMax route if every free route is down -- always reported via X-Tier: pago and counted in GET /v1/uso, never an invisible charge). Setting this to false forbids that fallback for this one request: you get 503 instead of a charge if free is exhausted.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_permitir_pago\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Extension: x_crudo (disable reasoning stripping)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Gateway extension, stripped before the request reaches the provider. Disables reasoning-tag stripping (<think>/<thinking>/<reasoning>): `content` comes back exactly as the provider sent it, and `x_razonamiento` is never added. Compare this response's `content` against the default request above (no x_crudo) for the same kind of prompt on a model that leaks its chain-of-thought.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_crudo\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What is 2+2? Think step by step.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Auth: Authorization Bearer (OpenAI-SDK-compatible)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Identical request to the first one in this folder, but authenticated with `Authorization: Bearer {{api_key}}` instead of `X-API-Key` -- this is the header any OpenAI SDK sends automatically for its `api_key` parameter, so 'just change base_url' holds without extra configuration. If both headers are present, X-API-Key wins.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{api_key}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Catalog & diagnostics",
+      "item": [
+        {
+          "name": "GET /v1/models",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/models",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "models"
+              ]
+            },
+            "description": "The normalized catalog (OpenAI /models shape) plus the auto* aliases. In production: 34 real routes + 5 aliases = 39 entries; cross-check the route count against GET /health's rutas_activas."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v1/ranking",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/ranking",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "ranking"
+              ]
+            },
+            "description": "Not part of the OpenAI contract. Per-route score with its components broken out, sorted with the exact same key the router itself uses (cooldown, tier==pago, prioridad, unmeasured, -score) -- this is the operator's main tool to explain why a request got the X-Ruta-Usada it got. See docs/routing-and-ranking.md for a full worked example."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /v1/uso",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/uso",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "uso"
+              ]
+            },
+            "description": "Today's (UTC) paid-usage count for the calling key against its daily allowance. The only way a streaming client can tell whether the paid fallback served its last request, since streaming responses never carry X-Tier."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "health"
+              ]
+            },
+            "description": "No API key required. ok = at least one free route alive; degradado = only the paid route is alive; caido = nothing is alive. Wired as the deployment's health check."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Error paths",
+      "item": [
+        {
+          "name": "Missing API key -> 401",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "No X-API-Key / Authorization header at all -> 401. The header is removed below on purpose (the collection-level {{api_key}} is not used here); do not add it back when testing this request.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Unknown model id -> 404",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "A model id that no longer exists (this exact one is the real-world example that motivated the whole project -- see the design spec, §1) -> 404 with `sugerencias`: the nearest ids that ARE still in the catalog. Different from the 503 you get when a route is merely down -- 404 here means the id itself is gone.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"poolside/laguna-m.1:free\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Impossible capability requirement -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "No route in any provider's catalog can simultaneously satisfy this context window AND both capabilities -> 400, not 503: this is not 'temporarily unavailable', it can NEVER be satisfied as asked. Compare with the 503 you get from GET /v1/uso's daily cap, or from every candidate route being down/cooling -- see docs/operations-runbook.md.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_requiere\": [\n    \"tools\",\n    \"vision\"\n  ],\n  \"x_min_contexto\": 999999999,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

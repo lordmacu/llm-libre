@@ -15,6 +15,45 @@ orden manual en que el router prueba los proveedores antes de mirar puntaje
 (ver "Cómo decide" más abajo). Nunca se pisan entre sí: una ruta de pago con
 `prioridad: 0` sigue yendo siempre al final, plata manda sobre orden manual.
 
+## API reference, Postman collection and extended docs (English)
+
+The rest of this README is in Spanish (see `CLAUDE.md`); the reference
+material below is in English on purpose (Task 14):
+
+- **Interactive API reference**: run the service and open `/docs`
+  (Swagger UI) or `/openapi.json` — every endpoint, both auth schemes,
+  every `x_*` extension, every status code with a real example. The
+  committed [`openapi.json`](openapi.json) at the repo root is generated
+  straight from the running app (`app.openapi()`), so it cannot drift from
+  what `/docs` actually serves. Regenerate it after touching
+  `src/llm_libre/openapi.py` or any route's docs:
+
+  ```bash
+  venv/bin/python scripts/generate_openapi.py
+  ```
+
+- **Postman collection**: [`llm-libre.postman_collection.json`](llm-libre.postman_collection.json)
+  at the repo root — import it, fill in the `base_url` and `api_key`
+  collection variables, and every request works. Covers every `auto*`
+  alias, an explicit model id, streaming, one request per `x_*`
+  extension, both auth styles, and the error paths (missing key, unknown
+  model, an impossible capability requirement).
+- **[`docs/routing-and-ranking.md`](docs/routing-and-ranking.md)** — how
+  the router actually decides, the `tier`/`perfil`/`prioridad` vocabulary,
+  how to read `GET /v1/ranking` to explain a routing decision (with a
+  worked example), and what a cooldown is.
+- **[`docs/operations-runbook.md`](docs/operations-runbook.md)** — the
+  SQLite file and what losing it costs, `/health`'s three states, what to
+  check when everything returns `503`, and why probes spend the same free
+  quota real traffic does.
+- **[`docs/configuration.md`](docs/configuration.md)** — every environment
+  variable, including why `KILO_API_KEY` must stay genuinely unset and why
+  `CHATGPT_PROXY_URL` needs its path suffix.
+- **[`docs/providers.md`](docs/providers.md)** — how a provider is
+  declared, the three registration patterns, and what
+  `capacidades_por_defecto` is for, so adding a provider is a config
+  change, not a code change.
+
 ## Uso rápido
 
 Con el SDK de OpenAI (Python):
