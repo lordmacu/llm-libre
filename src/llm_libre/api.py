@@ -35,15 +35,63 @@ def interpretar_pedido(cuerpo: dict) -> Pedido:
             requiere_tools = True
         elif sufijo == "vision":
             requiere_vision = True
+        elif sufijo:
+            # Revision post-Task-14 (gate): un sufijo "auto:<algo>" que no es
+            # ni un perfil conocido ni "tools"/"vision" (p.ej. "auto:turbo",
+            # un typo de "auto:tools") caia por las tres ramas de arriba SIN
+            # tocar nada -- silenciosamente identico a pedir "auto" liso, sin
+            # ningun aviso de que el sufijo se ignoro. Para un cliente que
+            # de verdad queria exigir una capacidad (p.ej. tools, para un
+            # agente que espera una tool_call) eso es peligroso en silencio:
+            # recibe una respuesta "balanceada" comun, no el 400 que le
+            # habria dicho que escribio mal el alias. "auto" sin ":" (sufijo
+            # == "") sigue siendo valido y NO entra aca -- ver PERFILES,
+            # que ya incluye "balanceado" (asi que "auto:balanceado"
+            # tambien resuelve normal, sin pasar por esta rama).
+            raise HTTPException(400, {
+                "message": f"alias de modelo desconocido: '{modelo_pedido}'",
+                "sugerencias": ALIAS,
+            })
     else:
         modelo = modelo_pedido
 
-    exigidas = set(cuerpo.get("x_requiere") or [])
+    exigidas_raw = cuerpo.get("x_requiere") or []
+    if isinstance(exigidas_raw, str):
+        # Revision post-Task-14 (gate): `x_requiere: "tools"` (un string
+        # suelto, en vez de la lista documentada) pasaba silencioso por
+        # `set(cuerpo.get("x_requiere") or [])`, que sobre un STRING itera
+        # caracter por caracter -- set("tools") = {'t','o','l','s'} -- asi
+        # que "tools" in exigidas daba False y la exigencia de capacidad
+        # se ignoraba entera, sin error y sin avisar. Un cliente que manda
+        # la forma comun de "un solo valor, no una lista de uno" (valida en
+        # muchas APIs REST) merece que funcione iguial, no que se lo trague
+        # en silencio.
+        exigidas_raw = [exigidas_raw]
+    exigidas = set(exigidas_raw)
+
+    x_min_contexto_bruto = cuerpo.get("x_min_contexto")
+    try:
+        min_contexto = int(x_min_contexto_bruto) if x_min_contexto_bruto else 0
+    except (TypeError, ValueError):
+        # Revision post-Task-14 (gate): `int(cuerpo.get("x_min_contexto")
+        # or 0)` sin atrapar reventaba con ValueError/TypeError ante
+        # cualquier valor que no fuera un numero (p.ej. "cien mil", o una
+        # lista) -- eso escapa SIN atrapar hasta el manejador generico de
+        # FastAPI, que lo convierte en un 500 Internal Server Error opaco.
+        # Un campo de ESTE gateway mal formado es evidencia del PEDIDO, no
+        # una falla interna: se nombra el campo y se devuelve 400, igual
+        # que cualquier otro error de validacion de esta funcion.
+        raise HTTPException(400, {
+            "message": "x_min_contexto debe ser un numero entero",
+            "campo": "x_min_contexto",
+            "valor_recibido": x_min_contexto_bruto,
+        })
+
     return Pedido(
         modelo=modelo,
         requiere_tools=requiere_tools or "tools" in exigidas,
         requiere_vision=requiere_vision or "vision" in exigidas,
-        min_contexto=int(cuerpo.get("x_min_contexto") or 0),
+        min_contexto=min_contexto,
         perfil=perfil,
         permitir_pago=bool(cuerpo.get("x_permitir_pago", True)),
     )

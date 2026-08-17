@@ -82,15 +82,19 @@ async def test_429_sin_retry_after_no_escala_con_golpes_repetidos():
 
 
 async def test_429_respeta_el_retry_after_del_proveedor():
+    # abs=0.5: `_castigar_429` estampa `ahora + latencia_real_medida`, no
+    # `ahora` crudo (ver el comentario en test_retry_after_negativo... mas
+    # abajo, donde este mismo patron se documenta con detalle) -- una
+    # comparacion `==` estricta es flaky bajo carga por el mismo motivo.
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "45"}))
     await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
-    assert p.cooldowns["kilo/a:free"] == 45.0
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(45.0, abs=0.5)
 
 
 async def test_429_topea_un_retry_after_absurdo():
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "999999"}))
     await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
-    assert p.cooldowns["kilo/a:free"] == COOLDOWN_429_MAXIMO_S
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_MAXIMO_S, abs=0.5)
 
 
 async def test_429_sin_retry_after_castiga_sin_ninguna_sonda():
@@ -1111,13 +1115,13 @@ async def test_una_sonda_exitosa_no_borra_un_429_mas_nuevo_que_ella():
     # la sonda que todavia no termino.
     trafico["codigo"] = 429
     await p.completar([_ruta("a:free")], CUERPO, ahora=1000.0)
-    assert p.cooldowns["kilo/a:free"] == 1000.0 + COOLDOWN_429_DEFAULT_S
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(1000.0 + COOLDOWN_429_DEFAULT_S, abs=0.5)
 
     # Se libera la sonda: resuelve EXITOSA -- pero no debe pisar el 429 que
     # llego despues de que arranco.
     continuar_sonda.set()
     await p.esperar_sondas_pendientes()
-    assert p.cooldowns["kilo/a:free"] == 1000.0 + COOLDOWN_429_DEFAULT_S
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(1000.0 + COOLDOWN_429_DEFAULT_S, abs=0.5)
 
 
 async def test_una_sonda_no_arranca_si_la_ruta_ya_esta_en_cooldown():
@@ -1266,10 +1270,22 @@ async def test_retry_after_negativo_o_no_finito_cae_al_default():
     # de 0s -- un proveedor diciendo explicitamente "parate" (un 429 es tan
     # inequivoco como una sonda) terminaria martillado de inmediato otra
     # vez.
+    #
+    # Revision post-Task-14 (gate): `_castigar_429` estampa
+    # `ahora_del_castigo = ahora + latencia_real_medida/1000.0`, no `ahora`
+    # crudo (HIGH 2, round 9, ver el comentario de cabecera en proxy.py) --
+    # asi que una comparacion `==` estricta contra COOLDOWN_429_DEFAULT_S
+    # fallaba cada vez que el round-trip MOCKEADO cruzaba 1ms bajo carga
+    # (0/20 en aislado, 10/10 corriendo la suite completa en paralelo con
+    # otras cosas). `pytest.approx(..., abs=0.5)` es el mismo margen que ya
+    # usa el test del cooldown flat de pago para el mismo problema -- generoso
+    # contra el jitter real (nunca va a acercarse a medio segundo con un
+    # MockTransport) pero segundos mas chico que cualquier cambio real de
+    # comportamiento (p.ej. volver a escalar exponencial en vez de flat).
     for valor in ("-5", "nan", "inf", "-inf", "no-es-un-numero"):
         p = _proxy(lambda req, v=valor: httpx.Response(429, headers={"Retry-After": v}))
         await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
-        assert p.cooldowns["kilo/a:free"] == COOLDOWN_429_DEFAULT_S, valor
+        assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_DEFAULT_S, abs=0.5), valor
 
 
 async def test_un_429_contra_la_sonda_no_se_registra_como_sonda_de_salud_fallida():

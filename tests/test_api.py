@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from llm_libre.almacen import Almacen
@@ -68,6 +69,66 @@ def test_model_de_solo_espacios_se_trata_como_ausente():
     assert p.modelo is None and p.perfil == "balanceado"
 
 
+# --- Revision post-Task-14 (gate): tres defectos reales que el reviewer
+#     encontro leyendo interpretar_pedido, no ejecutando -- los tres eran
+#     entradas malformadas del CLIENTE cayendo en un hueco silencioso
+#     (una degradacion sin aviso, o directamente un 500). ---
+
+def test_auto_con_sufijo_desconocido_da_400():
+    # "auto:turbo" (typo tipico de "auto:tools") caia por las tres ramas de
+    # sufijo sin tocar nada -- silenciosamente identico a pedir "auto" liso.
+    # Peligroso para un cliente que de verdad queria exigir una capacidad:
+    # se queda sin ella, sin ningun aviso.
+    with pytest.raises(HTTPException) as exc:
+        interpretar_pedido({"model": "auto:turbo"})
+    assert exc.value.status_code == 400
+    assert "auto:turbo" in exc.value.detail["message"]
+
+
+def test_auto_liso_sigue_funcionando_tras_el_fix_de_sufijo_desconocido():
+    # Regresion directa del fix de arriba: sufijo == "" (o sea "auto" sin
+    # ":") NO debe entrar en la rama de rechazo.
+    p = interpretar_pedido({"model": "auto"})
+    assert p.modelo is None and p.perfil == "balanceado"
+
+
+def test_auto_balanceado_sigue_siendo_un_alias_valido():
+    # "balanceado" ESTA en PERFILES -- "auto:balanceado" es redundante con
+    # "auto" liso, pero valido, y no debe caer en la rama de rechazo.
+    p = interpretar_pedido({"model": "auto:balanceado"})
+    assert p.perfil == "balanceado"
+
+
+def test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor():
+    # `set("tools")` itera CARACTERES ({'t','o','l','s'}), asi que
+    # "tools" in exigidas daba False y la exigencia se ignoraba entera, sin
+    # error. Un string suelto (en vez de una lista de uno) se acepta igual.
+    p = interpretar_pedido({"model": "auto", "x_requiere": "tools"})
+    assert p.requiere_tools is True
+    assert p.requiere_vision is False
+
+
+def test_x_requiere_como_lista_sigue_funcionando_igual_que_antes():
+    p = interpretar_pedido({"model": "auto", "x_requiere": ["vision"]})
+    assert p.requiere_vision is True
+    assert p.requiere_tools is False
+
+
+def test_x_min_contexto_no_numerico_da_400_nombrando_el_campo():
+    with pytest.raises(HTTPException) as exc:
+        interpretar_pedido({"model": "auto", "x_min_contexto": "cien mil"})
+    assert exc.value.status_code == 400
+    assert exc.value.detail["campo"] == "x_min_contexto"
+    assert exc.value.detail["valor_recibido"] == "cien mil"
+
+
+def test_x_min_contexto_numerico_como_string_sigue_funcionando():
+    # int("100000") es valido -- el fix no debe volverse mas estricto de lo
+    # que ya era para el caso que SI funcionaba.
+    p = interpretar_pedido({"model": "auto", "x_min_contexto": "100000"})
+    assert p.min_contexto == 100000
+
+
 @pytest.fixture
 def cliente():
     almacen = Almacen(":memory:")
@@ -119,6 +180,40 @@ def test_completions_responde_y_marca_la_ruta_usada(cliente):
     assert r.headers["X-Ruta-Usada"] == "kilo/a:free"
     assert r.headers["X-Tier"] == "gratis"
     assert r.json()["choices"][0]["message"]["content"] == "hola"
+
+
+# --- Revision post-Task-14 (gate): los mismos tres defectos de arriba
+#     (test_auto_con_sufijo_desconocido_da_400 y compania), pero probados a
+#     traves del cliente HTTP completo -- para confirmar que interpretar_pedido
+#     de verdad esta conectado al camino real de /v1/chat/completions, no
+#     solo probado de forma aislada. ---
+
+def test_completions_con_alias_desconocido_da_400_no_500(cliente):
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto:turbo", "messages": []})
+    assert r.status_code == 400
+    assert "auto:turbo" in r.json()["detail"]["message"]
+
+
+def test_completions_con_x_min_contexto_no_numerico_da_400_no_500(cliente):
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "x_min_contexto": "cien mil", "messages": []})
+    assert r.status_code == 400
+    assert r.json()["detail"]["campo"] == "x_min_contexto"
+
+
+def test_completions_con_x_requiere_como_string_aplica_la_exigencia(cliente):
+    # kilo/a:free (la unica ruta del fixture `cliente`) declara tools=True,
+    # asi que "x_requiere": "tools" (string suelto) tiene que seguir
+    # sirviendo -- si el bug (set() sobre un string) volviera, esto
+    # devolveria 200 igual porque kilo SI tiene tools, asi que la prueba
+    # real de que la exigencia se aplico vive en el test unitario de arriba
+    # (test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor);
+    # este solo confirma que el pedido llega entero hasta el proxy sin
+    # reventar en el camino.
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "x_requiere": "tools", "messages": []})
+    assert r.status_code == 200
 
 
 # --- Task 14 (documentacion): la regla que manda es que ENRIQUECER
