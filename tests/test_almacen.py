@@ -419,10 +419,35 @@ def test_no_tiene_evidencia_de_vida_si_el_exito_quedo_fuera_de_la_ventana(almace
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is False
 
 
-def test_no_tiene_evidencia_de_vida_con_sonda_de_salud_reciente_fallida(almacen):
+# --- Round 9, hallazgo del gate ("el camino indirecto de /health"): desde
+#     que el trafico real puede disparar sondas BAJO DEMANDA (hasta 60/h por
+#     ruta, ~300x mas seguido que el ciclo periodico de 5h), un cliente
+#     controla CUANDO se muestrea una ruta -- mas muestras, mas chances de
+#     agarrar por azar un problema transitorio del proveedor en UNA sola
+#     sonda, y que /health lo trate como veredicto definitivo (sobrevive un
+#     reinicio de contenedor). Decision: UNA sonda fallida sola YA NO
+#     alcanza -- hacen falta DOS consecutivas, sin exito de por medio. ---
+
+def test_una_sola_sonda_fallida_ya_no_alcanza_para_declarar_muerta(almacen):
     almacen.upsert_rutas([_ruta()], momento=100.0)
     almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+
+
+def test_dos_sondas_fallidas_consecutivas_si_declaran_muerta(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 140.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
     assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
+
+
+def test_una_sonda_fallida_justo_despues_de_un_exito_no_alcanza(almacen):
+    # Un solo fallo precedido por un exito NO es "dos consecutivos": la
+    # señal mas vieja de las dos ultimas es un exito, no otro fallo.
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, 140.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
 
 
 # --- Round 7, MEDIUM del gate: `tiene_evidencia_de_vida` solo miraba sondas

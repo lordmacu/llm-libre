@@ -349,6 +349,25 @@ async def test_la_sonda_de_salud_registra_el_fallo_de_un_modelo_que_ya_no_existe
     assert fila[0] == 0
 
 
+# --- Round 9, HIGH 1 del gate: sondear_salud llamaba proxy.completar SIN
+#     es_sonda=True -- round 8 gateo el castigo directo detras de esa
+#     bandera, y este llamador nunca se actualizo. Una sonda periodica
+#     corre UNA vez cada 5h por ruta; sin es_sonda=True, un fallo solo
+#     acumulaba sospecha (que necesita 3 consecutivos), asi que 20 sondas
+#     periodicas contra una ruta muerta (100h) dejaban 20 filas
+#     `sondas ok=0` y CERO cooldowns -- la sonda perdio su autoridad para
+#     excluir. Con es_sonda=True, UNA sola sonda fallida ya castiga. ---
+
+async def test_la_sonda_de_salud_castiga_de_inmediato_con_un_solo_fallo():
+    p = _proxy(lambda req: httpx.Response(500))
+    await sondear_salud(p, p.almacen, [_ruta()], ahora=100.0)
+    assert p.cooldowns["kilo/x:free"] > 0.0
+    # Y sin pasar por sospecha -- no hay ninguna marca acumulada esperando
+    # un segundo o tercer fallo.
+    assert p.almacen._con.execute(
+        "SELECT COUNT(*) FROM sondas WHERE tipo='salud' AND ok=0").fetchone()[0] == 1
+
+
 async def test_la_sonda_de_calidad_guarda_casos_pasados_sobre_totales():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "12"}}]}))

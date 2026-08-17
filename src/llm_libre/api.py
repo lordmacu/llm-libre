@@ -121,24 +121,29 @@ def crear_app(estado: Estado) -> FastAPI:
         rutas, pedido = _rutas_para(cuerpo, llave)
         ahora = time.time()
         crudo = bool(cuerpo.get("x_crudo"))
+
+        def _contar_uso_pago(ruta) -> None:
+            # HIGH 4 (round 9): se llama por cada intento FACTURABLE contra
+            # una ruta de pago -- el proveedor cobra 200 con contenido util,
+            # 200 vacio, y una razonamiento que se gasto el presupuesto por
+            # igual (genera tokens en los tres casos); solo un error de RED
+            # o un status distinto de 200 no genera cobro. Antes esto solo
+            # se llamaba en el EXITO (`r.ruta`/`en_ruta_comprometida`): un
+            # 200-vacio de una ruta de pago se facturaba de verdad y no
+            # aparecia ni en /v1/uso ni contra TOPE_PAGO_DIARIO -- medido,
+            # 40/40 llamadas facturables con `pago_hoy: 0`. Ver proxy.py
+            # (`en_intento_facturable`) para donde se decide "facturable".
+            estado.almacen.sumar_uso_pago(
+                llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
         if cuerpo.get("stream"):
-            def _contar_si_sirvio_de_pago(ruta) -> None:
-                # El proxy llama esto COMO MUCHO una vez, y solo cuando esta
-                # ruta de verdad sirvio la respuesta (ver el docstring de
-                # `completar_stream`): asi el tope diario de pago tambien ata
-                # en la rama de streaming, no solo en la sincronica de abajo.
-                # Nunca se llama para una ruta meramente ofrecida, ni para una
-                # que gano el failover sin llegar a responder, ni una vez por
-                # chunk.
-                if ruta.tier == "pago":
-                    estado.almacen.sumar_uso_pago(
-                        llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
             return StreamingResponse(
                 estado.proxy.completar_stream(
                     rutas, cuerpo, ahora, crudo,
-                    en_ruta_comprometida=_contar_si_sirvio_de_pago),
+                    en_intento_facturable=_contar_uso_pago),
                 media_type="text/event-stream")
-        r = await estado.proxy.completar(rutas, cuerpo, ahora, crudo)
+        r = await estado.proxy.completar(rutas, cuerpo, ahora, crudo,
+                                         en_intento_facturable=_contar_uso_pago)
         if r.estado == 503 and r.codigo_upstream == 404 and pedido.modelo is not None:
             # ALSO de la revision round 6 -- literalmente la razon de ser
             # del proyecto: `pedido.modelo` SIGUE en nuestro catalogo (paso
@@ -164,9 +169,6 @@ def crear_app(estado: Estado) -> FastAPI:
                 "message": f"el modelo '{pedido.modelo}' ya no existe",
                 "sugerencias": _parecidos(pedido.modelo, estado.almacen.rutas_activas()),
             })
-        if r.ruta is not None and r.ruta.tier == "pago":
-            estado.almacen.sumar_uso_pago(
-                llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
         cabeceras = {"X-Intentos": str(r.intentos)}
         if r.ruta is not None:
             cabeceras["X-Ruta-Usada"] = r.ruta.clave

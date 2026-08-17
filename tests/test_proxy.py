@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -6,8 +7,10 @@ import pytest
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.almacen import Almacen
 from llm_libre.proveedores import Proveedor
-from llm_libre.proxy import (LIMITE_PROBE_BAJO_DEMANDA_S, UMBRAL_SOSPECHA,
-                             VENTANA_SOSPECHA_S, Proxy, _es_error_del_cliente)
+from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAXIMO_S,
+                             COOLDOWN_BASE_S, LIMITE_PROBE_BAJO_DEMANDA_S,
+                             LIMITE_PROBE_GLOBAL_POR_MINUTO, UMBRAL_SOSPECHA,
+                             VENTANA_PROBE_GLOBAL_S, Proxy, _es_error_del_cliente)
 
 CUERPO = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
@@ -56,12 +59,41 @@ async def test_un_429_manda_la_ruta_a_cooldown_y_pasa_a_la_siguiente():
     assert p.cooldowns["kilo/a:free"] > 100.0
 
 
-async def test_el_cooldown_crece_con_cada_429_seguido():
+# --- Round 9, MEDIUM 7 del gate ("el 429 es el unico resorte que le queda
+#     al cliente"): el 429 dejo de reutilizar el backoff exponencial de
+#     _castigar (que escalaba hasta COOLDOWN_TOPE_S=3600s) -- medido, 12
+#     pedidos de una llave alcanzaban para enfriar 3 rutas via 429 real,
+#     mucho mas alla de lo que la propia ventana de rate-limit del
+#     proveedor justifica. Ahora respeta `Retry-After` cuando el proveedor
+#     lo manda, y si no, usa un default corto y FLAT (no escala con 429s
+#     repetidos) topeado a COOLDOWN_429_MAXIMO_S. ---
+
+async def test_429_sin_retry_after_no_escala_con_golpes_repetidos():
     p = _proxy(lambda req: httpx.Response(429))
     await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
     primero = p.cooldowns["kilo/a:free"]
     await p.completar([_ruta("a:free")], CUERPO, ahora=primero)
-    assert p.cooldowns["kilo/a:free"] - primero > primero
+    segundo = p.cooldowns["kilo/a:free"]
+    assert segundo - primero == COOLDOWN_429_DEFAULT_S  # flat, no exponencial
+
+
+async def test_429_respeta_el_retry_after_del_proveedor():
+    p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "45"}))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert p.cooldowns["kilo/a:free"] == 45.0
+
+
+async def test_429_topea_un_retry_after_absurdo():
+    p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "999999"}))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    assert p.cooldowns["kilo/a:free"] == COOLDOWN_429_MAXIMO_S
+
+
+async def test_429_sin_retry_after_castiga_sin_ninguna_sonda():
+    p = _proxy(lambda req: httpx.Response(429))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    await p.esperar_sondas_pendientes()
+    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 async def test_un_exito_limpia_el_castigo_acumulado():
@@ -276,13 +308,17 @@ async def test_proxima_liberacion_no_incluye_cooldowns_de_otro_pedido():
 
 
 async def test_proxima_liberacion_reporta_la_mas_cercana_de_esta_cadena():
-    p = _proxy(lambda req: httpx.Response(429))
-    # kilo/a:free ya trae un 429 previo, asi que en la proxima ronda su cooldown
-    # crece mas que el de kilo/b:free, que apenas cae por primera vez.
-    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
-    primero_de_a = p.cooldowns["kilo/a:free"]
+    # Round 9: el 429 ya no escala con golpes repetidos (MEDIUM 7), asi que
+    # dos rutas solo terminan con cooldowns distintos si el PROVEEDOR pide
+    # duraciones distintas via Retry-After -- exactamente la fuente de
+    # verdad que ahora se respeta.
+    def handler(req):
+        modelo = json.loads(req.content)["model"]
+        retry = "100" if modelo == "a:free" else "20"
+        return httpx.Response(429, headers={"Retry-After": retry})
 
-    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=primero_de_a)
+    p = _proxy(handler)
+    r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
     assert r.estado == 503
     assert p.cooldowns["kilo/b:free"] < p.cooldowns["kilo/a:free"]
     assert r.json["error"]["proxima_liberacion"] == p.cooldowns["kilo/b:free"]
@@ -348,10 +384,11 @@ async def test_un_200_con_json_que_no_es_objeto_pasa_a_la_siguiente_ruta():
 #
 #     Round 8 cambia el eje: el trafico de un cliente real YA NO PUEDE
 #     excluir una ruta directamente, nunca -- solo acumula SOSPECHA
-#     (`Proxy._sospechar`). Cruzar `UMBRAL_SOSPECHA` fallos dentro de
-#     `VENTANA_SOSPECHA_S` programa, en segundo plano, una SONDA PROPIA con
-#     el mismo payload fijo (`PING`) que ya usa la sonda periodica -- y es
-#     esa sonda, nunca el pedido del cliente, la que decide si la ruta se
+#     (`Proxy._sospechar`). Cruzar `UMBRAL_SOSPECHA` fallos CONSECUTIVOS
+#     (round 9: ya no "dentro de una ventana de tiempo", ver mas abajo)
+#     programa, en segundo plano, una SONDA PROPIA con el mismo payload
+#     fijo (`PING`) que ya usa la sonda periodica -- y es esa sonda, nunca
+#     el pedido del cliente, la que decide si la ruta se
 #     castiga (`_castigar`, el mismo backoff de siempre). El 429 sigue
 #     intacto: castiga en el PRIMER golpe, sin pasar por sospecha. ---
 
@@ -872,28 +909,255 @@ async def test_el_limite_de_sondas_bajo_demanda_por_ruta_se_respeta():
     assert len(llamadas_ping) == 1
 
 
-async def test_la_sospecha_decae_fuera_de_la_ventana():
+# --- Round 9, HIGH 3 del gate: la ventana de 10 min de round 8 hacia que
+#     trafico mas lento que ~1 fallo cada 200s NUNCA juntara tres dentro de
+#     la ventana -- medido, 80 fallos consecutivos espaciados 301s aparte
+#     no disparaban ninguna sonda; a 300s si. Una ruta muerta en un
+#     despliegue de trafico bajo se quedaba primera en `ordenar` para
+#     siempre. La sospecha ahora es un CONTADOR consecutivo, sin ventana:
+#     no evapora "porque el servicio esta tranquilo", solo se reinicia en
+#     un exito real. ---
+
+async def test_la_sospecha_no_evapora_aunque_el_trafico_sea_lento():
     p = _proxy(lambda req: httpx.Response(500))
-    # Dos fallos, y un tercero mas alla de VENTANA_SOSPECHA_S: los dos
-    # primeros ya decayeron cuando llega el tercero, asi que nunca se juntan
-    # tres DENTRO de la ventana y no se dispara ninguna sonda.
+    # Tres fallos separados por MUCHO mas que la vieja ventana de 10 min --
+    # exactamente el escenario que el gate midio (301s de por medio) y que
+    # antes dejaba la sospecha en cero para siempre.
+    await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+    await p.completar([_ruta("a:free")], CUERPO, ahora=10_000.0)
+    await p.completar([_ruta("a:free")], CUERPO, ahora=20_000.0)
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns["kilo/a:free"] > 0.0
+
+
+async def test_un_exito_reinicia_el_contador_de_sospecha_no_el_reloj():
+    # La proteccion real contra "dos incidentes no relacionados que se
+    # suman" es el reinicio-en-exito, no una ventana de tiempo: dos fallos,
+    # un exito real de por medio, y otros dos fallos (aunque lleguen
+    # rapido) no deben sumar cuatro -- tienen que volver a empezar de cero.
+    estado = {"codigo": 500}
+
+    def handler(req):
+        return httpx.Response(estado["codigo"])
+
+    p = _proxy(handler)
     await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
     await p.completar([_ruta("a:free")], CUERPO, ahora=1.0)
-    await p.completar([_ruta("a:free")], CUERPO, ahora=VENTANA_SOSPECHA_S + 10.0)
+    estado["codigo"] = 200
+
+    def handler_ok(req):
+        return httpx.Response(200, json=_ok())
+    p.http = httpx.AsyncClient(transport=httpx.MockTransport(handler_ok))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=2.0)  # exito: reinicia
+
+    p.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    await p.completar([_ruta("a:free")], CUERPO, ahora=3.0)
+    await p.completar([_ruta("a:free")], CUERPO, ahora=4.0)
     await p.esperar_sondas_pendientes()
-    assert "kilo/a:free" not in p.cooldowns
+    assert "kilo/a:free" not in p.cooldowns  # solo dos fallos NUEVOS, no alcanza
+
+
+# --- Round 9, HIGH 4 del gate: round 8 excluyo a las rutas de pago del
+#     mecanismo de sospecha+sonda entero (nunca se sondean, una sonda bajo
+#     demanda gastaria plata sin dueno) -- pero eso, solo, dejaba una ruta
+#     de pago rota facturando cada pedido para siempre sin que NADA la
+#     excluyera (round 7 SI la enfriaba). Se reintroduce un castigo
+#     DIRECTO, sin sonda, con el mismo umbral -- bounded por ser el ultimo
+#     escalon de la cadena. ---
+
+async def test_las_rutas_de_pago_castigan_directo_sin_ninguna_sonda():
+    p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
+    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    for i in range(UMBRAL_SOSPECHA):
+        await p.completar([ruta_pago], CUERPO, ahora=float(i))
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns["minimax/m1"] > 0.0
+    # Directo: nunca se disparo (ni se gasto) ninguna sonda para llegar ahi.
     assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
-async def test_las_rutas_de_pago_no_acumulan_sospecha_ni_se_sondean():
-    # Decision explicita (ver el docstring de _sospechar en proxy.py): las
-    # rutas de pago quedan afuera del mecanismo entero -- nunca se sondean
-    # (sondeo.py), y una sonda bajo demanda gastaria plata real sin un dueno
-    # natural de esa cuenta. Solo el 429 las sigue pudiendo castigar.
+async def test_menos_del_umbral_no_castiga_una_ruta_de_pago():
     p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
     ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
-    for i in range(UMBRAL_SOSPECHA * 5):   # mucho mas que el umbral
+    for i in range(UMBRAL_SOSPECHA - 1):
         await p.completar([ruta_pago], CUERPO, ahora=float(i))
     await p.esperar_sondas_pendientes()
     assert "minimax/m1" not in p.cooldowns
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+
+
+async def test_un_exito_de_pago_limpia_el_contador_de_fallos_de_pago():
+    estado = {"fallos": 0}
+
+    def handler(req):
+        estado["fallos"] += 1
+        if estado["fallos"] <= UMBRAL_SOSPECHA - 1:
+            return httpx.Response(500)
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler, proveedores=("minimax",))
+    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    for i in range(UMBRAL_SOSPECHA - 1):
+        await p.completar([ruta_pago], CUERPO, ahora=float(i))
+    await p.completar([ruta_pago], CUERPO, ahora=float(UMBRAL_SOSPECHA))  # exito
+    assert "minimax/m1" not in p.cooldowns
+
+
+# --- Round 9, HIGH 2 del gate: el cooldown se estampaba con el `ahora` de
+#     cuando arranco el intento, no con cuanto tardo. Medido en produccion
+#     (TIMEOUT_S=90): exclusion efectiva max(0, 60*2^(n-1) - 90) = 0s, 30s,
+#     150s, 390s en los primeros cuatro castigos -- una ruta COLGADA nacia
+#     con su cooldown ya vencido. Se prueba con una demora real chica (no
+#     90s reales) para verificar la aritmetica sin volver el test lento. ---
+
+async def test_el_cooldown_de_un_intento_lento_no_nace_ya_comido():
+    demora_s = 0.05
+
+    async def handler(req):
+        await asyncio.sleep(demora_s)
+        return httpx.Response(500)
+
+    p = _proxy(handler)
+    ahora = 1000.0
+    r = await p.completar([_ruta("a:free")], CUERPO, ahora=ahora, es_sonda=True)
+    assert r.estado == 503
+    # Sin el fix: cooldowns["kilo/a:free"] == ahora + COOLDOWN_BASE_S exacto.
+    # Con el fix: ahora + demora_s + COOLDOWN_BASE_S -- mas que eso.
+    assert p.cooldowns["kilo/a:free"] > ahora + COOLDOWN_BASE_S
+    assert p.cooldowns["kilo/a:free"] >= ahora + demora_s + COOLDOWN_BASE_S
+
+
+# --- Round 9, MEDIUM 5 del gate: un exito de una sonda bajo demanda podia
+#     borrar un 429 real MAS NUEVO que la propia sonda, si el 429 llegaba
+#     mientras la sonda seguia en vuelo -- un camino para que un cliente
+#     cancelara el "pariate" del proveedor via sondas y siguiera martillando
+#     la llave compartida. ---
+
+async def test_una_sonda_exitosa_no_borra_un_429_mas_nuevo_que_ella():
+    sonda_en_curso = asyncio.Event()
+    continuar_sonda = asyncio.Event()
+    trafico = {"codigo": 500}
+
+    async def handler(req):
+        cuerpo = json.loads(req.content)
+        if cuerpo["messages"][0]["content"] == "ping":
+            sonda_en_curso.set()
+            await continuar_sonda.wait()
+            return httpx.Response(200, json=_ok())
+        return httpx.Response(trafico["codigo"])
+
+    p = _proxy(handler)
+    for i in range(UMBRAL_SOSPECHA):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    await sonda_en_curso.wait()  # la sonda arranco y quedo congelada en vuelo
+
+    # Mientras tanto, un 429 REAL llega por trafico normal -- mas nuevo que
+    # la sonda que todavia no termino.
+    trafico["codigo"] = 429
+    await p.completar([_ruta("a:free")], CUERPO, ahora=1000.0)
+    assert p.cooldowns["kilo/a:free"] == 1000.0 + COOLDOWN_429_DEFAULT_S
+
+    # Se libera la sonda: resuelve EXITOSA -- pero no debe pisar el 429 que
+    # llego despues de que arranco.
+    continuar_sonda.set()
+    await p.esperar_sondas_pendientes()
+    assert p.cooldowns["kilo/a:free"] == 1000.0 + COOLDOWN_429_DEFAULT_S
+
+
+async def test_una_sonda_no_arranca_si_la_ruta_ya_esta_en_cooldown():
+    # Corolario del mismo fix: si para cuando le toca correr la ruta YA
+    # esta en cooldown (p.ej. un 429 que llego antes de que el scheduler le
+    # diera tiempo a la tarea), ni se gasta la sonda.
+    llamadas_ping = []
+
+    async def handler(req):
+        cuerpo = json.loads(req.content)
+        if cuerpo["messages"][0]["content"] == "ping":
+            llamadas_ping.append(1)
+        return httpx.Response(200, json=_ok())
+
+    p = _proxy(handler)
+    p.cooldowns["kilo/a:free"] = 10_000.0  # ya castigada, bien en el futuro
+    await p._probar_bajo_demanda(_ruta("a:free"), ahora=100.0)
+    assert llamadas_ping == []
+
+
+# --- Round 9, MEDIUM 6 del gate: el limite de sondas bajo demanda era POR
+#     RUTA -- el AGREGADO no estaba acotado. Medido: 11 rutas, 15.840
+#     pedidos extra por dia. Tope global, independiente de cuantas rutas
+#     tenga el catalogo. ---
+
+async def test_el_limite_global_de_sondas_bajo_demanda_se_respeta():
+    llamadas_ping = []
+
+    def handler(req):
+        cuerpo = json.loads(req.content)
+        if cuerpo["messages"][0]["content"] == "ping":
+            llamadas_ping.append(1)
+            return httpx.Response(200, json=_ok())
+        return httpx.Response(500)
+
+    p = _proxy(handler)
+    rutas = _multi(*[f"m{i}:free" for i in range(LIMITE_PROBE_GLOBAL_POR_MINUTO + 3)])
+    for ruta in rutas:
+        for i in range(UMBRAL_SOSPECHA):
+            await p.completar([ruta], CUERPO, ahora=0.0)
+    await p.esperar_sondas_pendientes()
+    assert len(llamadas_ping) == LIMITE_PROBE_GLOBAL_POR_MINUTO
+
+
+async def test_el_limite_global_se_libera_pasada_la_ventana():
+    llamadas_ping = []
+
+    def handler(req):
+        cuerpo = json.loads(req.content)
+        if cuerpo["messages"][0]["content"] == "ping":
+            llamadas_ping.append(1)
+            return httpx.Response(200, json=_ok())
+        return httpx.Response(500)
+
+    p = _proxy(handler)
+    rutas = _multi(*[f"m{i}:free" for i in range(LIMITE_PROBE_GLOBAL_POR_MINUTO + 1)])
+    for ruta in rutas:
+        for i in range(UMBRAL_SOSPECHA):
+            await p.completar([ruta], CUERPO, ahora=0.0)
+    await p.esperar_sondas_pendientes()
+    assert len(llamadas_ping) == LIMITE_PROBE_GLOBAL_POR_MINUTO
+
+    # La ruta que se quedo sin cupo sigue con la sospecha en el tope (no se
+    # resetea) -- mas alla de la ventana global, la proxima falla la
+    # vuelve a intentar y esta vez el cupo esta libre.
+    faltante = rutas[-1]
+    await p.completar([faltante], CUERPO, ahora=VENTANA_PROBE_GLOBAL_S + 10.0)
+    await p.esperar_sondas_pendientes()
+    assert len(llamadas_ping) == LIMITE_PROBE_GLOBAL_POR_MINUTO + 1
+
+
+# --- Round 9, LOW 8 del gate: la sonda bajo demanda corre en un
+#     asyncio.Task en segundo plano -- una excepcion NO-HTTP (completar()
+#     solo atrapa httpx.HTTPError) quedaba sin recuperar, silenciosa, con
+#     `_sospechas` sin limpiar: la ruta quedaba trabada. ---
+
+async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas(caplog):
+    p = _proxy(lambda req: httpx.Response(500))
+    # La excepcion tiene que pasar DENTRO del intento de la SONDA (el
+    # (UMBRAL_SOSPECHA+1)-esimo registrar_evento -- los primeros
+    # UMBRAL_SOSPECHA son el trafico real que arma la sospecha), y ANTES
+    # de que completar() llegue a su propia decision de castigo -- para
+    # que el veredicto quede genuinamente sin resolver, no ya tomado.
+    original = p.almacen.registrar_evento
+    contador = {"n": 0}
+
+    def _registrar_evento_que_a_veces_revienta(*a, **kw):
+        contador["n"] += 1
+        if contador["n"] > UMBRAL_SOSPECHA:
+            raise RuntimeError("contencion simulada de sqlite bajo WAL")
+        return original(*a, **kw)
+    p.almacen.registrar_evento = _registrar_evento_que_a_veces_revienta
+
+    for i in range(UMBRAL_SOSPECHA):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    await p.esperar_sondas_pendientes()  # no cuelga ni propaga
+
+    assert "kilo/a:free" not in p.cooldowns  # sin veredicto, no muerta por accidente
+    assert "sonda bajo demanda" in caplog.text  # quedo logueado, no silencioso
+    assert "kilo/a:free" not in p._sospechas  # no queda trabada esperando para siempre

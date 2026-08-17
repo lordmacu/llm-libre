@@ -12,7 +12,8 @@ from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.auth import LimitadorPorLlave
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.proveedores import Proveedor
-from llm_libre.proxy import TOPE_PENDIENTES, UMBRAL_SOSPECHA, Proxy
+from llm_libre.proxy import (LIMITE_PROBE_BAJO_DEMANDA_S, TOPE_PENDIENTES,
+                             UMBRAL_SOSPECHA, Proxy)
 
 
 def _hoy() -> str:
@@ -229,6 +230,10 @@ def test_health_no_es_ok_si_la_gratis_falla_de_verdad(estado_cliente):
     # igual si solo mirara cooldowns.
     for _ in range(10):
         estado.almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora)
+    # Round 9: una sola sonda fallida ya no alcanza para /health (ver
+    # Almacen.tiene_evidencia_de_vida) -- dos consecutivas, sin exito de
+    # por medio, si.
+    estado.almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
     estado.almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     assert estado.proxy.cooldowns == {}  # confirma que no es por cooldown
 
@@ -374,6 +379,8 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     for _ in range(10):
         almacen1.registrar_evento("kilo/a:free", False, 0, 500, ahora)
+    # Round 9: hacen falta DOS sondas fallidas consecutivas, no una.
+    almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
     almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     proxy1 = Proxy(
         {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
@@ -597,8 +604,16 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
         rutas = almacen1.rutas_activas()
         for _ in range(30):
             await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
+        await proxy1.esperar_sondas_pendientes()
 
     asyncio.run(_mandar_401_treinta_veces())
+    # Round 9: la sospecha (30x401 reales) dispara UNA sonda bajo demanda
+    # -- pero /health ahora exige DOS fallidas consecutivas (ver
+    # Almacen.tiene_evidencia_de_vida). Se agrega la confirmatoria
+    # directamente: el mecanismo que la PRIMERA sonda se dispara sola ya
+    # esta cubierto en test_proxy.py; este test es sobre PERSISTENCIA tras
+    # un reinicio, no sobre el rate-limit real de 60s entre sondas.
+    almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
     cliente1 = TestClient(crear_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
@@ -770,21 +785,30 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
             lambda req: httpx.Response(500))))   # rota para CUALQUIER payload, incluida la sonda
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
 
-    async def _umbral_pedidos():
+    async def _dos_rachas_de_umbral_pedidos():
         rutas = almacen1.rutas_activas()
         for i in range(UMBRAL_SOSPECHA):
             await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
         await proxy1.esperar_sondas_pendientes()
+        # Segunda racha, mas alla del rate-limit de sondas bajo demanda:
+        # dispara una SEGUNDA sonda por el mecanismo real. Round 9 exige
+        # dos fallidas consecutivas (ver Almacen.tiene_evidencia_de_vida)
+        # para que /health la trate como muerta -- una sola ya no alcanza.
+        ahora2 = ahora + LIMITE_PROBE_BAJO_DEMANDA_S + UMBRAL_SOSPECHA + 10
+        for i in range(UMBRAL_SOSPECHA):
+            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora2 + i)
+        await proxy1.esperar_sondas_pendientes()
 
-    asyncio.run(_umbral_pedidos())
+    asyncio.run(_dos_rachas_de_umbral_pedidos())
     cliente1 = TestClient(crear_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
 
-    fila = almacen1._con.execute(
-        "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
-    assert fila == ("salud", 0)
+    filas = almacen1._con.execute(
+        "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchall()
+    assert len(filas) == 2
+    assert all(f == ("salud", 0) for f in filas)
 
     # Segundo proceso, con un transport SANO -- para probar que "caido"
     # viene de la sonda YA persistida, no de trafico nuevo que este proceso
@@ -934,6 +958,56 @@ def test_streaming_pago_cuenta_uso_y_el_tope_ata():
                       json={"model": "auto", "messages": [], "stream": True})
     assert estado.almacen.uso_pago("buena", dia) == 1  # el tope realmente ato
     assert "error" in r2.text  # ninguna ruta viable: free sigue caida, pago se excluyo
+
+
+# --- Round 9, HIGH 4 del gate: round 8 solo contaba uso de pago en el
+#     EXITO (`r.ruta`/`en_ruta_comprometida`) -- pero un 200 con contenido
+#     vacio (un modelo de razonamiento que se gasta el presupuesto) el
+#     proveedor lo COBRA igual, aunque el gateway lo trate como fallido y
+#     siga la cadena. Medido: 40/40 llamadas facturables con
+#     `pago_hoy: 0`, TOPE_PAGO_DIARIO nunca actuando. Ahora se cuenta todo
+#     intento con status 200 contra una ruta de pago, sirva o no. ---
+
+def test_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
+    vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
+    estado, cliente = _estado_libre_y_pago(
+        tope_pago_diario=5,
+        hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
+        hacer_resp_paid=lambda: httpx.Response(200, content=vacio))
+    dia = _hoy()
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "stream": True})
+    assert r.status_code == 200
+    assert estado.almacen.uso_pago("buena", dia) == 1  # facturable, aunque no sirvio
+
+
+def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    almacen.upsert_rutas([
+        Ruta("free_prov", "f:free", "gratis", Capacidades(True, False, 100000, 4096)),
+        Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
+    ], 1.0)
+    prov = {
+        "free_prov": Proveedor("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
+        "paid_prov": Proveedor("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
+    }
+    vacio = {"choices": [{"message": {"role": "assistant", "content": None}}]}
+
+    def responder(req):
+        if "f.test" in str(req.url):
+            return httpx.Response(500, json={"error": "free caida"})
+        return httpx.Response(200, json=vacio)
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(responder))
+    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
+                    llaves={"buena"}, tope_pago_diario=5)
+    cliente = TestClient(crear_app(estado))
+    dia = _hoy()
+    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": []})
+    assert r.status_code == 503  # nada sirvio de verdad al cliente
+    assert estado.almacen.uso_pago("buena", dia) == 1  # pero SI se factura
 
 
 def test_streaming_servido_por_gratis_no_cuenta_uso_de_pago():

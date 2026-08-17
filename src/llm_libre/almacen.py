@@ -292,9 +292,30 @@ class Almacen:
         autocorrige; una ruta que `/health` declara muerta REINICIA EL
         CONTENEDOR (Coolify usa `/health` como health check). La asimetria
         es el punto: el ranking puede permitirse ser sensible, la salud
-        no."""
+        no.
+
+        Round 9: UNA sonda fallida sola YA NO ALCANZA -- hacen falta DOS
+        señales consecutivas fallidas (sin exito de por medio) antes de
+        tratarlo como evidencia de muerte. Antes de round 9, "la señal mas
+        reciente decide" bastaba porque el UNICO disparador de una sonda
+        era el ciclo periodico (cada 5h, ritmo fijo, nunca influido por un
+        cliente). Desde que el trafico real puede disparar sondas BAJO
+        DEMANDA (hasta 60/h por ruta, ~300x mas seguido que el ciclo de 5h),
+        un cliente controla CUANDO se muestrea una ruta -- y mas muestras
+        significa mas chances de agarrar, por puro azar, un problema
+        transitorio del proveedor (un blip de red, un timeout aislado) justo
+        en UNA sonda, y que `/health` lo trate como un veredicto definitivo
+        que sobrevive un reinicio de contenedor. Exigir DOS fallos
+        consecutivos dejaria que un problema genuinamente transitorio se
+        resuelva solo (la proxima sonda o el proximo pedido real, casi
+        siempre exitosos) antes de que /health lo de por muerto, sin perder
+        deteccion rapida de un apagon real (una ruta de verdad rota sigue
+        fallando la SEGUNDA sonda igual que la primera). Un EXITO real
+        sigue alcanzando con uno solo -- la asimetria "un exito prueba vida,
+        un fallo aislado no prueba muerte" es la misma de siempre, solo que
+        ahora tambien aplica DENTRO de la comparacion entre sondas."""
         corte = ahora - VENTANA_EVIDENCIA_VIDA_S
-        senal_mas_reciente = self._con.execute(
+        senales = self._con.execute(
             """SELECT ok FROM (
                    SELECT momento, 1 AS ok FROM eventos
                        WHERE clave = ? AND ok = 1 AND momento >= ?
@@ -303,10 +324,16 @@ class Almacen:
                        WHERE clave = ? AND tipo = 'salud' AND momento >= ?
                )
                ORDER BY momento DESC
-               LIMIT 1""",
-            (clave, corte, clave, corte)).fetchone()
-        if senal_mas_reciente is not None:
-            return bool(senal_mas_reciente[0])
+               LIMIT 2""",
+            (clave, corte, clave, corte)).fetchall()
+        if senales:
+            if senales[0][0]:
+                return True
+            # La señal mas reciente es un fallo: hace falta que la ANTERIOR
+            # tambien lo sea (dos consecutivos, sin exito de por medio) --
+            # un solo fallo, o un fallo justo despues de un exito, todavia
+            # no alcanza.
+            return not (len(senales) >= 2 and not senales[1][0])
         cualquier_telemetria = self._con.execute(
             """SELECT 1 FROM eventos WHERE clave = ? AND es_error_cliente = 0
                UNION ALL

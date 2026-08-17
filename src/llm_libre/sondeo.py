@@ -114,7 +114,15 @@ async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None
     # /v1/uso ni contra TOPE_PAGO_DIARIO. Plata real, invisible.
     for ruta in (r for r in rutas if r.tier == "gratis"):
         t0 = time.monotonic()
-        r = await proxy.completar([ruta], dict(PING), ahora)
+        # HIGH 1 (round 9): sin `es_sonda=True` un fallo aca solo acumulaba
+        # SOSPECHA (round 8) -- esta sonda periodica corre UNA vez cada 5h
+        # por ruta, muy por debajo de cualquier umbral de sospecha, asi que
+        # nunca alcanzaba a castigar nada: 20 sondas periodicas contra una
+        # ruta muerta, 20 filas `sondas ok=0`, cero cooldowns. Una sonda
+        # (periodica o bajo demanda) es la unica fuente que puede castigar
+        # sin ambiguedad -- ver el comentario de cabecera de
+        # UMBRAL_SOSPECHA en proxy.py.
+        r = await proxy.completar([ruta], dict(PING), ahora, es_sonda=True)
         ms = int((time.monotonic() - t0) * 1000)
         # `ttft_ms=0`, no `ms`: esta sonda es no-streaming, asi que lo que midio
         # es un round-trip completo y no un time-to-first-token. Escribirlo en

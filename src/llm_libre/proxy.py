@@ -14,7 +14,13 @@ from llm_libre.razonamiento import RecortadorStreamCompuesto, recortar
 
 log = logging.getLogger(__name__)
 
-COOLDOWN_BASE_S = 60.0
+COOLDOWN_BASE_S = 60.0  # backoff de una ruta castigada por una SONDA (propia,
+                         # confirmada) o por fallos de pago directos -- ver
+                         # _castigar. Round 9: el 429 YA NO usa esto (ver
+                         # _castigar_429 y COOLDOWN_429_*, mas abajo) -- una
+                         # sonda confirmada es evidencia mas fuerte que un
+                         # simple "pariate" del proveedor, y merece un
+                         # backoff que SI escala si la ruta sigue rota.
 COOLDOWN_TOPE_S = 3600.0
 TIMEOUT_S = 90.0
 
@@ -75,23 +81,34 @@ PING = {"messages": [{"role": "user", "content": "ping"}],
 # diciendo "pariate" -- evidencia de la ruta tan inequivoca como una sonda,
 # sin necesitar que se confirme con una. Su backoff ya esta probado; este
 # round no lo toca.
-UMBRAL_SOSPECHA = 3  # cuantos fallos de TRAFICO REAL, dentro de la ventana
-                      # de decaimiento de abajo, hacen falta para programar
+UMBRAL_SOSPECHA = 3  # cuantos fallos de TRAFICO REAL CONSECUTIVOS (round 9:
+                      # ya no "dentro de una ventana de tiempo" -- ver el
+                      # hallazgo HIGH 3 mas abajo) hacen falta para programar
                       # una sonda propia contra esa ruta. El mismo numero que
                       # el viejo TOPE_FALLOS_SEGUIDOS de round 7 -- no es
                       # sagrado, pero mantiene la intuicion de "tres
                       # seguidos" que el spec/README ya usan en otros lados.
 
-VENTANA_SOSPECHA_S = 600.0  # 10 min. La sospecha DECAE: solo cuentan los
-                             # fallos de los ultimos 10 minutos, no todos los
-                             # que una ruta acumulo alguna vez. Mucho mas
-                             # corta que "horas" a proposito -- fallos de un
-                             # incidente real disperso a lo largo de horas
-                             # nunca se suman para disparar una sonda
-                             # espuria -- pero sigue siendo generosa para
-                             # trafico real que no llega en una rafaga
-                             # perfecta.
-
+# Round 9, HIGH 3 del gate. La ronda anterior contaba "3 fallos dentro de
+# los ultimos 10 minutos" -- pero eso significa que trafico mas lento que
+# 1 fallo cada ~200s NUNCA junta tres dentro de la ventana antes de que el
+# primero decaiga: medido, 80 fallos consecutivos espaciados 301s aparte no
+# disparaban NINGUNA sonda; a 300s (el limite exacto de la ventana) si. Una
+# ruta muerta en un despliegue de trafico bajo se queda primera en
+# `ordenar` para siempre -- el defecto original de round 1, de vuelta.
+#
+# La sospecha ahora es un CONTADOR de fallos consecutivos, sin ventana de
+# tiempo: se reinicia a 0 en cualquier exito (ver el `pop` en completar()/
+# completar_stream()), pase lo que pase entremedio. No evapora "porque el
+# servicio esta tranquilo" -- si nunca hay un exito, tres fallos SEPARADOS
+# POR HORAS siguen siendo tres fallos consecutivos. Esto no reabre ningun
+# vector de las ocho rondas anteriores: esos eran todos sobre EXCLUSION
+# DIRECTA por trafico de cliente, y sospecha nunca excluye nada por si
+# sola -- sigue haciendo falta que la SONDA (payload del gateway, nunca del
+# cliente) confirme. La proteccion real contra "incidentes no relacionados
+# que se suman" siempre fue el reinicio-en-cualquier-exito, no el reloj:
+# dos incidentes de verdad separados casi siempre tienen un exito real
+# entremedio.
 LIMITE_PROBE_BAJO_DEMANDA_S = 60.0  # como maximo UNA sonda bajo demanda por
                                      # ruta cada 60s, sin importar cuantos
                                      # pedidos sospechosos lleguen mientras
@@ -113,6 +130,40 @@ LIMITE_PROBE_BAJO_DEMANDA_S = 60.0  # como maximo UNA sonda bajo demanda por
                                      # el peor resultado posible para el
                                      # atacante es gastar ese cupo fijo sin
                                      # lograr nunca que una ruta sana caiga.
+
+# Round 9, MEDIUM 6 del gate: el limite de arriba es POR RUTA, pero el
+# AGREGADO no estaba acotado -- con N rutas en el catalogo (N no lo controla
+# el operador, sale del catalogo VIVO), el peor caso es N x 60 sondas/hora.
+# Medido: 11 rutas, 15.840 pedidos extra por dia contra la MISMA cuota
+# gratis que necesita el trafico real. Tope GLOBAL, independiente de N: como
+# maximo `LIMITE_PROBE_GLOBAL_POR_MINUTO` sondas bajo demanda arrancan por
+# minuto, sumando TODAS las rutas. Con 5/min (300/hora, 7200/dia) un
+# catalogo del tamano de referencia (11 rutas) queda investigado entero en
+# un par de minutos aunque las 11 esten sospechosas a la vez, y ningun
+# tamano de catalogo puede hacer crecer el costo agregado mas alla de eso.
+LIMITE_PROBE_GLOBAL_POR_MINUTO = 5
+VENTANA_PROBE_GLOBAL_S = 60.0
+
+# Round 9, MEDIUM 7 del gate ("el 429 es el unico resorte que le queda al
+# cliente"). Un 429 SI sigue castigando de inmediato -- es el proveedor
+# mismo diciendo "pariate", tan inequivoco como una sonda -- pero hasta
+# ahora reutilizaba el backoff exponencial de _castigar (hasta
+# COOLDOWN_TOPE_S=3600s). Medido: 12 pedidos de UNA llave alcanzaban para
+# enfriar las 3 rutas de un catalogo chico via 429 real, otra llave caia a
+# 503, /health se iba a "caido" -- por una ventana de rate-limit que el
+# PROPIO proveedor tipicamente resetea en segundos a un minuto, no en una
+# hora. El 429 sigue siendo el UNICO resorte que le queda al trafico de un
+# cliente para afectar una ruta directo (justificado: es evidencia
+# inequivoca de la ruta, no necesita confirmarse con una sonda) -- pero la
+# DURACION tiene que ser proporcional a lo que de verdad esta pasando
+# (una ventana de rate-limit), no escalar hacia una exclusion de una hora
+# cruzando TODAS las llaves. Se respeta el `Retry-After` del proveedor
+# cuando lo manda (es la fuente mas precisa posible); si no lo manda, se usa
+# un default corto; en cualquier caso se topea (`COOLDOWN_429_MAXIMO_S`)
+# para que un `Retry-After` absurdo (o malicioso, via un proveedor
+# comprometido) no vuelva a abrir la puerta a una exclusion de horas.
+COOLDOWN_429_DEFAULT_S = 30.0
+COOLDOWN_429_MAXIMO_S = 300.0
 
 # Revision de Task 13, hallazgo 2. Solo un 429 castigaba (con backoff
 # exponencial, ver _castigar): un 500, un timeout o un error de red no
@@ -279,10 +330,25 @@ class Proxy:
         self.http = cliente_http
         self.cooldowns: dict[str, float] = {}
         self._castigos: dict[str, int] = {}
-        # Round 8: marcas de tiempo de fallos de TRAFICO REAL por ruta,
-        # podadas a VENTANA_SOSPECHA_S en cada llamada -- ver _sospechar().
-        self._sospechas: dict[str, list[float]] = {}
+        # Round 9: numero de generaciones que un cooldown/castigo tuvo para
+        # esta clave (se incrementa en CADA _castigar/_castigar_429/
+        # _limpiar_castigo) -- deja que una sonda bajo demanda detecte si
+        # algo (tipicamente un 429 real) modifico el estado de la ruta
+        # MIENTRAS la sonda estaba en vuelo, y evite pisarlo (MEDIUM 5).
+        self._generacion_cooldown: dict[str, int] = {}
+        # Round 9 (HIGH 3): contador de fallos CONSECUTIVOS de trafico real
+        # por ruta gratis, sin ventana de tiempo -- se reinicia a 0 en
+        # cualquier exito. Ver _sospechar().
+        self._sospechas: dict[str, int] = {}
+        # Round 9 (HIGH 4): igual que arriba pero para rutas de PAGO, que no
+        # pasan por sospecha+sonda (nunca se sondean, ver _sospechar_pago) --
+        # cuenta hacia un castigo DIRECTO, sin sonda de por medio.
+        self._fallos_pago: dict[str, int] = {}
         self._ultimo_probe_bajo_demanda: dict[str, float] = {}
+        # Round 9 (MEDIUM 6): marcas de tiempo de sondas bajo demanda
+        # arrancadas, sumando TODAS las rutas -- tope agregado independiente
+        # del tamano del catalogo. Ver LIMITE_PROBE_GLOBAL_POR_MINUTO.
+        self._probes_recientes: list[float] = []
         # Sondas bajo demanda en vuelo (asyncio.Task), por clave -- evita
         # disparar dos sondas superpuestas contra la MISMA ruta si varios
         # pedidos concurrentes cruzan el umbral casi al mismo tiempo, y le
@@ -290,16 +356,28 @@ class Proxy:
         self._sondas_en_curso: dict[str, asyncio.Task] = {}
 
     async def completar(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
-                        crudo: bool = False, es_sonda: bool = False) -> Respuesta:
+                        crudo: bool = False, es_sonda: bool = False,
+                        en_intento_facturable: Callable[[Ruta], None] | None = None
+                        ) -> Respuesta:
         """`es_sonda=True` es exclusivamente para uso INTERNO (sondeo
         periodico via `sondeo.sondear_salud`, y la sonda bajo demanda de
         `_probar_bajo_demanda` -- nunca lo pasa un pedido de un cliente
         real): cambia como se interpreta un fallo NO-429. Con
         `es_sonda=False` (el default, todo trafico real) un fallo solo
-        acumula SOSPECHA (`_sospechar`, ver UMBRAL_SOSPECHA). Con
-        `es_sonda=True` un fallo castiga la ruta de inmediato
-        (`_castigar`), sin pasar por sospecha ni programar otra sonda:
-        una sonda ya ES la verificacion, no hay nada mas que confirmar."""
+        acumula SOSPECHA (`_sospechar`/`_sospechar_pago`, ver
+        UMBRAL_SOSPECHA) -- nunca castiga directo. Con `es_sonda=True` un
+        fallo castiga la ruta de inmediato (`_castigar`), sin pasar por
+        sospecha ni programar otra sonda: una sonda ya ES la verificacion,
+        no hay nada mas que confirmar.
+
+        `en_intento_facturable`, si se pasa, se llama por cada intento
+        contra una ruta de PAGO que el proveedor respondio con `200` --
+        exitoso o no (HIGH 4, round 9): el proveedor cobra por generar la
+        respuesta, no por que el gateway la considere util. `r.ruta`
+        (arriba, exito) solo marca el intento que de verdad sirvio al
+        cliente; este callback marca TODO intento facturable, para que
+        quien factura (api.py) no pierda el caso "200 con contenido vacio"
+        -- billable y silencioso hasta esta ronda."""
         intentos = 0
         ultimo_error = None
         ultimo_codigo = 0
@@ -322,6 +400,22 @@ class Proxy:
             # `latencia_ms`; `ttft_ms` queda en 0 para no contaminar un p50 que
             # significa otra cosa. Ver el comentario de cabecera de almacen.py.
             latencia = int((time.monotonic() - t0) * 1000)
+            # HIGH 2 (round 9): el cooldown que un fallo de ESTE intento
+            # dispare se estampa con AHORA + cuanto tardo ESTE intento, no
+            # con el `ahora` crudo. Si el intento tardo hasta TIMEOUT_S=90s
+            # (una ruta colgada -- el caso que este mecanismo entero existe
+            # para atrapar) y se estampa con el `ahora` de cuando EMPEZO el
+            # intento, el cooldown nace con hasta 90s ya "comidos": con
+            # COOLDOWN_BASE_S=60, el primer castigo (60s nominales) nace YA
+            # EXPIRADO. Medido: exclusion efectiva max(0, 60*2^(n-1) - 90) =
+            # 0s, 30s, 150s, 390s en los primeros cuatro castigos -- la ruta
+            # colgada segia de punta en la cadena. Con MockTransport (sin
+            # demora real) `latencia` es ~0 y esto es un no-op: no cambia
+            # ningun test existente.
+            ahora_del_castigo = ahora + latencia / 1000.0
+
+            if codigo == 200 and ruta.tier == "pago" and en_intento_facturable is not None:
+                en_intento_facturable(ruta)
 
             # Un 200 con cuerpo no parseable (p.ej. una pagina de mantenimiento
             # HTML servida con status 200) no es un exito: se trata como intento
@@ -363,17 +457,20 @@ class Proxy:
                                           es_error_cliente=_es_error_del_cliente(codigo))
 
             if exito:
-                self._limpiar_castigo(ruta.clave)
                 self._sospechas.pop(ruta.clave, None)
+                self._fallos_pago.pop(ruta.clave, None)
+                # MEDIUM 5 (round 9): con es_sonda=True, la limpieza queda
+                # diferida a _probar_bajo_demanda (que chequea si un 429
+                # castigo la ruta MIENTRAS esta sonda estaba en vuelo antes
+                # de limpiar) -- completar() no puede saber eso desde aca.
+                if not es_sonda:
+                    self._limpiar_castigo(ruta.clave)
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
-                self._castigar(ruta.clave, ahora)
+                self._castigar_429(ruta.clave, ahora_del_castigo, resp)
             elif not _es_error_del_cliente(codigo):
-                if es_sonda:
-                    self._castigar(ruta.clave, ahora)
-                else:
-                    self._sospechar(ruta, ahora)
+                self._reaccionar_a_fallo_no_429(ruta, ahora, ahora_del_castigo, es_sonda)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
 
         # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
@@ -390,7 +487,8 @@ class Proxy:
 
     async def completar_stream(self, rutas: list[Ruta], cuerpo: dict, ahora: float,
                                crudo: bool = False,
-                               en_ruta_comprometida: Callable[[Ruta], None] | None = None):
+                               en_ruta_comprometida: Callable[[Ruta], None] | None = None,
+                               en_intento_facturable: Callable[[Ruta], None] | None = None):
         """Emite lineas SSE ya recortadas, terminando siempre en `data: [DONE]`.
 
         Hace failover solo ANTES del primer byte util: una vez que al cliente le
@@ -405,16 +503,22 @@ class Proxy:
         telemetria (`_registrar_exito_una_vez`, mas abajo) -- no desde el
         status 200 crudo, porque un 200 que muere sin emitir nada antes del
         primer byte util TODAVIA hace failover a la siguiente ruta (ver mas
-        arriba) y ahi no hubo servicio real. Sirve para que el llamador pueda
-        contar uso de pago (u otra cosa) atado a "esta ruta sirvio", sin
-        arriesgarse a contar de mas ni de menos.
+        arriba) y ahi no hubo servicio real.
+
+        `en_intento_facturable`, si se pasa, se llama por cada intento contra
+        una ruta de PAGO cuyo status inicial fue `200` -- exitoso o no (HIGH
+        4, round 9: el proveedor cobra por generar la respuesta, incluido un
+        stream que termina sin contenido util). Distinto de
+        `en_ruta_comprometida`: ese marca solo la ruta GANADORA, este marca
+        todo intento facturable.
 
         Nunca se llama con `es_sonda` (round 8: sondeo.py jamas streamea) --
         todo fallo aca es TRAFICO REAL, y CADA rama de fallo (status != 200,
         stream sin contenido util, error de red, y el corte por
-        `if emitido:` que no puede seguir la cadena) pasa por `_sospechar`
-        por igual. Ninguna es un atajo que comprometa una ruta directo --
-        ese era justo el vector que motivo este round."""
+        `if emitido:` que no puede seguir la cadena) pasa por
+        `_reaccionar_a_fallo_no_429` por igual -- el mismo punto unico de
+        decision que usa completar(), para que las dos ramas no puedan
+        volver a desincronizarse (ese fue justo el vector de round 8)."""
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
             url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
@@ -440,21 +544,26 @@ class Proxy:
                     evento_registrado = True
                     self._limpiar_castigo(ruta.clave)
                     self._sospechas.pop(ruta.clave, None)
+                    self._fallos_pago.pop(ruta.clave, None)
                     if en_ruta_comprometida is not None:
                         en_ruta_comprometida(ruta)
 
             try:
                 async with self.http.stream("POST", url, headers=cabeceras, json=payload,
                                             timeout=_timeout_de(proveedor)) as resp:
+                    ahora_del_castigo = ahora + (time.monotonic() - t0)
                     if resp.status_code != 200:
                         if resp.status_code == 429:
-                            self._castigar(ruta.clave, ahora)
+                            self._castigar_429(ruta.clave, ahora_del_castigo, resp)
                         elif not _es_error_del_cliente(resp.status_code):
-                            self._sospechar(ruta, ahora)
+                            self._reaccionar_a_fallo_no_429(
+                                ruta, ahora, ahora_del_castigo, es_sonda=False)
                         self.almacen.registrar_evento(
                             ruta.clave, False, 0, resp.status_code, ahora,
                             es_error_cliente=_es_error_del_cliente(resp.status_code))
                         continue
+                    if ruta.tier == "pago" and en_intento_facturable is not None:
+                        en_intento_facturable(ruta)
                     rec = RecortadorStreamCompuesto(desenvolver_canvas=proveedor.desenvuelve_canvas)
                     # Chunks recibidos que todavia no llevan nada util. Se
                     # retienen (no se emiten) hasta que llegue el primero que
@@ -555,7 +664,8 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
-                            self._sospechar(ruta, ahora)
+                            self._reaccionar_a_fallo_no_429(
+                                ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
                         if pendientes:
                             # Lo retenido se va a la basura junto con el intento.
                             # Es lo correcto (nada de eso llego al cliente, asi
@@ -583,7 +693,8 @@ class Proxy:
             except httpx.HTTPError:
                 if not evento_registrado:
                     self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
-                    self._sospechar(ruta, ahora)
+                    self._reaccionar_a_fallo_no_429(
+                        ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
                 if emitido:
                     yield "data: [DONE]\n\n"
                     return
@@ -593,9 +704,54 @@ class Proxy:
         yield "data: [DONE]\n\n"
 
     def _castigar(self, clave: str, ahora: float) -> None:
+        """Castigo con backoff exponencial -- SONDA confirmada (periodica o
+        bajo demanda) o fallos de pago directos (`_sospechar_pago`). Round
+        9: el 429 YA NO pasa por aca, ver `_castigar_429`."""
         n = self._castigos.get(clave, 0) + 1
         self._castigos[clave] = n
         self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_TOPE_S)
+        self._generacion_cooldown[clave] = self._generacion_cooldown.get(clave, 0) + 1
+
+    def _castigar_429(self, clave: str, ahora: float, resp: httpx.Response | None) -> None:
+        """Round 9, MEDIUM 7: el 429 sigue castigando de inmediato (senal
+        inequivoca de la ruta, no necesita sonda) pero YA NO reutiliza el
+        backoff exponencial de `_castigar` (que podia escalar hasta
+        COOLDOWN_TOPE_S=3600s). Se respeta el `Retry-After` del proveedor
+        cuando lo manda; si no, se usa un default corto
+        (COOLDOWN_429_DEFAULT_S); en cualquier caso se topea a
+        COOLDOWN_429_MAXIMO_S. Ver el comentario de cabecera de las
+        constantes para la medicion que motivo el cambio."""
+        duracion = self._retry_after_segundos(resp)
+        if duracion is None:
+            duracion = COOLDOWN_429_DEFAULT_S
+        duracion = min(duracion, COOLDOWN_429_MAXIMO_S)
+        self.cooldowns[clave] = ahora + duracion
+        self._generacion_cooldown[clave] = self._generacion_cooldown.get(clave, 0) + 1
+
+    @staticmethod
+    def _retry_after_segundos(resp: httpx.Response | None) -> float | None:
+        """Parsea `Retry-After` (segundos, o una fecha HTTP) si el proveedor
+        lo manda. `None` si falta o no se puede interpretar -- el llamador
+        cae a un default."""
+        if resp is None:
+            return None
+        valor = resp.headers.get("Retry-After")
+        if not valor:
+            return None
+        try:
+            return max(0.0, float(valor))
+        except ValueError:
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
+            fecha = parsedate_to_datetime(valor)
+            if fecha is None:
+                return None
+            import datetime as _dt
+            zona = fecha.tzinfo or _dt.timezone.utc
+            return max(0.0, (fecha - _dt.datetime.now(zona)).total_seconds())
+        except Exception:
+            return None
 
     def _limpiar_castigo(self, clave: str) -> None:
         """Un exito borra TODO rastro de castigo previo -- 429 y sondas
@@ -604,66 +760,134 @@ class Proxy:
         desincronizarse en cuales diccionarios limpian."""
         self._castigos.pop(clave, None)
         self.cooldowns.pop(clave, None)
+        self._generacion_cooldown[clave] = self._generacion_cooldown.get(clave, 0) + 1
+
+    def _reaccionar_a_fallo_no_429(self, ruta: Ruta, ahora: float, ahora_del_castigo: float,
+                                    es_sonda: bool) -> None:
+        """Punto UNICO de decision para un fallo NO-429 (ver
+        _es_error_del_cliente) -- lo comparten completar() y
+        completar_stream() para que las dos ramas no puedan
+        desincronizarse en como tratan la misma situacion: ese fue
+        exactamente el vector de round 8 (la rama `if emitido:` de
+        completar_stream tenia su propio atajo)."""
+        if es_sonda:
+            self._castigar(ruta.clave, ahora_del_castigo)
+        elif ruta.tier == "pago":
+            self._sospechar_pago(ruta, ahora_del_castigo)
+        else:
+            self._sospechar(ruta, ahora)
 
     def _sospechar(self, ruta: Ruta, ahora: float) -> None:
-        """Round 8: un fallo de TRAFICO REAL nunca excluye una ruta el
-        mismo -- solo acumula sospecha. Al cruzar UMBRAL_SOSPECHA dentro de
-        VENTANA_SOSPECHA_S, programa una sonda BAJO DEMANDA (mismo payload
-        fijo `PING` que la sonda periodica) EN SEGUNDO PLANO
-        (`asyncio.create_task`): no bloquea la respuesta al cliente que
-        disparo el umbral -- ese cliente no tiene por que pagar la latencia
-        extra de investigar una ruta ajena, y bloquear ahi ademas
-        arriesgaria colgar el pedido entero si la ruta esta de verdad
-        trabada (justo el escenario de TIMEOUT_S=90s que este mecanismo
-        existe para evitar). Es esa sonda -- nunca este metodo, nunca el
-        pedido del cliente -- la que decide si la ruta se castiga
-        (`completar(..., es_sonda=True)`, en `_probar_bajo_demanda`).
+        """Round 8/9: un fallo de TRAFICO REAL nunca excluye una ruta el
+        mismo -- solo acumula sospecha. Al cruzar UMBRAL_SOSPECHA fallos
+        CONSECUTIVOS (round 9, HIGH 3: ya no "dentro de una ventana de
+        tiempo" -- ver el comentario de cabecera de UMBRAL_SOSPECHA),
+        programa una sonda BAJO DEMANDA (mismo payload fijo `PING` que la
+        sonda periodica) EN SEGUNDO PLANO (`asyncio.create_task`): no
+        bloquea la respuesta al cliente que disparo el umbral -- ese
+        cliente no tiene por que pagar la latencia extra de investigar una
+        ruta ajena, y bloquear ahi ademas arriesgaria colgar el pedido
+        entero si la ruta esta de verdad trabada (justo el escenario de
+        TIMEOUT_S=90s que este mecanismo existe para evitar). Es esa sonda
+        -- nunca este metodo, nunca el pedido del cliente -- la que decide
+        si la ruta se castiga (`completar(..., es_sonda=True)`, en
+        `_probar_bajo_demanda`).
 
-        Las rutas de PAGO quedan AFUERA de este mecanismo por completo,
-        deliberadamente (ver el decisivo mas abajo): nunca se sondean (§8
-        del diseno, sondeo.py), y una sonda bajo demanda gastaria PLATA
-        REAL contra un proveedor de pago sin un dueno natural de esa
-        cuenta -- el tope diario (TOPE_PAGO_DIARIO) es POR LLAVE, no por
-        ruta, asi que no hay contra que cargarlo aca. Sin sonda posible,
-        no tiene sentido acumular sospecha que nunca se va a resolver: se
-        descarta antes de tocar `_sospechas`. Van ULTIMAS en la cadena de
-        todos modos (§7), asi que solo importan cuando TODO lo gratis ya
-        fallo o esta en cooldown -- el mismo escenario en el que `/health`
-        ya reporta el apagon (Task 13, ronda 6). Solo el 429 (que no pasa
-        por aca) las sigue pudiendo castigar."""
-        if ruta.tier == "pago":
-            return
-        marcas = self._sospechas.setdefault(ruta.clave, [])
-        marcas.append(ahora)
-        corte = ahora - VENTANA_SOSPECHA_S
-        marcas[:] = [m for m in marcas if m >= corte]
-        if len(marcas) < UMBRAL_SOSPECHA:
+        Solo para rutas GRATIS -- las de pago pasan por `_sospechar_pago`
+        (ver `_reaccionar_a_fallo_no_429`), que castiga DIRECTO sin sonda:
+        una sonda bajo demanda gastaria PLATA REAL contra un proveedor de
+        pago sin un dueno natural de esa cuenta (el tope diario es POR
+        LLAVE, no por ruta)."""
+        self._sospechas[ruta.clave] = min(self._sospechas.get(ruta.clave, 0) + 1, UMBRAL_SOSPECHA)
+        if self._sospechas[ruta.clave] < UMBRAL_SOSPECHA:
             return
         if ruta.clave in self._sondas_en_curso:
             return  # ya hay una sonda en vuelo para esta ruta -- no duplicar
         ultimo = self._ultimo_probe_bajo_demanda.get(ruta.clave, float("-inf"))
         if ahora - ultimo < LIMITE_PROBE_BAJO_DEMANDA_S:
-            return  # rate-limitada -- la sospecha queda para la proxima oportunidad
+            return  # rate-limitada por ruta -- la sospecha queda para la proxima oportunidad
+        corte_global = ahora - VENTANA_PROBE_GLOBAL_S
+        self._probes_recientes[:] = [m for m in self._probes_recientes if m >= corte_global]
+        if len(self._probes_recientes) >= LIMITE_PROBE_GLOBAL_POR_MINUTO:
+            # MEDIUM 6: cupo AGREGADO agotado, sin importar que esta ruta en
+            # particular tenga su propio cupo libre -- se reintenta en la
+            # proxima sospecha (el contador no se resetea, sigue >= umbral).
+            return
+        self._probes_recientes.append(ahora)
         self._ultimo_probe_bajo_demanda[ruta.clave] = ahora
         tarea = asyncio.create_task(self._probar_bajo_demanda(ruta, ahora))
         self._sondas_en_curso[ruta.clave] = tarea
         tarea.add_done_callback(lambda _t, clave=ruta.clave: self._sondas_en_curso.pop(clave, None))
 
+    def _sospechar_pago(self, ruta: Ruta, ahora: float) -> None:
+        """HIGH 4 (round 9): las rutas de pago quedan afuera de sospecha+
+        sonda (ver _sospechar) porque una sonda bajo demanda gastaria plata
+        real sin dueno -- pero eso NO puede significar que nada las
+        excluya: sin esto, una ruta de pago rota factura cada pedido, para
+        siempre, sin que ningun mecanismo la saque de rotacion (medido:
+        40/40 llamadas facturables, `/v1/uso` en `pago_hoy: 0` porque solo
+        se contaba el EXITO, `TOPE_PAGO_DIARIO` nunca actuaba -- ver
+        api.py para el otro lado de este fix, contar lo FACTURADO). Se
+        reintroduce un castigo DIRECTO (sin sonda, como round 7), con el
+        MISMO umbral que la sospecha de rutas gratis, acotado a rutas de
+        pago especificamente: van ULTIMAS en la cadena (§7), asi que solo
+        entran en juego cuando YA se agoto todo lo gratis -- el costo de un
+        falso positivo aca es mucho mas bajo que para una ruta gratis
+        (round 8 completo), y el costo de NO excluir (gasto sin fondo) es
+        estrictamente peor."""
+        n = min(self._fallos_pago.get(ruta.clave, 0) + 1, UMBRAL_SOSPECHA)
+        self._fallos_pago[ruta.clave] = n
+        if n >= UMBRAL_SOSPECHA:
+            self._castigar(ruta.clave, ahora)
+            self._fallos_pago.pop(ruta.clave, None)
+
     async def _probar_bajo_demanda(self, ruta: Ruta, ahora: float) -> None:
         """La sonda que `_sospechar` programa. Reutiliza completar() con
         `es_sonda=True` sobre una cadena de UNA sola ruta -- el mismo
-        camino que ya castiga/limpia de forma inequivoca -- y ademas dejo
+        camino que ya castiga de forma inequivoca -- y ademas deja
         constancia en `sondas` (tabla que alimenta tanto confiabilidad como
         `Almacen.tiene_evidencia_de_vida`), exactamente como
         `sondeo.sondear_salud` para la periodica: para el resto del
         sistema, una sonda bajo demanda y una periodica son
-        indistinguibles, solo cambia quien la disparo."""
-        t0 = time.monotonic()
-        r = await self.completar([ruta], dict(PING), ahora, es_sonda=True)
-        ms = int((time.monotonic() - t0) * 1000)
-        self.almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
-                                     r.codigo_upstream, 0, 0, ahora)
-        self._sospechas.pop(ruta.clave, None)
+        indistinguibles, solo cambia quien la disparo.
+
+        MEDIUM 5 (round 9): un exito de ESTA sonda nunca debe cancelar un
+        429 mas nuevo que ella (un cliente cancelando el "pariate" del
+        proveedor via una sonda bajo demanda seria un camino a que
+        baneen la llave compartida). Se guarda un cooldown YA activo (skip
+        total, ni se gasta la sonda) y la GENERACION de castigo/cooldown
+        antes de arrancar; solo se limpia si nada la toco mientras la sonda
+        estaba en vuelo.
+
+        LOW 8 (round 9): esto corre en un `asyncio.Task` en segundo plano
+        -- una excepcion no-HTTP (p.ej. `sqlite3.OperationalError` bajo
+        contencion de WAL con el planificador de sondeo escribiendo en
+        paralelo) no la atrapa `completar()` (que solo espera
+        `httpx.HTTPError`) y quedaria sin recuperar (silenciosa, y con
+        `_sospechas` sin limpiar: la ruta quedaria trabada, sin poder volver
+        a sospecharse hasta que decayera el rate-limit, con una sospecha
+        vieja pegada). Se atrapa, se loguea, y se limpia `_sospechas`
+        SIEMPRE para no dejar la ruta en un estado a medio camino."""
+        if self.cooldowns.get(ruta.clave, 0.0) > ahora:
+            self._sospechas.pop(ruta.clave, None)
+            return
+        generacion_antes = self._generacion_cooldown.get(ruta.clave, 0)
+        try:
+            t0 = time.monotonic()
+            r = await self.completar([ruta], dict(PING), ahora, es_sonda=True)
+            ms = int((time.monotonic() - t0) * 1000)
+            self.almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
+                                         r.codigo_upstream, 0, 0, ahora)
+            if r.estado == 200 and self._generacion_cooldown.get(ruta.clave, 0) == generacion_antes:
+                self._limpiar_castigo(ruta.clave)
+        except Exception:
+            log.exception(
+                "sonda bajo demanda de %s fallo con una excepcion no-HTTP "
+                "(posible contencion de SQLite bajo WAL) -- no se registra "
+                "sonda ni se castiga/limpia: la ruta queda SIN VEREDICTO, "
+                "no muerta por accidente.", ruta.clave)
+        finally:
+            self._sospechas.pop(ruta.clave, None)
 
     async def esperar_sondas_pendientes(self) -> None:
         """Solo para tests: las sondas bajo demanda corren en segundo plano
