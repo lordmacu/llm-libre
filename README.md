@@ -392,6 +392,22 @@ sondea aproximadamente una vez al día— vuelve a cero.
   pedidos/hora por ruta, también acotado en el agregado) — nunca la caída
   de una ruta sana.**
 
+  Ese tope agregado se reparte por **equidad**, no por orden de llegada:
+  una admisión "primera candidata que llega, primera servida" estarve a
+  las rutas de más atrás en la cadena — y una ruta genuinamente rota es
+  justo la que su `confiabilidad` colapsada manda al final de
+  `router.ordenar`. Medido: con 6 rutas sospechadas por igual, la de
+  posición 5 nunca conseguía sonda en 60 minutos simulados; con 12, la de
+  posición 11 tampoco, nunca (295 sondas corridas, cero contra la
+  víctima). Ahora cada candidata que cruza el umbral entra a una cola de
+  espera que se reordena, en cada intento de admisión, por antigüedad de
+  su último probe (nunca sondeada = infinito, gana siempre) — el tope
+  agregado no cambió, solo quién se lleva el próximo cupo libre. Con eso
+  ninguna ruta queda afuera indefinidamente: peor caso acotado por
+  `ceil(N / 5)` rondas de admisión — medido, la víctima en la posición 11
+  de un catálogo de 11 consigue su sonda (y su cooldown) a los 139 s
+  simulados, no "nunca".
+
   `429` sigue castigando de inmediato, sin pasar por sospecha ni sonda —
   evidencia inequívoca por sí solo — pero **ya no reutiliza el backoff
   exponencial de una sonda confirmada** (que podía escalar hasta una
@@ -407,7 +423,13 @@ sondea aproximadamente una vez al día— vuelve a cero.
   sin sonda: dejarlas totalmente afuera del mecanismo, sin reemplazo,
   dejaba una ruta de pago rota facturando cada pedido para siempre sin que
   nada la excluyera (medido: 40/40 llamadas facturables, cero cooldowns).
-  Bounded por ser el último escalón de la cadena. Uso de pago, además,
+  La duración de ese castigo es **flat y topeada (60 s), no exponencial**
+  — el backoff que escala existe para sondas CONFIRMADAS, y un castigo de
+  pago no tiene ninguna sonda detrás por diseño: reusar ese backoff medía
+  60→120→240→480→960→1920→3600 s en apenas 24 pedidos de una llave contra
+  la API real. "Solo entra en juego cuando ya se agotó todo lo gratis" es
+  un argumento de radio de impacto, no una cota de duración — la duración
+  la da únicamente ese flat de 60 s, igual que el 429. Uso de pago, además,
   ahora se cuenta por lo FACTURABLE (cualquier `200` de una ruta de pago,
   la sirva o no — un 200-vacío también genera tokens que el proveedor
   cobra), no solo por lo exitoso: antes un 200-vacío se facturaba de
@@ -427,3 +449,29 @@ sondea aproximadamente una vez al día— vuelve a cero.
   un blip transitorio del proveedor justo en una sonda. Por eso `/health`
   exige **dos** sondas fallidas consecutivas (sin éxito de por medio), no
   una sola, antes de tratarlo como evidencia de muerte.
+
+  El chequeo de respaldo de esa misma lógica (nada dentro de la ventana,
+  ni éxito ni sonda) miraba antes **cualquier evento real** — éxito o
+  fallo — para decidir "hay historia, declarar muerta". Un fallo real sin
+  ninguna sonda que lo confirme nunca debería ser autoritativo: es el
+  mismo principio de sospecha+sonda, un cliente solo puede pedirle al
+  gateway que vaya a mirar, nunca excluir por sí mismo. Medido: un solo
+  pedido real fallido bastaba para tirar `/health` a `caido` sin que
+  ninguna sonda hubiera corrido. Ahora ese chequeo solo cuenta **sondas**
+  como "hay historia" — un evento real, éxito o fallo, nunca alcanza por
+  sí solo.
+
+  Cuatro correcciones más en la misma familia (un dato hostil o un
+  rate-limit no son evidencia de muerte, y el reloj de una sonda es el de
+  su resolución, no el de su arranque): un `Retry-After` negativo o
+  no-finito (`-5`, `nan`) ya no se clampea a `0 s` (cooldown vacío) sino
+  al default corto; un `429` contra una sonda ya no se graba como sonda
+  de salud fallida (tiene su propio castigo proporcional, y dos 429
+  seguidos no deberían bastar para declarar una ruta muerta); la batería
+  de calidad (`sondear_calidad`) ahora también marca sus llamadas como
+  sonda (mismo wiring que ya tenía `sondear_salud`), así que un fallo de
+  batería castiga directo en vez de gastar cupo de sonda bajo demanda
+  sin necesidad; y la fila que deja una sonda bajo demanda se estampa con
+  el momento en que se resolvió, no en que se programó, para no
+  desordenar el `ORDER BY momento DESC` que usa `/health` con una ruta
+  colgada.
