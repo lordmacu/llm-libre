@@ -14,12 +14,6 @@ from llm_libre.router import clave_de_orden, compatibles, ordenar
 PERFILES = {"rapido", "balanceado", "potente"}
 ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
 
-# Piso de confiabilidad reciente para que /health considere una ruta "viva".
-# Una ruta sin ninguna telemetria todavia carga la confiabilidad NEUTRA
-# (ver CONFIABILIDAD_NEUTRA en modelos.py), que queda por encima de este piso
-# a proposito: una ruta recien vista no debe leerse como rota.
-UMBRAL_CONFIABILIDAD_SALUD = 0.5
-
 
 def interpretar_pedido(cuerpo: dict) -> Pedido:
     # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
@@ -237,16 +231,34 @@ def crear_app(estado: Estado) -> FastAPI:
         # dispara un 429 de inmediato, o TOPE_FALLOS_SEGUIDOS fallos NO-429
         # seguidos -- ver Proxy._castigar/_registrar_fallo; un 4xx del
         # cliente, en cambio, NUNCA cuenta hacia esto, ver
-        # _es_error_del_cliente) Y que su confiabilidad reciente -- calculada
-        # sobre trafico real de eventos ok/fail, no sobre el cooldown -- no
-        # este por el piso. Antes del cooldown de fallos duros (revision de
-        # Task 13), una ruta que devolvia 500 en cada intento nunca entraba
-        # en cooldown pero tampoco estaba viva; si solo mirara cooldowns este
-        # endpoint diria "ok" con esa ruta muerta, que es exactamente el
-        # incidente que este endpoint existe para evitar. Hoy esa misma ruta
-        # SI termina en cooldown a partir del tercer 500 seguido -- pero la
-        # confiabilidad sigue siendo la segunda pata, para cubrir la ventana
-        # antes de que el cooldown se dispare.
+        # _es_error_del_cliente) Y evidencia POSITIVA de que sirve
+        # (`Almacen.tiene_evidencia_de_vida`).
+        #
+        # Task 13, revision round 6, Parte 2: ESTO YA NO MIRA `confiabilidad`.
+        # `confiabilidad` es un promedio de trafico reciente, y un promedio se
+        # arrastra a 0 con cualquier patron repetido de UN cliente -- el caso
+        # que lo probo es `403`, genuinamente ambiguo (cuenta suspendida =
+        # evidencia de la ruta, vs. contenido moderado = evidencia del
+        # PEDIDO) y que el gateway no puede desambiguar sin parsear el cuerpo
+        # especifico de cada proveedor. 30 pedidos con contenido moderado de
+        # una sola llave alcanzaban para tirar `/health` a "caido" para TODAS
+        # las llaves, sobreviviendo un reinicio del proceso contra la misma
+        # base -- porque Coolify usa este endpoint como health check y
+        # reinicia el contenedor cuando falla.
+        #
+        # "Evidencia de vida, no ausencia de muerte": un exito reciente
+        # prueba que la ruta sirve; mil fallos de un mismo cliente no prueban
+        # que no sirve. Los fallos, solos, NUNCA bastan para declarar una
+        # ruta muerta aca -- ver el docstring de `tiene_evidencia_de_vida`
+        # para el criterio completo (exito real reciente, o sonda de salud
+        # reciente exitosa, o ninguna telemetria todavia).
+        #
+        # `/v1/ranking` (mas abajo) sigue usando `confiabilidad` exactamente
+        # como antes -- eso NO cambia. La asimetria es a proposito: una ruta
+        # mal puntuada en el ranking solo pierde posicion y se autocorrige
+        # sola; una ruta que `/health` declara muerta reinicia el
+        # contenedor. El ranking puede darse el lujo de ser sensible: la
+        # salud no.
         ahora = time.time()
         activas = estado.almacen.rutas_activas()
         metricas = _metricas(estado, ahora)
@@ -254,7 +266,7 @@ def crear_app(estado: Estado) -> FastAPI:
         def _viva(r) -> bool:
             m = metricas.get(r.clave, METRICAS_NEUTRAS)
             return (m.en_cooldown_hasta <= ahora
-                    and m.confiabilidad >= UMBRAL_CONFIABILIDAD_SALUD)
+                    and estado.almacen.tiene_evidencia_de_vida(r.clave, ahora))
 
         libres = [r for r in activas if _viva(r)]
         gratis = [r for r in libres if r.tier == "gratis"]

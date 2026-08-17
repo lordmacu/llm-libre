@@ -152,19 +152,27 @@ def test_health_dice_ok_si_hay_ruta_viva(cliente):
 
 # --- Fix round 1, hallazgo 1 (Critical): /health tambien debe fallar cuando
 #     la ruta gratis esta genuinamente rota (500 en cada intento), no solo
-#     cuando esta en cooldown por un 429. ---
+#     cuando esta en cooldown por un 429.
+#
+#     Reescrito en round 6, Parte 2: la version anterior sembraba 8 fallos +
+#     2 exitos y esperaba "caido" -- bajo el redisenio de "evidencia de
+#     vida" ese caso pasa a "ok" CORRECTAMENTE (hay un exito reciente real,
+#     ver test_health_sigue_ok_con_30_403_pero_un_exito_reciente mas abajo
+#     para el caso que este reemplaza). Este test ahora prueba lo que el
+#     coordinador pidio explicitamente: un proveedor GENUINAMENTE muerto --
+#     cero exitos, y la sonda de salud (la senal mas confiable que existe,
+#     porque el gateway controla su propio payload) tambien falla. ---
 
 def test_health_no_es_ok_si_la_gratis_falla_de_verdad(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
-    # Trafico real, mayormente fallido: la unica ruta gratis responde mal en
-    # 8 de 10 intentos recientes. Esto NUNCA pasa por Proxy._castigar (eso
-    # solo lo dispara un 429), asi que proxy.cooldowns queda vacio -- la
-    # version vieja de /health diria "ok" igual.
-    for _ in range(8):
+    # Trafico real, siempre fallido, y la sonda de salud tambien falla. Esto
+    # NUNCA pasa por Proxy._castigar (eso solo lo dispara un 429), asi que
+    # proxy.cooldowns queda vacio -- la version vieja de /health diria "ok"
+    # igual si solo mirara cooldowns.
+    for _ in range(10):
         estado.almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora)
-    for _ in range(2):
-        estado.almacen.registrar_evento("kilo/a:free", True, 200, 200, ahora)
+    estado.almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     assert estado.proxy.cooldowns == {}  # confirma que no es por cooldown
 
     r = cliente.get("/health")
@@ -208,6 +216,122 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
     r = cliente.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
+
+
+# --- Round 6 de Task 13, Parte 2. `403` es GENUINAMENTE ambiguo: cuenta
+#     suspendida (evidencia de la ruta, correcto contarlo -- Parte 1) vs.
+#     contenido moderado del lado del proveedor (evidencia del PEDIDO de UN
+#     cliente puntual). El gateway no puede distinguirlos sin parsear el
+#     cuerpo especifico de cada proveedor, asi que clasificarlo bien (Parte
+#     1) no alcanza: 30 pedidos con contenido flageado de una sola llave no
+#     deben poder apagar /health para TODAS las llaves si la ruta ya
+#     demostro, con un pedido valido, que sirve. Esto es lo que "evidencia
+#     de vida" compra que "confiabilidad promedio" no podia. ---
+
+def test_health_sigue_ok_con_30_403_pero_un_exito_reciente(estado_cliente):
+    estado, cliente = estado_cliente
+    ahora = time.time()
+    estado.almacen.registrar_evento("kilo/a:free", True, 50, 200, ahora)
+    for _ in range(30):
+        estado.almacen.registrar_evento("kilo/a:free", False, 0, 403, ahora)
+    assert cliente.get("/health").json()["estado"] == "ok"
+
+
+def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
+    # Restart del caso de arriba: el exito y los 403 quedan en el archivo de
+    # /datos: un proceso nuevo contra la MISMA base tiene que leer "ok"
+    # igual, sin volver a generar trafico.
+    ruta_db = str(tmp_path / "salud_403.sqlite3")
+    ahora = time.time()
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    almacen1.registrar_evento("kilo/a:free", True, 50, 200, ahora)
+    for _ in range(30):
+        almacen1.registrar_evento("kilo/a:free", False, 0, 403, ahora)
+    proxy1 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(403, json={"error": "flagged"}))))
+    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+    cliente1 = TestClient(crear_app(estado1))
+    assert cliente1.get("/health").json()["estado"] == "ok"
+
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    proxy2 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(403, json={"error": "flagged"}))))
+    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    assert cliente2.get("/health").json()["estado"] == "ok"
+
+
+def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_path):
+    # Restart del "genuinamente muerto": cero exitos y la sonda de salud
+    # tambien fallo, persistido en /datos -- un proceso nuevo tiene que
+    # seguir leyendo "caido", no "ok por falta de evidencia en contra".
+    ruta_db = str(tmp_path / "salud_muerta.sqlite3")
+    ahora = time.time()
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    for _ in range(10):
+        almacen1.registrar_evento("kilo/a:free", False, 0, 500, ahora)
+    almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
+    proxy1 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(500))))
+    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+    cliente1 = TestClient(crear_app(estado1))
+    r1 = cliente1.get("/health")
+    assert r1.status_code != 200
+    assert r1.json()["estado"] != "ok"
+
+    # Segundo proceso con un transport SANO, para probar que "caido" viene
+    # de la TELEMETRIA ya persistida, no de trafico nuevo que este proceso
+    # genere.
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    proxy2 = Proxy(
+        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda req: httpx.Response(200, json={"choices": [
+                {"message": {"role": "assistant", "content": "hola"}}]}))))
+    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    r2 = cliente2.get("/health")
+    assert r2.status_code != 200
+    assert r2.json()["estado"] != "ok"
+
+
+def test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria(tmp_path):
+    # Restart de "instalacion nueva": cero eventos, cero sondas -- una ruta
+    # sin evidencia todavia no nace muerta, ni en el primer proceso ni tras
+    # un reinicio contra la misma base vacia.
+    ruta_db = str(tmp_path / "salud_fresca.sqlite3")
+
+    almacen1 = Almacen(ruta_db)
+    almacen1.crear_esquema()
+    almacen1.upsert_rutas(
+        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+    estado1 = Estado(almacen=almacen1, proxy=Proxy({}, almacen1, httpx.AsyncClient()),
+                     llaves={"buena"}, tope_pago_diario=200)
+    cliente1 = TestClient(crear_app(estado1))
+    assert cliente1.get("/health").json()["estado"] == "ok"
+
+    almacen2 = Almacen(ruta_db)
+    almacen2.crear_esquema()
+    estado2 = Estado(almacen=almacen2, proxy=Proxy({}, almacen2, httpx.AsyncClient()),
+                     llaves={"buena"}, tope_pago_diario=200)
+    cliente2 = TestClient(crear_app(estado2))
+    assert cliente2.get("/health").json()["estado"] == "ok"
 
 
 # --- Round 4 de Task 13, hallazgo HIGH. El fix de la ronda 3 saco el 4xx del
@@ -811,15 +935,17 @@ def test_en_modo_crudo_no_hay_x_razonamiento_porque_sigue_en_el_content():
 
 
 # --- Fix round 3, ALSO: el acoplamiento entre el neutro de confiabilidad y el
-#     piso de /health es cargante y vive en dos archivos distintos, sin nada
-#     que lo pruebe. Si alguna vez se invierte, una instalacion NUEVA -- sin
-#     un solo evento todavia -- reporta "caido" y Coolify nunca marca el
-#     contenedor como sano: el servicio no arranca nunca, por una constante. ---
-
-def test_el_neutro_de_confiabilidad_queda_por_encima_del_piso_de_health():
-    from llm_libre.api import UMBRAL_CONFIABILIDAD_SALUD
-    from llm_libre.modelos import CONFIABILIDAD_NEUTRA
-    assert CONFIABILIDAD_NEUTRA > UMBRAL_CONFIABILIDAD_SALUD, (
-        "una ruta sin telemetria debe contar como viva (§6 del diseno): con el "
-        "neutro por debajo del piso, /health diria 'caido' en una instalacion "
-        "nueva y el contenedor nunca pasaria el health check")
+#     piso de /health era cargante y vivia en dos archivos distintos, sin nada
+#     que lo probara. Si alguna vez se invertia, una instalacion NUEVA -- sin
+#     un solo evento todavia -- reportaba "caido" y Coolify nunca marcaba el
+#     contenedor como sano: el servicio no arrancaba nunca, por una constante.
+#
+#     Round 6, Parte 2: el mecanismo que este test protegia (comparar
+#     `CONFIABILIDAD_NEUTRA` contra `UMBRAL_CONFIABILIDAD_SALUD`) desaparecio
+#     junto con `/health` basado en promedio -- `UMBRAL_CONFIABILIDAD_SALUD`
+#     ya no existe. El contrato que protegia ("una ruta sin telemetria cuenta
+#     como viva") sigue vivo, ahora en `Almacen.tiene_evidencia_de_vida` (ver
+#     test_tiene_evidencia_de_vida_sin_ninguna_telemetria en test_almacen.py)
+#     y verificado end-to-end en test_health_ok_si_la_gratis_no_tiene_telemetria_aun
+#     y test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria mas
+#     arriba. ---

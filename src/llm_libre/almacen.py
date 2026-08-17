@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS uso_pago (
 
 VENTANA = 50  # cuantas observaciones recientes pesan en confiabilidad y latencia
 
+# Cuanto hacia atras se busca EVIDENCIA POSITIVA de que una ruta sirve, para
+# /health (Task 13, revision round 6, Parte 2). Mas grande que el intervalo
+# default de sondeo de salud (SONDEO_SALUD_HORAS=5h) con margen para que UNA
+# pasada de sondeo que falle o se demore no tire la ruta a "sin evidencia" --
+# y generoso para una ruta de PAGO, que nunca se sondea (§8 del diseno) y
+# solo puede probar que esta viva con trafico real, que puede ser esporadico
+# (es el escalon de fallback, no el trafico principal). 24h = ~5 ciclos de
+# sondeo default, y sigue acotado por `podar()` (30 dias de retencion) del
+# lado de arriba.
+VENTANA_EVIDENCIA_VIDA_S = 24 * 3600.0
+
 # QUE SIGNIFICA CADA COLUMNA DE TIEMPO (decidido en el fix round 3, I5).
 #
 # `ttft_ms` significa UNA sola cosa: milisegundos hasta el primer token util
@@ -219,6 +230,66 @@ class Almacen:
         if not filas:
             return CONFIABILIDAD_NEUTRA
         return sum(f[0] for f in filas) / len(filas)
+
+    def tiene_evidencia_de_vida(self, clave: str, ahora: float) -> bool:
+        """Para `/health` (Task 13, revision round 6, Parte 2) -- "evidencia
+        de vida", no "ausencia de muerte". `confiabilidad` (arriba) es un
+        PROMEDIO de las ultimas `VENTANA` observaciones, y un promedio puede
+        arrastrarse a 0 por cualquier patron de trafico repetido de UN
+        cliente. La clasificacion de codigos (Parte 1) no alcanza para
+        cerrar esto del todo: `403` es GENUINAMENTE ambiguo -- cuenta
+        suspendida (evidencia de la ruta) o contenido moderado (evidencia
+        del PEDIDO) -- y el gateway no puede distinguirlos sin parsear el
+        cuerpo especifico de cada proveedor, asi que clasificarlo como
+        evidencia de ruta (correcto para el primer caso) lo deja vulnerable
+        al segundo: 30 pedidos con contenido moderado de un cliente bastan
+        para tirar el promedio por el piso para TODOS.
+
+        La pregunta correcta no es "cuantos fallos tuvo" sino "hay
+        evidencia de que puede servir": UN exito reciente prueba que la
+        ruta sirve; mil fallos de un mismo cliente no prueban que no
+        puede. Una ruta cuenta como viva si, dentro de
+        `VENTANA_EVIDENCIA_VIDA_S`:
+          - hubo un EXITO real reciente (`eventos.ok=1`), o
+          - hubo una SONDA DE SALUD reciente exitosa (`sondas.ok=1`,
+            `tipo='salud'`) -- la sonda es la senal mas confiable que
+            existe, porque el GATEWAY controla su propio payload: un 4xx
+            contra una sonda es SIEMPRE evidencia de la ruta, nunca hay
+            ambiguedad de "contenido del cliente" posible; o
+          - no hay NINGUNA telemetria todavia (ruta recien vista) -- no
+            nacio muerta, todavia no tuvo su primera oportunidad.
+
+        Los fallos NUNCA son, por si solos, suficientes para declarar una
+        ruta muerta -- eso es lo que la vieja comparacion contra
+        confiabilidad permitia. Los eventos con `es_error_cliente=1`
+        (Parte 1) tampoco cuentan como telemetria "real" para el tercer
+        caso: una ruta que SOLO recibio pedidos malformados (400/413/422)
+        todavia no tuvo su primera oportunidad de verdad, igual que una
+        sin ningun trafico.
+
+        `/v1/ranking` NO usa esta senal -- sigue con `confiabilidad`
+        exactamente como antes: una ruta que puntua mal solo pierde
+        posicion y se autocorrige; una ruta que `/health` declara muerta
+        REINICIA EL CONTENEDOR (Coolify usa `/health` como health check).
+        La asimetria es el punto: el ranking puede permitirse ser
+        sensible, la salud no."""
+        corte = ahora - VENTANA_EVIDENCIA_VIDA_S
+        exito = self._con.execute(
+            """SELECT 1 FROM eventos WHERE clave = ? AND ok = 1 AND momento >= ?
+               UNION ALL
+               SELECT 1 FROM sondas
+                   WHERE clave = ? AND tipo = 'salud' AND ok = 1 AND momento >= ?
+               LIMIT 1""",
+            (clave, corte, clave, corte)).fetchone()
+        if exito:
+            return True
+        cualquier_telemetria = self._con.execute(
+            """SELECT 1 FROM eventos WHERE clave = ? AND es_error_cliente = 0
+               UNION ALL
+               SELECT 1 FROM sondas WHERE clave = ?
+               LIMIT 1""",
+            (clave, clave)).fetchone()
+        return cualquier_telemetria is None
 
     def _ttft_p50(self, clave: str) -> float:
         """p50 de time-to-first-token. Solo entran observaciones que de verdad

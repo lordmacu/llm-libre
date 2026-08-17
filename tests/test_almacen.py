@@ -348,3 +348,78 @@ def test_migrar_una_base_vieja_es_idempotente(tmp_path):
     otra_vez = Almacen(ruta_db)
     otra_vez.crear_esquema()   # no debe reventar
     assert otra_vez.rutas_activas() == []
+
+
+# --- Revision round 6 de Task 13, Parte 2. La clasificacion correcta de
+#     codigos (Parte 1) no alcanza: `403` es GENUINAMENTE ambiguo -- cuenta
+#     suspendida (evidencia de la ruta) o contenido moderado (evidencia del
+#     PEDIDO) -- y el gateway no puede distinguirlos sin parsear el cuerpo
+#     especifico de cada proveedor. Clasificarlo como evidencia de ruta
+#     (correcto para el primer caso) lo deja vulnerable al segundo: 30
+#     pedidos con contenido moderado de UN cliente bastan para tirar
+#     confiabilidad (un PROMEDIO de las ultimas 50 observaciones) por el
+#     piso para TODOS.
+#
+#     Redisenio: /health deja de usar confiabilidad. Pasa a ser "evidencia
+#     de vida", no "ausencia de muerte" -- UN exito reciente prueba que la
+#     ruta sirve; mil fallos de un mismo cliente no prueban que no puede.
+#     `/v1/ranking` SIGUE usando confiabilidad exactamente como antes (no
+#     se toca): una ruta mal puntuada solo pierde posicion y se
+#     autocorrige, mientras que /health mal informado REINICIA EL
+#     CONTENEDOR (Coolify) -- la asimetria es el punto. ---
+
+def test_tiene_evidencia_de_vida_sin_ninguna_telemetria(almacen):
+    # Ruta recien vista: no nacio muerta, todavia no tuvo su primera
+    # oportunidad ni para bien ni para mal.
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=100.0) is True
+
+
+def test_tiene_evidencia_de_vida_con_un_exito_reciente_pese_a_muchos_fallos(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 403, 101.0 + i)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+
+
+def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+
+
+def test_no_tiene_evidencia_de_vida_con_solo_fallos_reales(almacen):
+    # El caso "genuinamente muerta": solo fallos que SI son evidencia de la
+    # ruta (es_error_cliente=0, el default), sin exito en ningun lado.
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
+
+
+def test_tiene_evidencia_de_vida_si_los_fallos_son_todos_error_del_cliente(almacen):
+    # Una ruta que SOLO recibio pedidos malformados (400/413/422, Parte 1)
+    # todavia no tuvo su primera oportunidad de verdad -- se trata igual
+    # que "sin telemetria", no como "muerta".
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 400, 100.0 + i,
+                                 es_error_cliente=True)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+
+
+def test_no_tiene_evidencia_de_vida_si_el_exito_quedo_fuera_de_la_ventana(almacen):
+    from llm_libre.almacen import VENTANA_EVIDENCIA_VIDA_S
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
+    ahora = 100.0 + VENTANA_EVIDENCIA_VIDA_S + 1.0
+    for i in range(30):
+        almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora - 10.0 + i * 0.1)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is False
+
+
+def test_no_tiene_evidencia_de_vida_con_sonda_de_salud_reciente_fallida(almacen):
+    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
