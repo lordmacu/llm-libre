@@ -238,12 +238,24 @@ arrancar porque hay una interpretación por default razonable (el sufijo que el 
 YAML declara) para el caso común (solo host), y para el caso con ruta propia no hay
 ninguna interpretación segura salvo respetar lo que el operador escribió.
 
-**LOW, corregido en la tercera revisión: el sufijo se agrega parseando la URL
-(`urlsplit`/`urlunsplit`), no concatenando texto.** La primera versión hacía
-`desde_entorno + sufijo`, así que una URL con path vacío pero CON query string
-(`.../8888?token=abc`) terminaba con el sufijo pegado DENTRO del valor de la query
-(`.../8888?token=abc/v1`) en vez de en la posición correcta
-(`.../8888/v1?token=abc`).
+**LOW, corregido en la tercera revisión — pero solo a medias.** `_resolver_base_url`
+(donde se GUARDA `Proveedor.base_url`) pasó a parsear la URL (`urlsplit`/`urlunsplit`)
+en vez de concatenar texto: la primera versión hacía `desde_entorno + sufijo`, así que
+una URL con path vacío pero CON query string (`.../8888?token=abc`) terminaba con el
+sufijo pegado DENTRO del valor de la query (`.../8888?token=abc/v1`) en vez de en la
+posición correcta (`.../8888/v1?token=abc`).
+
+**La cuarta revisión encontró que la astilla se había movido una capa más abajo.**
+`_resolver_base_url` guardaba `base_url` bien, pero `cliente.armar_peticion`
+(`p.base_url.rstrip("/") + "/chat/completions"`) y `sondeo.sincronizar_catalogo`
+(`p.base_url.rstrip("/") + p.modelos_path`) seguían construyendo la URL FINAL — la
+que de verdad se manda por la red — con la misma concatenación cruda. El test de la
+revisión anterior afirmaba sobre `Proveedor.base_url`, no sobre la URL pedida, así que
+quedó en verde sin cubrir el bug real. Los tres puntos ahora comparten
+`proveedores.unir_ruta(base_url, sufijo)`, que parsea y reconstruye una sola vez; los
+tests nuevos afirman sobre la URL que el mock transport recibió de verdad
+(`armar_peticion`'s `url` de retorno, y `req.url` en `sincronizar_catalogo`), no sobre
+un campo intermedio.
 
 **`desenvuelve_canvas` y `timeout_s` son declaraciones por proveedor, mismo shape que
 `prioridad`/`capacidades_por_defecto` (revisión de Task 13).** `desenvuelve_canvas`
@@ -444,31 +456,54 @@ Por ruta:
   `timeout_s` (§4) para acotar el peor caso sin bajarle el timeout a todos — aplica al
   camino síncrono y al de streaming por igual.
 
-  **Un `4xx` que no sea `429`, `408` ni `425` NUNCA cuenta para este cooldown**
-  (corrección de una segunda revisión, severidad HIGH). `armar_peticion` reenvía el
-  cuerpo del cliente tal cual, así que un error determinista de ESE pedido
-  —`context_length_exceeded`, un parámetro no soportado, una secuencia de roles
-  inválida— produce el mismo `4xx` contra CUALQUIER ruta de la cadena, sano el proveedor
-  o no. Contarlo hacia el cooldown convierte el error de un cliente en un apagón para
-  todos: verificado contra el registro real de 5 rutas, tres pedidos malformados
-  seguidos bastaban para dejar las cinco en cooldown, con una llave DISTINTA recibiendo
-  `503` mientras tanto y `/health` en `caido` — estrictamente peor que el síntoma de
-  proxy colgado que el cooldown vino a arreglar. Antes de este mecanismo, un `400` solo
-  perjudicaba al cliente que lo mandó; sigue siendo así. `proxy._es_error_del_cliente`
-  es la única fuente de verdad para "esto es evidencia sobre el pedido, no sobre la
-  ruta" — la usan tanto el gate del cooldown como el flag `es_error_cliente` que se
-  guarda en `eventos`, para que las dos exclusiones no puedan desincronizarse.
+  **Un `4xx` cuenta para este cooldown (y para confiabilidad) según de quién es la
+  CULPA — el pedido, o la ruta — no según si es reintentable.** Esta es la regla, tal
+  como quedó tras una cuarta revisión que encontró un falso-verde en la versión
+  anterior (que clasificaba por retryability, no por atribución):
 
-  **Decisión de diseño (tercera revisión): `408` y `425` quedan AFUERA de esta
-  excepción, aunque son `4xx`.** Por espíritu son retryables, no errores deterministas
-  de payload — `408` suele significar que el UPSTREAM se colgó esperando (el mismo
-  síntoma que motivó todo este mecanismo) y `425` es una nuance de protocolo/TLS
-  (replay), no un payload inválido. Un proveedor detrás de algo que devuelve `408`
-  cuando se cuelga nunca entraría en cooldown si se tratara como error del cliente. Se
-  los excluye de `_es_error_del_cliente`, así que SÍ cuentan hacia el cooldown de
-  fallos duros y hacia confiabilidad, como cualquier fallo "real". Probabilidad baja de
-  que esto importe en la práctica; la consecuencia de no hacerlo sería solo volver al
-  comportamiento viejo (reintentar para siempre) para ese caso puntual.
+  > **Un código cuenta como "evidencia del pedido" (y por lo tanto NO cuenta hacia
+  > cooldown ni confiabilidad) solo si el MISMO pedido fallaría idéntico contra una
+  > ruta SANA, y un pedido DISTINTO tendría éxito contra ESTA MISMA ruta. Todo lo
+  > demás es evidencia de LA RUTA, y cuenta igual que un `500`.**
+
+  `400` (payload inválido) y `422` (validación semántica del cuerpo) cumplen las dos
+  condiciones: rompen cualquier ruta sana igual, y no dicen nada sobre si esta ruta en
+  particular está sana. Esos siguen sin contar — `armar_peticion` reenvía el cuerpo del
+  cliente tal cual, así que contarlos convertiría el error de un cliente en un apagón
+  para todos: verificado contra el registro real de 5 rutas, tres pedidos malformados
+  seguidos bastaban para dejar las cinco en cooldown, con una llave DISTINTA recibiendo
+  `503` mientras tanto.
+
+  **Los casos donde las dos preguntas divergen — no retryable, pero SÍ evidencia de la
+  ruta — son los que una versión anterior de esta regla clasificaba mal:**
+
+  - `401` — la clave del proveedor venció o se rotó. Otra clave andaría bien con el
+    mismo pedido; el pedido no tiene la culpa.
+  - `402` — sin crédito (`insufficient credits` de OpenRouter). Recargar arregla
+    cualquier pedido contra esta ruta.
+  - `403` — cuenta suspendida o moderación del lado del proveedor, no un problema del
+    payload.
+  - `404` — `model_not_found`: literalmente el problema central que este proyecto
+    existe para detectar (§1). Reachable hasta 5 h entre sincronizaciones de catálogo,
+    y las rutas de pago (nunca sondeadas) no tienen ningún otro backstop.
+  - `408` — el upstream se colgó esperando: el mismo síntoma que motivó todo este
+    mecanismo, no una nuance del pedido.
+  - `425` — nuance de protocolo/TLS (replay contra esta conexión), no un payload
+    inválido.
+  - `429` — rate-limit: tiene su propio castigo INMEDIATO (`_castigar`, sin pasar por
+    el cooldown de fallos duros), pero conceptualmente también es evidencia de la
+    ruta (su capacidad ahora mismo), no del pedido.
+
+  Medido el costo de la clasificación anterior: con las 5 rutas devolviendo `401`, el
+  cliente recibía `503` en el 100 % de los pedidos mientras `/health` seguía en `ok`
+  — un apagón con luz verde, exactamente el incidente que el propio comentario de
+  `/health` dice que el endpoint existe para prevenir, y sin ningún backstop para
+  MiniMax. `proxy._es_error_del_cliente` (y el conjunto `_CODIGOS_EVIDENCIA_DE_RUTA`
+  que lo respalda, con el motivo de cada código) es la única fuente de verdad para "de
+  quién es la culpa" — la usan tanto el gate del cooldown como el flag
+  `es_error_cliente` que se guarda en `eventos`, para que las dos exclusiones no
+  puedan desincronizarse. La regla está escrita ahí mismo, junto al conjunto, para que
+  quien agregue un código nuevo pueda clasificarlo sin tener que redescubrir el eje.
 
 `puntaje = calidad^wc · confiabilidad^wr · f(latencia)^wl`, con los pesos según el **perfil**
 pedido: `rapido` pondera latencia, `potente` pondera calidad y contexto, `balanceado` (el
@@ -613,21 +648,32 @@ desarrollo.
 - **`/v1/ranking` modela el cooldown (segunda revisión):** una ruta castigada, aunque
   tenga la mejor `prioridad` y el mejor puntaje, va al final de la tabla — no solo
   `prioridad` (primera revisión, hallazgo 3).
-- **Un `4xx` no cuenta para confiabilidad/health/ranking (tercera revisión, HIGH):** 30
-  `400` seguidos dejan `/health` en `ok` y todas las rutas sobre el piso; probado
-  también contra un proceso NUEVO abierto sobre la MISMA base de archivo (el caso de
-  loop de reinicios de Coolify — un `Almacen`/`Estado` segundo, sin nada en memoria del
-  primero, tiene que leer el mismo resultado); 30 `500` seguidos siguen tirando
-  `/health` exactamente como antes; `/v1/ranking` no se mueve con una racha de `400`
-  pero sí con una de `500`. Verificado en rojo revirtiendo el filtro
-  `es_error_cliente=0` de `_confiabilidad`. Y `408`/`425`, la decisión de diseño de esta
-  revisión: se prueba explícitamente que SÍ castigan (no quedan en la excepción del
-  4xx).
+- **Un `4xx` de evidencia-del-pedido no cuenta para confiabilidad/health/ranking
+  (tercera revisión, HIGH):** 30 `400` seguidos (y 30 `422`) dejan `/health` en `ok` y
+  todas las rutas sobre el piso, y `/v1/ranking` no se mueve; 30 `500` seguidos siguen
+  tirando `/health` y el ranking exactamente como antes. Probado también contra un
+  proceso NUEVO abierto sobre la MISMA base de archivo en las dos direcciones (el caso
+  de loop de reinicios de Coolify): un cliente-evidencia (`400`) sigue leyendo `ok`, un
+  ruta-evidencia (`401`) sigue leyendo `caido` — sin nada en memoria del proceso
+  original. **Pin del EJE (cuarta revisión):** `401`/`402`/`403`/`404` — no
+  reintentables, pero SÍ evidencia de la ruta — cuentan igual que un `500` hacia
+  cooldown, confiabilidad y `/v1/ranking`, probado tanto a nivel `proxy`
+  (`_es_error_del_cliente`) como end-to-end (30 seguidos por cada código, más el mismo
+  test de proceso-nuevo-misma-base para `401`). Un test que reclasificara estos cuatro
+  de vuelta al lado del cliente (razonando "no son reintentables") se pondría rojo —
+  verificado revirtiendo el conjunto a solo `{408, 425, 429}` y confirmando que los
+  seis tests nuevos fallan con el mensaje exacto que motivó la revisión.
 - **Normalización de `base_url_env` (segunda revisión):** una ruta propia en la variable
   de entorno que no coincide con el sufijo default se usa tal cual, sin pisarla — solo
-  se loguea el aviso. **Corrección LOW (tercera revisión):** una URL con path vacío pero
-  con query string no le astilla el sufijo adentro de la query — se parsea con
-  `urlsplit`/`urlunsplit`, no se concatena texto.
+  se loguea el aviso. **Corrección LOW, en dos capas:** la tercera revisión parseó la
+  URL (`urlsplit`/`urlunsplit`) en `_resolver_base_url`, donde se guarda
+  `Proveedor.base_url`; la cuarta encontró que `cliente.armar_peticion` y
+  `sondeo.sincronizar_catalogo` seguían concatenando texto para construir la URL FINAL
+  — la que de verdad se pide — así que la astilla sobrevivía una capa más abajo. Los
+  tests de la tercera revisión afirmaban sobre `Proveedor.base_url` y por eso quedaron
+  en verde sin cubrirlo; los nuevos afirman sobre la URL real (`armar_peticion`'s `url`
+  de retorno, `req.url` capturado por el mock transport en `sincronizar_catalogo`), a
+  través del helper compartido `proveedores.unir_ruta`.
 - **Rungs sin pinnear, cerrados en la revisión:** `rutas_fijas` estampando la `prioridad`
   real del proveedor (no una constante — probado con un YAML sintético y un valor
   distintivo), y el orden `(prioridad, no-medida)` en `router.clave_de_orden` (no
@@ -654,7 +700,6 @@ desarrollo.
   un modelo distinto del probado dejaría el test en verde con el YAML ya mintiendo, así
   que el test de `tools` ahora recorre TODOS los ids que el catálogo real trajo, no uno
   solo.
-  `CHATGPT_PROXY_URL`.
 
 ## 13. Fuera de alcance
 

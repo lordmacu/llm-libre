@@ -259,43 +259,51 @@ sondea aproximadamente una vez al día— vuelve a cero.
   usan si se agotaron las gratis, la llave no superó su tope diario y la
   petición no trae `x_permitir_pago: false`.
 - **Una ruta que falla repetidas veces seguidas (sin ningún éxito en el
-  medio) entra en cooldown, no solo cuando el proveedor devuelve `429`.**
-  Antes, un `500`, un timeout o un error de red no dejaban nunca un
-  cooldown: una ruta rota o **colgada** se seguía probando en cada pedido,
-  adelante de las sanas si tenía mejor `prioridad`, indefinidamente — con
-  el timeout por defecto (90 s) eso son hasta 7,5 minutos por pedido en la
-  cadena más larga, y `/health` sigue en `ok` mientras quede una ruta viva.
-  Un fallo aislado no castiga (evita sacar una ruta sana por un hiccup); al
-  tercer fallo seguido, sí, con el mismo backoff exponencial que ya usa el
-  `429`. **Un `4xx` (que no sea `429`, `408` ni `425`) nunca cuenta para
-  esto**: es un error determinista del *cliente* — payload inválido, un
-  parámetro que el proveedor no soporta — que el proveedor le devolvería a
-  cualquiera que mande ese mismo pedido. Contarlo convertiría el error de un
-  cliente en un apagón para todos los demás (verificado: tres pedidos
+  medio) entra en cooldown, no solo cuando el proveedor devuelve `429`** —
+  y ese mismo fallo tampoco cuenta para la confiabilidad medida, ni por lo
+  tanto para `/health` ni para `/v1/ranking`, si es evidencia sobre el
+  *pedido* en vez de sobre la *ruta*. Antes, un `500`, un timeout o un
+  error de red no dejaban nunca un cooldown: una ruta rota o **colgada** se
+  seguía probando en cada pedido, adelante de las sanas si tenía mejor
+  `prioridad`, indefinidamente — con el timeout por defecto (90 s) eso son
+  hasta 7,5 minutos por pedido en la cadena más larga, y `/health` sigue en
+  `ok` mientras quede una ruta viva. Un fallo aislado no castiga (evita
+  sacar una ruta sana por un hiccup); al tercer fallo seguido, sí, con el
+  mismo backoff exponencial que ya usa el `429`. Un proveedor puede además
+  declarar su propio `timeout_s` en `proveedores.yaml` (default: el
+  global, 90 s) para acotar el peor caso de uno que se sepa lento, sin
+  bajarle el timeout a todos — aplica igual al camino síncrono y al de
+  streaming.
+- **La regla para un `4xx` es de ATRIBUCIÓN, no de si es reintentable:**
+  un código cuenta como evidencia del *pedido* (y por lo tanto no cuenta
+  hacia cooldown ni confiabilidad) solo si el **mismo pedido fallaría
+  idéntico contra una ruta sana**, y un **pedido distinto tendría éxito
+  contra esta misma ruta**. `400` (payload inválido) y `422` (validación
+  semántica) cumplen las dos: siguen sin contar — contarlos convertiría el
+  error de un cliente en un apagón para todos (verificado: tres pedidos
   malformados seguidos bastan para dejar las cinco rutas en cooldown si se
-  cuenta el `4xx`); un `400` solo debe perjudicar a quien lo mandó, como
-  siempre. (`408`/`425` quedan afuera de esta excepción a propósito: por
-  espíritu son más "el upstream se colgó" o una nuance de protocolo que un
-  payload inválido, así que sí cuentan como fallo real — un proveedor que
-  usa `408` cuando se cuelga tiene que poder entrar en cooldown igual.) Un
-  proveedor puede además declarar su propio `timeout_s` en
-  `proveedores.yaml` (default: el global, 90 s) para acotar el peor caso de
-  uno que se sepa lento, sin bajarle el timeout a todos — aplica igual al
-  camino síncrono y al de streaming.
-- **Ese mismo `4xx` tampoco cuenta para la confiabilidad medida, ni por lo
-  tanto para `/health` ni para `/v1/ranking`.** El evento se sigue
-  guardando (queda diagnosticable — un operador viendo la tabla `eventos`
-  ve los `4xx` igual), pero se marca `es_error_cliente` y la confiabilidad
-  lo excluye por completo de su ventana: ni cuenta como fallo ni ocupa un
-  lugar entre las últimas observaciones. Antes solo se sacó del *contador
-  de cooldown*, pero seguía escribiéndose como fallo común, y eso alimenta
-  la confiabilidad que `/health` usa para su piso — verificado: 26 pedidos
-  malformados seguidos de una sola llave bastan para tirar la confiabilidad
-  de *todas* las rutas por el piso, con `/health` en `caido` mientras una
-  llave distinta con un pedido válido sigue recibiendo `200`. Esto es
-  **peor** que el 503 anterior en el despliegue real: Coolify usa `/health`
-  como *health check* y reinicia el contenedor cuando falla, pero la tabla
-  `eventos` vive en el volumen persistente `/datos` — un proceso nuevo
-  contra la misma base sigue viendo los mismos 26 fallos, así que el
-  reinicio no lo arregla. Un `500` sigue tirando `/health` y bajando la
-  posición en `/v1/ranking` exactamente como antes.
+  cuentan). Todo lo demás es evidencia de la *ruta*, y cuenta igual que un
+  `500` — incluidos cuatro códigos que una versión anterior de esta regla
+  clasificaba mal por razonar "no es reintentable, así que no cuenta":
+  `401` (la clave venció), `402` (sin crédito), `403` (cuenta suspendida o
+  moderación del proveedor) y **`404`** (`model_not_found` — literalmente
+  el problema que este proyecto existe para detectar). Medido el costo de
+  esa clasificación anterior: con las 5 rutas devolviendo `401`, el
+  cliente recibía `503` en el 100 % de los pedidos mientras `/health`
+  seguía en `ok` — un apagón con luz verde, sin ningún backstop para
+  MiniMax (nunca sondeado). `408` y `425` también quedan del lado de la
+  ruta (el upstream colgado, una nuance de protocolo), pero por la misma
+  razón de atribución, no porque sean "reintentables" — para esos dos las
+  dos preguntas coinciden, que es por qué el error anterior no se notó ahí.
+  El evento se sigue guardando siempre (queda diagnosticable — un operador
+  viendo la tabla `eventos` ve todos los códigos igual), pero la
+  confiabilidad excluye por completo de su ventana los que son evidencia
+  del pedido — verificado: 26 pedidos malformados seguidos de una sola
+  llave bastan para tirar la confiabilidad de *todas* las rutas por el
+  piso si se cuentan, con `/health` en `caido` mientras una llave distinta
+  con un pedido válido sigue recibiendo `200`. Esto sería **peor** que un
+  503 simple en el despliegue real: Coolify usa `/health` como *health
+  check* y reinicia el contenedor cuando falla, pero la tabla `eventos`
+  vive en el volumen persistente `/datos` — un proceso nuevo contra la
+  misma base seguiría viendo los mismos fallos, así que el reinicio no lo
+  arreglaría.
