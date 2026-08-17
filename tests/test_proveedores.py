@@ -206,10 +206,24 @@ def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp
 #     de proxy.py", igual que hoy para todo el que no lo declare. ---
 
 def test_un_proveedor_sin_timeout_declarado_queda_en_none(tmp_path):
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    # kilo/openrouter siguen sin declarar timeout_s -- Task 14 solo le puso
+    # uno a chatgpt (ver el test de abajo), a proposito: no se toca el
+    # timeout de ningun otro proveedor.
     kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
-    assert chatgpt.timeout_s is None
+    orouter = next(p for p in cargar(YAML, {}) if p.id == "openrouter")
     assert kilo.timeout_s is None
+    assert orouter.timeout_s is None
+
+
+def test_chatgpt_declara_su_propio_timeout_en_el_yaml_real():
+    # Task 14: chatgpt tiene prioridad:0 (se prueba primero en CADA pedido) y
+    # corre en `blog`, una maquina saturada -- sin timeout_s propio, un
+    # cuelgue ahi costaba hasta TIMEOUT_S=90s completo por intento. 45s
+    # (ver el comentario en proveedores.yaml para la medicion que lo
+    # justifica) acota ese peor caso a la mitad sin bajarle el timeout a
+    # nadie mas.
+    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    assert chatgpt.timeout_s == 45.0
 
 
 def test_un_proveedor_puede_declarar_su_propio_timeout(tmp_path):

@@ -1,17 +1,20 @@
 import asyncio
 import json
+from pathlib import Path
 
 import httpx
 import pytest
 
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.almacen import Almacen
-from llm_libre.proveedores import Proveedor
+from llm_libre.proveedores import Proveedor, cargar
 from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAXIMO_S,
                              COOLDOWN_BASE_S, COOLDOWN_PAGO_DIRECTO_S,
                              LIMITE_PROBE_BAJO_DEMANDA_S,
                              LIMITE_PROBE_GLOBAL_POR_MINUTO, UMBRAL_SOSPECHA,
                              VENTANA_PROBE_GLOBAL_S, Proxy, _es_error_del_cliente)
+
+YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
 CUERPO = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
@@ -497,6 +500,30 @@ async def test_usa_el_timeout_propio_del_proveedor_si_lo_declara():
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     await p.completar([_ruta("a:free", proveedor="lento")], CUERPO, ahora=0.0)
     assert vistos[0]["read"] == 20.0
+
+
+# --- Task 14: la config REAL de chatgpt (proveedores.yaml, no un proveedor
+#     sintetico) ahora declara timeout_s -- ver la justificacion del numero
+#     en el propio YAML. Carga el archivo real con proveedores.cargar (el
+#     mismo camino de produccion) para que este test se ponga rojo si
+#     alguien cambia el valor en el YAML sin tocar este test, o si el wiring
+#     de _timeout_de se rompe -- no un timeout_s inventado a mano. ---
+
+async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real():
+    vistos = []
+
+    def handler(req):
+        vistos.append(req.extensions.get("timeout"))
+        return httpx.Response(200, json=_ok())
+
+    chatgpt = next(p for p in cargar(YAML_REAL, {}) if p.id == "chatgpt")
+    assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    p = Proxy({"chatgpt": chatgpt}, almacen,
+             httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    await p.completar([_ruta("gpt-5-3-mini", proveedor="chatgpt")], CUERPO, ahora=0.0)
+    assert vistos[0]["read"] == chatgpt.timeout_s
 
 
 async def test_un_solo_200_invalido_no_castiga_pero_n_seguidos_si():

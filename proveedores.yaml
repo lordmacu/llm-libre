@@ -25,6 +25,24 @@ proveedores:
     # el /v1 en base_url, cliente.armar_peticion arma una URL de chat
     # invalida. Mismo patron que minimax (base_url: .../v1).
     modelos_path: /models
+    # Task 14: ningun proveedor declaraba timeout_s, asi que un chatgpt-proxy
+    # colgado costaba hasta TIMEOUT_S=90s completo POR INTENTO -- y chatgpt
+    # tiene prioridad:0, asi que es la PRIMERA ruta que prueba CADA pedido
+    # (incluida cada vuelta de un failover), corriendo ademas en `blog`, una
+    # maquina saturada donde "colgado, no rechazado" es el modo de falla
+    # realista (ver §4/§7 del spec). Medido en vivo (2026-08-16, una docena de
+    # muestras): tipico ~3.5s, un unico outlier en 28s -- nada cerca de 90s.
+    # 45s da ~13x de margen sobre lo tipico y ~1.6x sobre el peor outlier
+    # visto (generoso para una muestra chica de solo 12 pedidos, que
+    # facilmente subestima la cola real), y a la vez CORTA A LA MITAD el
+    # peor caso de un cuelgue real frente al default global de 90s -- eso
+    # importa porque un fallo no-429 aca solo suma SOSPECHA (UMBRAL_SOSPECHA
+    # 3 seguidos, ver proxy.py), asi que ni siquiera un timeout ocasional por
+    # ser demasiado ajustado saca a chatgpt de rotacion: la sonda de
+    # confirmacion que dispara la sospecha es un PING corto que normalmente
+    # responde en el rango tipico, no en el peor caso de una generacion
+    # completa. No se toca el timeout de ningun otro proveedor.
+    timeout_s: 45
     desenvuelve_canvas: true   # ver el hallazgo 1 de la revision en catalogo.py/razonamiento.py:
                                 # es el UNICO proveedor que de verdad filtra el modo canvas al
                                 # content -- ':::nota{...}' tambien es sintaxis Docusaurus/MDX

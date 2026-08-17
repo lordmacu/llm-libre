@@ -2,13 +2,16 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 
 import httpx
 
 from llm_libre.almacen import Almacen
 from llm_libre.modelos import Capacidades, Ruta
-from llm_libre.proveedores import Proveedor
+from llm_libre.proveedores import Proveedor, cargar
 from llm_libre.proxy import Proxy
+
+YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
 CUERPO = {"model": "auto", "messages": [], "stream": True}
 
@@ -598,6 +601,30 @@ async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_
     p = _proxy(handler)   # kilo, sin timeout_s declarado
     [l async for l in p.completar_stream([_ruta(proveedor="kilo")], CUERPO, 0.0)]
     assert vistos[0]["read"] == 90.0   # TIMEOUT_S
+
+
+# --- Task 14: mismo test que el de test_proxy.py pero en el camino de
+#     streaming, con la config REAL de chatgpt (proveedores.yaml, cargada con
+#     proveedores.cargar -- el mismo camino de produccion), no un proveedor
+#     sintetico. Se pone rojo si el YAML pierde timeout_s o si
+#     completar_stream deja de leer Proveedor.timeout_s por esa ruta. ---
+
+async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real_en_streaming():
+    vistos = []
+
+    def handler(req):
+        vistos.append(req.extensions.get("timeout"))
+        return httpx.Response(200, content=_sse("bien"))
+
+    chatgpt = next(p for p in cargar(YAML_REAL, {}) if p.id == "chatgpt")
+    assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
+    almacen = Almacen(":memory:")
+    almacen.crear_esquema()
+    p = Proxy({"chatgpt": chatgpt}, almacen,
+             httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    [l async for l in p.completar_stream(
+        [_ruta("gpt-5-3-mini", proveedor="chatgpt")], CUERPO, 0.0)]
+    assert vistos[0]["read"] == chatgpt.timeout_s
 
 
 def _multi(*modelos):
