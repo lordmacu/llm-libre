@@ -537,21 +537,72 @@ async def test_un_500_se_registra_sin_marca_de_error_del_cliente():
     assert fila == (0, 0)
 
 
-# --- Decision de diseno (round 4): 408 y 425 son 4xx, pero por espiritu son
-#     RETRYABLE, no errores deterministas de payload -- 408 suele significar
-#     que el UPSTREAM se colgo esperando (el mismo sintoma que motivo todo
-#     este cooldown), y 425 es una nuance de protocolo/TLS, no un payload
-#     invalido. Un proveedor detras de algo que devuelve 408 cuando se cuelga
-#     nunca entraria en cooldown si se los tratara como error del cliente.
-#     Se los saca de _es_error_del_cliente: SI cuentan hacia el cooldown de
-#     fallos duros y hacia confiabilidad, como cualquier otro fallo "real".
-#     Probabilidad baja, y la consecuencia de no hacerlo seria solo volver
-#     al comportamiento viejo (reintentar para siempre) -- pero encajan mejor
-#     del lado de "esto es evidencia sobre la ruta" que del lado del 400.
+# --- Round 4: 408 y 425 excluidos de "error del cliente". Round 5: ese
+#     fix estaba en el EJE EQUIVOCADO -- "es reintentable?" en vez de "de
+#     quien es la culpa, el pedido o la ruta?". Para 408/425 los dos ejes
+#     coinciden (por eso el resultado era correcto), pero para
+#     401/402/403/404 DIVERGEN: no son reintentables Y SI son evidencia de
+#     la ruta a la vez, y quedaban mal archivados del lado del cliente.
+#     Medido: las 5 rutas devolviendo 401 dejaba al cliente con 503 en el
+#     100% de los pedidos mientras /health seguia en "ok" -- el apagon con
+#     luz verde que /health existe para prevenir, y sin otro backstop para
+#     las rutas de pago (nunca sondeadas).
+#
+#     La pregunta que decide, para CUALQUIER codigo nuevo: ¿el MISMO pedido
+#     fallaria IDENTICO contra una ruta SANA? y ¿un pedido DISTINTO tendria
+#     EXITO contra ESTA MISMA ruta? Las dos "si" -> evidencia del PEDIDO. Si
+#     CUALQUIERA es "no" -> evidencia de LA RUTA, cuenta como un 500. ---
 
-def test_408_y_425_no_se_tratan_como_error_del_cliente():
+def test_408_y_425_son_evidencia_de_la_ruta():
     assert _es_error_del_cliente(408) is False
     assert _es_error_del_cliente(425) is False
+
+
+def test_401_402_403_404_son_evidencia_de_la_ruta_no_del_pedido():
+    # Pin del EJE, no de la lista de hoy: estos cuatro NO son reintentables
+    # en espiritu (lo opuesto de 408/425) pero SI son evidencia sobre la
+    # RUTA -- 401 la clave vencio o se roto, 402 sin credito (OpenRouter
+    # "insufficient credits"), 403 cuenta suspendida o moderacion del lado
+    # del proveedor, 404 model_not_found (literalmente el modelo que este
+    # proyecto existe para detectar que se pudrio). Si alguien los
+    # reclasifica de vuelta al lado del cliente razonando "no es
+    # reintentable => no cuenta" (el eje EQUIVOCADO que motivo esta
+    # ronda), este test se pone rojo.
+    for codigo in (401, 402, 403, 404):
+        assert _es_error_del_cliente(codigo) is False, codigo
+
+
+def test_400_y_422_siguen_siendo_evidencia_del_pedido():
+    # El contraste: estos SI cumplen las dos preguntas -- un payload
+    # invalido (400) o una validacion semantica del cuerpo (422) rompe
+    # CUALQUIER ruta sana igual, y un pedido distinto (bien formado) andaria
+    # bien contra esta misma ruta.
+    for codigo in (400, 422):
+        assert _es_error_del_cliente(codigo) is True, codigo
+
+
+async def test_tres_401_402_403_404_seguidos_castigan_la_ruta():
+    for codigo in (401, 402, 403, 404):
+        p = _proxy(lambda req, c=codigo: httpx.Response(c))
+        for i in range(TOPE_FALLOS_SEGUIDOS):
+            await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+        assert "kilo/a:free" in p.cooldowns, codigo
+
+
+async def test_401_402_403_404_se_registran_sin_marca_de_error_del_cliente():
+    for codigo in (401, 402, 403, 404):
+        p = _proxy(lambda req, c=codigo: httpx.Response(c))
+        await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
+        fila = p.almacen._con.execute(
+            "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+        assert fila == (0, 0), codigo
+
+
+async def test_tres_422_seguidos_no_castigan_la_ruta():
+    p = _proxy(lambda req: httpx.Response(422, json={"error": "unprocessable"}))
+    for i in range(TOPE_FALLOS_SEGUIDOS):
+        await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))
+    assert "kilo/a:free" not in p.cooldowns
 
 
 async def test_tres_408_seguidos_si_castigan_la_ruta():
