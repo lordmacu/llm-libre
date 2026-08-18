@@ -6,26 +6,26 @@ from llm_libre.providers import fixed_routes, load
 YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
 
-def test_carga_los_proveedores_registrados():
-    # openrouter se saco del registro (decision del operador, 2026-08-17):
-    # nunca tuvo OPENROUTER_API_KEY configurada, asi que sus 16 rutas
-    # 401-eaban siempre -- casi la mitad del catalogo, gastando cupo de
-    # sonda y espacio en /v1/ranking solo para demostrar que seguian
-    # muertas. Sigue documentado en docs/providers.md como ejemplo del
-    # patron "todo descubierto" con clave opcional.
-    # perplexity entro el 2026-08-17 con UNA ruta declarada (`turbo`): su
-    # /v1/models publica 124 modelos pero en el flujo anonimo todos caen a
-    # turbo, asi que declarar el catalogo seria medir 124 clones.
-    # grok entro el 2026-08-18: proxy OpenAI-compatible propio, ids
-    # descubiertos de /models y capacidades declaradas (su catalogo no las
-    # trae). Es la unica ruta gratis con tools Y vision, las dos verificadas
-    # en vivo contra el proxy desplegado.
+def test_it_loads_the_registered_providers():
+    # openrouter was removed from the registry (operator decision, 2026-08-17):
+    # OPENROUTER_API_KEY was never configured, so its 16 routes 401'd every time
+    # -- almost half the catalogue, burning probe quota and space in /v1/ranking
+    # just to keep proving they were still dead. It stays documented in
+    # docs/providers.md as an example of the "all discovered" pattern with an
+    # optional key.
+    # perplexity joined on 2026-08-17 with ONE declared route (`turbo`): its
+    # /v1/models publishes 124 models but in the anonymous flow they all fall
+    # back to turbo, so declaring the catalogue would mean measuring 124 clones.
+    # grok joined on 2026-08-18: our own OpenAI-compatible proxy, ids discovered
+    # from /models and capabilities declared (its catalogue does not carry them).
+    # It is the only free route with tools AND vision, both verified live against
+    # the deployed proxy.
     ps = load(YAML, {"MINIMAX_API_KEY": "mm"})
     assert [p.id for p in ps] == ["chatgpt", "perplexity", "deepseek", "grok",
                                   "kilo", "minimax"]
 
 
-def test_perplexity_declara_una_sola_ruta_sin_tools():
+def test_perplexity_declares_a_single_route_without_tools():
     # No native tool calling, and emulation does not work either: measured 0/3
     # tool_calls through the emulation layer (2026-08-18). Claiming the capability
     # would route tool requests here only to answer prose -- so a request with
@@ -33,33 +33,32 @@ def test_perplexity_declara_una_sola_ruta_sin_tools():
     # guarantees it.
     pplx = next(p for p in load(YAML, {}) if p.id == "perplexity")
     assert pplx.emulates_tools is False
-    rutas = fixed_routes(pplx)
-    assert [r.key for r in rutas] == ["perplexity/turbo"]
-    assert rutas[0].capabilities.tools is False
-    assert rutas[0].tier == "gratis"
-    assert pplx.base_url.endswith("/v1")   # sin el /v1 todo da 404
+    routes = fixed_routes(pplx)
+    assert [r.key for r in routes] == ["perplexity/turbo"]
+    assert routes[0].capabilities.tools is False
+    assert routes[0].tier == "gratis"
+    assert pplx.base_url.endswith("/v1")   # without the /v1 everything 404s
 
 
-def test_kilo_sin_clave_queda_con_clave_vacia_y_sigue_siendo_valido():
+def test_kilo_without_a_key_keeps_an_empty_key_and_stays_valid():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.api_key == ""
     assert kilo.tier == "gratis"
 
 
-def test_resuelve_las_claves_desde_el_entorno():
+def test_it_resolves_the_keys_from_the_environment():
     ps = load(YAML, {"MINIMAX_API_KEY": "secreta"})
     assert next(p for p in ps if p.id == "minimax").api_key == "secreta"
 
 
-def test_las_cabeceras_extra_se_conservan(tmp_path):
-    # Migrado a un YAML sintetico (revision post-Task-14): antes afirmaba
-    # sobre `openrouter`, el unico proveedor real que declaraba
-    # cabeceras_extra -- pero se saco del registro (ver
-    # test_carga_los_tres_proveedores) y este mecanismo (load() propaga
-    # cabeceras_extra tal cual) no depende de que ningun proveedor puntual
-    # lo use hoy.
-    yaml_con_cabeceras = tmp_path / "con_cabeceras.yaml"
-    yaml_con_cabeceras.write_text(
+def test_the_extra_headers_are_preserved(tmp_path):
+    # Migrated to a synthetic YAML (post-Task-14 review): it used to assert on
+    # `openrouter`, the only real provider declaring cabeceras_extra -- but that
+    # one was removed from the registry (see test_it_loads_the_registered_providers)
+    # and this mechanism (load() forwards cabeceras_extra verbatim) does not depend
+    # on any particular provider using it today.
+    yaml_with_headers = tmp_path / "con_cabeceras.yaml"
+    yaml_with_headers.write_text(
         "proveedores:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
@@ -68,33 +67,33 @@ def test_las_cabeceras_extra_se_conservan(tmp_path):
         "    modelos_path: /models\n"
         "    cabeceras_extra:\n"
         "      X-Title: llm-libre\n")
-    p = load(str(yaml_con_cabeceras), {})[0]
+    p = load(str(yaml_with_headers), {})[0]
     assert p.extra_headers["X-Title"] == "llm-libre"
 
 
-def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
+def test_fixed_models_become_paid_routes():
     minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
-    rutas = fixed_routes(minimax)
-    assert len(rutas) == 1
-    assert rutas[0].key == "minimax/MiniMax-M3"
-    assert rutas[0].tier == "pago"
-    assert rutas[0].capabilities.tools is True
-    # vision paso a True el 2026-08-18: estaba en False solo porque nadie lo
-    # habia medido. El barrido de capacidades mostro que nombra correctamente
-    # el color de un PNG rojo, asi que era una capacidad real que el router
-    # descartaba por una declaracion conservadora.
-    assert rutas[0].capabilities.vision is True
-    assert rutas[0].capabilities.context == 128000
-    assert rutas[0].capabilities.max_output == 32768
-    assert rutas[0].priority == 2   # la de minimax en el YAML, no una constante
+    routes = fixed_routes(minimax)
+    assert len(routes) == 1
+    assert routes[0].key == "minimax/MiniMax-M3"
+    assert routes[0].tier == "pago"
+    assert routes[0].capabilities.tools is True
+    # vision became True on 2026-08-18: it was False only because nobody had
+    # measured it. The capability sweep showed it correctly names the colour of a
+    # red PNG, so it was a real capability the router was discarding because of a
+    # conservative declaration.
+    assert routes[0].capabilities.vision is True
+    assert routes[0].capabilities.context == 128000
+    assert routes[0].capabilities.max_output == 32768
+    assert routes[0].priority == 2   # minimax's own, from the YAML, not a constant
 
 
-def test_un_proveedor_gratis_no_tiene_modelos_fijos():
+def test_a_free_provider_has_no_fixed_models():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert fixed_routes(kilo) == []
 
 
-def test_clave_de_solo_espacios_se_normaliza_a_vacia():
+def test_a_whitespace_only_key_is_normalised_to_empty():
     ps = load(YAML, {"KILO_API_KEY": "   ", "MINIMAX_API_KEY": "\t\n"})
     kilo = next(p for p in ps if p.id == "kilo")
     minimax = next(p for p in ps if p.id == "minimax")
@@ -102,171 +101,168 @@ def test_clave_de_solo_espacios_se_normaliza_a_vacia():
     assert minimax.api_key == ""
 
 
-# --- Task 13: chatgpt-proxy, prioridad y base_url_env ---
+# --- Task 13: chatgpt-proxy, priority and base_url_env ---
 
-def test_chatgpt_tiene_prioridad_cero_y_es_gratis():
+def test_chatgpt_has_priority_zero_and_is_free():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.tier == "gratis"
     assert chatgpt.priority == 0
 
 
-def test_kilo_queda_en_prioridad_uno():
+def test_kilo_sits_at_priority_one():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.priority == 1
 
 
-def test_minimax_queda_en_prioridad_dos():
+def test_minimax_sits_at_priority_two():
     minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
     assert minimax.priority == 2
 
 
-def test_un_proveedor_sin_prioridad_en_el_yaml_usa_el_default_cien(tmp_path):
-    yaml_sin_prioridad = tmp_path / "sin_prioridad.yaml"
-    yaml_sin_prioridad.write_text(
+def test_a_provider_without_priority_in_the_yaml_uses_the_default_of_one_hundred(tmp_path):
+    yaml_no_priority = tmp_path / "sin_prioridad.yaml"
+    yaml_no_priority.write_text(
         "proveedores:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
         "    dialecto: openai\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = load(str(yaml_sin_prioridad), {})[0]
+    p = load(str(yaml_no_priority), {})[0]
     assert p.priority == 100
 
 
-def test_base_url_env_usa_la_variable_de_entorno_si_esta_definida():
+def test_base_url_env_uses_the_environment_variable_when_defined():
     chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
-def test_base_url_env_cae_al_default_del_yaml_si_la_variable_falta():
+def test_base_url_env_falls_back_to_the_yaml_default_when_the_variable_is_missing():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.base_url == "http://127.0.0.1:8888/v1"
 
 
-def test_base_url_env_cae_al_default_si_la_variable_esta_en_blanco():
+def test_base_url_env_falls_back_to_the_default_when_the_variable_is_blank():
     chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "   "})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "http://127.0.0.1:8888/v1"
 
 
-def test_un_proveedor_sin_base_url_env_no_se_afecta(tmp_path):
-    # kilo no declara base_url_env: una variable de entorno que por
-    # casualidad tenga su id no debe pisarle la url.
+def test_a_provider_without_base_url_env_is_unaffected(tmp_path):
+    # kilo does not declare base_url_env: an environment variable that happens to
+    # carry its id must not override its url.
     kilo = next(p for p in load(YAML, {"KILO_URL": "https://otra.test"}) if p.id == "kilo")
     assert kilo.base_url == "https://api.kilo.ai/api/gateway"
 
 
-# --- Follow-up de Task 13: chatgpt paso de modelos_fijos a DESCUBIERTO
-#     (su /v1/models ahora es dinamico), pero sigue sin traer metadatos de
-#     capacidad -- por eso declara `capacidades_por_defecto` en vez de
-#     `modelos_fijos`. Es un mecanismo GENERAL: cualquier proveedor cuyo
-#     catalogo sea igual de desnudo lo puede usar, no es especial de chatgpt. ---
+# --- Task 13 follow-up: chatgpt moved from modelos_fijos to DISCOVERED (its
+#     /v1/models is now dynamic), but it still carries no capability metadata --
+#     which is why it declares `capacidades_por_defecto` instead of
+#     `modelos_fijos`. It is a GENERAL mechanism: any provider whose catalogue is
+#     equally bare can use it, it is not special to chatgpt. ---
 
-def test_chatgpt_se_descubre_por_modelos_path_no_por_modelos_fijos():
+def test_chatgpt_is_discovered_via_models_path_not_via_fixed_models():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.models_path == "/models"
     assert chatgpt.fixed_models == []
 
 
-def test_chatgpt_declara_capacidades_por_defecto_con_tools_false():
+def test_chatgpt_declares_default_capabilities_with_tools_false():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.default_capabilities == Capabilities(
         tools=False, vision=False, context=128000, max_output=8192)
 
 
-def test_kilo_no_declara_capacidades_por_defecto():
+def test_kilo_declares_no_default_capabilities():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.default_capabilities is None
 
 
-def test_minimax_tampoco_declara_capacidades_por_defecto():
-    # Sigue siendo el patron viejo: ids Y capacidades declaradas a mano
-    # (fixed_routes), no descubrimiento con defaults.
+def test_minimax_declares_no_default_capabilities_either():
+    # Still the old pattern: ids AND capabilities declared by hand
+    # (fixed_routes), not discovery with defaults.
     minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
     assert minimax.default_capabilities is None
     assert len(fixed_routes(minimax)) == 1
 
 
-def test_un_proveedor_sin_capacidades_por_defecto_en_el_yaml_queda_en_none(tmp_path):
-    yaml_sin_defaults = tmp_path / "sin_defaults.yaml"
-    yaml_sin_defaults.write_text(
+def test_a_provider_without_default_capabilities_in_the_yaml_gets_none(tmp_path):
+    yaml_no_defaults = tmp_path / "sin_defaults.yaml"
+    yaml_no_defaults.write_text(
         "proveedores:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
         "    dialecto: openai\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = load(str(yaml_sin_defaults), {})[0]
+    p = load(str(yaml_no_defaults), {})[0]
     assert p.default_capabilities is None
 
 
-# --- Revision del follow-up: rungs sin pinnear ---
+# --- Follow-up review: unpinned rungs ---
 #
-# `fixed_routes` estampando `priority=p.priority` no tenia NINGUN test que
-# distinguiera "toma la prioridad real del proveedor" de "siempre pone la
-# misma constante" -- inerte hoy porque minimax es el unico modelos_fijos y
-# es de pago, pero el registro invita a futuros proveedores gratis
-# declarados. Se prueba con un YAML sintetico y una prioridad bien
-# distintiva (77) para que ninguna coincidencia con un default (100) o con
-# el minimax real (2) pueda disfrazar una constante hardcodeada.
+# `fixed_routes` stamping `priority=p.priority` had NO test distinguishing "it
+# takes the provider's real priority" from "it always writes the same constant"
+# -- inert today because minimax is the only modelos_fijos provider and it is
+# paid, but the registry invites future declared free providers. It is tested
+# with a synthetic YAML and a deliberately distinctive priority (77) so that no
+# coincidence with a default (100) or with the real minimax (2) can disguise a
+# hardcoded constant.
 
-# --- Hallazgo 1 de la revision: el desenvuelto de canvas era GLOBAL, y
-#     ':::nota{...}' tambien es sintaxis Docusaurus/MDX estandar -- se
-#     verificaba en vivo que una ruta de Kilo perdia esas marcas de
-#     documentacion legitima. Pasa a ser una declaracion POR PROVEEDOR, misma
-#     forma que capacidades_por_defecto: apagada por defecto, prendida solo
-#     para chatgpt. ---
+# --- Finding 1 of the review: canvas unwrapping was GLOBAL, and ':::nota{...}'
+#     is also standard Docusaurus/MDX syntax -- it was verified live that a Kilo
+#     route lost those legitimate documentation markers. It becomes a PER-PROVIDER
+#     declaration, the same shape as capacidades_por_defecto: off by default, on
+#     only for chatgpt. ---
 
-def test_chatgpt_declara_desenvuelve_canvas():
+def test_chatgpt_declares_canvas_unwrapping():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.unwraps_canvas is True
 
 
-def test_kilo_no_desenvuelve_canvas():
+def test_kilo_does_not_unwrap_canvas():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.unwraps_canvas is False
 
 
-def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp_path):
-    yaml_sin_canvas = tmp_path / "sin_canvas.yaml"
-    yaml_sin_canvas.write_text(
+def test_a_provider_without_canvas_unwrapping_in_the_yaml_defaults_to_false(tmp_path):
+    yaml_no_canvas = tmp_path / "sin_canvas.yaml"
+    yaml_no_canvas.write_text(
         "proveedores:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
         "    dialecto: openai\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = load(str(yaml_sin_canvas), {})[0]
+    p = load(str(yaml_no_canvas), {})[0]
     assert p.unwraps_canvas is False
 
 
-# --- Hallazgo 2 de la revision (timeout por proveedor): agregado limpio, sin
-#     complicar el diseno -- default None significa "usar el TIMEOUT_S global
-#     de proxy.py", igual que hoy para todo el que no lo declare. ---
+# --- Finding 2 of the review (per-provider timeout): a clean addition that does
+#     not complicate the design -- a default of None means "use proxy.py's global
+#     TIMEOUT_S", exactly as today for anyone who does not declare it. ---
 
-def test_un_proveedor_sin_timeout_forclarado_queda_en_none(tmp_path):
-    # kilo sigue sin declarar timeout_s -- Task 14 solo le puso uno a
-    # chatgpt (ver el test de abajo), a proposito: no se toca el timeout de
-    # ningun otro proveedor.
+def test_a_provider_without_a_declared_timeout_gets_none(tmp_path):
+    # kilo still declares no timeout_s -- Task 14 only gave one to chatgpt (see
+    # the test below), on purpose: no other provider's timeout is touched.
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.timeout_s is None
 
 
-def test_chatgpt_declara_su_propio_timeout_en_el_yaml_real():
-    # Task 14: chatgpt tiene prioridad:0 (se prueba primero en CADA pedido) y
-    # corre en `blog`, una maquina saturada -- sin timeout_s propio, un
-    # cuelgue ahi costaba hasta TIMEOUT_S=90s completo por intento. 45s
-    # (ver el comentario en proveedores.yaml para la medicion que lo
-    # justifica) acota ese peor caso a la mitad sin bajarle el timeout a
-    # nadie mas.
+def test_chatgpt_declares_its_own_timeout_in_the_real_yaml():
+    # Task 14: chatgpt has priority:0 (it is tried first on EVERY request) and
+    # runs on `blog`, a saturated machine -- without its own timeout_s, a hang
+    # there cost up to the full TIMEOUT_S=90s per attempt. 45s (see the comment in
+    # proveedores.yaml for the measurement justifying it) halves that worst case
+    # without lowering anyone else's timeout.
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s == 45.0
 
 
-def test_un_proveedor_puede_declarar_su_propio_timeout(tmp_path):
-    yaml_con_timeout = tmp_path / "con_timeout.yaml"
-    yaml_con_timeout.write_text(
+def test_a_provider_can_declare_its_own_timeout(tmp_path):
+    yaml_with_timeout = tmp_path / "con_timeout.yaml"
+    yaml_with_timeout.write_text(
         "proveedores:\n"
         "  - id: lento\n"
         "    tier: gratis\n"
@@ -274,51 +270,50 @@ def test_un_proveedor_puede_declarar_su_propio_timeout(tmp_path):
         "    base_url: https://lento.test\n"
         "    modelos_path: /models\n"
         "    timeout_s: 20\n")
-    p = load(str(yaml_con_timeout), {})[0]
+    p = load(str(yaml_with_timeout), {})[0]
     assert p.timeout_s == 20.0
 
 
-# --- Hallazgo 6 de la revision: CHATGPT_PROXY_URL reemplaza TODO base_url,
-#     asi que el operador tiene que acordarse de poner el /v1 el mismo --
-#     mismo footgun que ya se arreglo del lado del YAML, sobreviviendo del
-#     lado del entorno. Eleccion: NORMALIZAR (agregar el sufijo de ruta que
-#     el YAML ya declara como default, si la variable no lo trae) en vez de
-#     reventar al arrancar -- hay una unica interpretacion correcta (el
-#     sufijo que el propio YAML ya declara), asi que auto-corregir es mas
-#     util que tirar abajo un despliegue que ya esta corriendo por un typo
-#     recuperable. Se loguea igual, para que quede visible en produccion. ---
+# --- Finding 6 of the review: CHATGPT_PROXY_URL replaces the WHOLE base_url, so
+#     the operator has to remember to include the /v1 themselves -- the same
+#     footgun already fixed on the YAML side, surviving on the environment side.
+#     Choice: NORMALISE (append the path suffix the YAML already declares as the
+#     default, if the variable does not carry one) rather than failing at startup
+#     -- there is a single correct interpretation (the suffix the YAML itself
+#     declares), so auto-correcting is more useful than taking down a running
+#     deployment over a recoverable typo. It is logged either way, so it stays
+#     visible in production. ---
 
-def test_base_url_env_agrega_el_sufijo_si_la_variable_no_lo_trae():
+def test_base_url_env_appends_the_suffix_when_the_variable_lacks_it():
     chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
-def test_base_url_env_con_query_string_no_le_astilla_el_sufijo_adentro():
-    # LOW de la revision: el sufijo se agregaba por concatenacion de texto,
-    # asi que una URL con path vacio pero CON query string terminaba con el
-    # sufijo pegado DENTRO del valor de la query
-    # ("...:8888?token=abc" -> "...:8888?token=abc/v1"). Hay que parsear la
-    # URL y reconstruirla, no concatenar strings.
+def test_base_url_env_with_a_query_string_does_not_splinter_the_suffix_inside_it():
+    # LOW from the review: the suffix was appended by text concatenation, so a URL
+    # with an empty path but WITH a query string ended up with the suffix glued
+    # INSIDE the query value ("...:8888?token=abc" -> "...:8888?token=abc/v1").
+    # The URL has to be parsed and rebuilt, not string-concatenated.
     chatgpt = next(
         p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888?token=abc"})
         if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1?token=abc"
 
 
-def test_base_url_env_no_duplica_el_sufijo_si_ya_lo_trae():
+def test_base_url_env_does_not_duplicate_the_suffix_when_it_is_already_there():
     chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
-def test_base_url_env_con_barra_final_no_duplica_el_sufijo():
+def test_base_url_env_with_a_trailing_slash_does_not_duplicate_the_suffix():
     chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
-def test_base_url_env_loguea_cuando_normaliza(caplog):
+def test_base_url_env_logs_when_it_normalises(caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
         load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
@@ -326,12 +321,12 @@ def test_base_url_env_loguea_cuando_normaliza(caplog):
     assert "/v1" in caplog.text
 
 
-def test_base_url_env_sin_sufijo_en_el_default_no_agrega_nada(tmp_path):
-    # kilo (sin base_url_env hoy) no se ve afectado por este mecanismo; un
-    # proveedor CON base_url_env pero cuyo default no tiene ruta (solo
-    # host) tampoco debe agregar nada de la nada.
-    yaml_sin_sufijo = tmp_path / "sin_sufijo.yaml"
-    yaml_sin_sufijo.write_text(
+def test_base_url_env_appends_nothing_when_the_default_has_no_suffix(tmp_path):
+    # kilo (with no base_url_env today) is unaffected by this mechanism; a
+    # provider WITH base_url_env whose default has no path (host only) must not
+    # append anything out of nowhere either.
+    yaml_no_suffix = tmp_path / "sin_sufijo.yaml"
+    yaml_no_suffix.write_text(
         "proveedores:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
@@ -339,25 +334,25 @@ def test_base_url_env_sin_sufijo_en_el_default_no_agrega_nada(tmp_path):
         "    base_url_env: SUELTO_URL\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = load(str(yaml_sin_sufijo), {"SUELTO_URL": "https://otra.test"})[0]
+    p = load(str(yaml_no_suffix), {"SUELTO_URL": "https://otra.test"})[0]
     assert p.base_url == "https://otra.test"
 
 
-# --- Re-revision: la regla de normalizacion era DEMASIADO ansiosa -- agregaba
-#     el sufijo sin condicion, asi que "...:8888/v2" (una ruta PROPIA del
-#     operador, p.ej. un mount de reverse proxy) terminaba en
-#     ".../v2/v1/chat/completions". Se aprieta: solo se agrega el sufijo
-#     cuando la URL del entorno NO trae ruta propia (vacia o "/"); si ya trae
-#     una, se usa TAL CUAL -- "dijeron lo que quisieron decir" -- con un aviso
-#     por si fue sin querer, no una correccion silenciosa. ---
+# --- Re-review: the normalisation rule was TOO eager -- it appended the suffix
+#     unconditionally, so "...:8888/v2" (a path the operator chose, e.g. a reverse
+#     proxy mount) ended up as ".../v2/v1/chat/completions". It is tightened: the
+#     suffix is only appended when the environment's URL carries NO path of its
+#     own (empty or "/"); if it already has one, it is used AS IS -- "they said
+#     what they meant" -- with a warning in case it was accidental, not a silent
+#     correction. ---
 
-def test_base_url_env_con_ruta_propia_no_se_le_pisa_el_sufijo():
+def test_base_url_env_with_its_own_path_does_not_get_the_suffix_forced_on_it():
     chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v2"
 
 
-def test_base_url_env_con_ruta_propia_loguea_advertencia_sin_modificar(caplog):
+def test_base_url_env_with_its_own_path_logs_a_warning_without_modifying(caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
         chatgpt = next(
@@ -368,16 +363,16 @@ def test_base_url_env_con_ruta_propia_loguea_advertencia_sin_modificar(caplog):
     assert "/v2" in caplog.text
 
 
-def test_base_url_env_con_la_ruta_correcta_no_loguea_nada(caplog):
+def test_base_url_env_with_the_correct_path_logs_nothing(caplog):
     import logging
     with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
         load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
     assert caplog.text == ""
 
 
-def test_fixed_routes_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_path):
-    yaml_prioridad_rara = tmp_path / "prioridad_rara.yaml"
-    yaml_prioridad_rara.write_text(
+def test_fixed_routes_uses_the_providers_real_priority_not_a_constant(tmp_path):
+    yaml_odd_priority = tmp_path / "prioridad_rara.yaml"
+    yaml_odd_priority.write_text(
         "proveedores:\n"
         "  - id: pago_futuro\n"
         "    tier: pago\n"
@@ -390,22 +385,22 @@ def test_fixed_routes_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_p
         "        vision: false\n"
         "        contexto: 1000\n"
         "        max_salida: 100\n")
-    p = load(str(yaml_prioridad_rara), {})[0]
-    rutas = fixed_routes(p)
-    assert len(rutas) == 1
-    assert rutas[0].priority == 77
+    p = load(str(yaml_odd_priority), {})[0]
+    routes = fixed_routes(p)
+    assert len(routes) == 1
+    assert routes[0].priority == 77
 
 
-def test_deepseek_declara_dos_rutas_con_tools_emuladas():
-    # deepseek-chat and deepseek-reasoner don't support native tool calling, but
+def test_deepseek_declares_two_routes_with_emulated_tools():
+    # deepseek-chat and deepseek-reasoner do not support native tool calling, but
     # emula_tools:true makes fixed_routes() report tools=True in capabilities:
     # prompt-injection emulation (tool_emulator.py) is transparent to the router.
-    # deepseek-vision NO se declara: no se verifico entrada de imagenes.
+    # deepseek-vision is NOT declared: image input was never verified.
     ds = next(p for p in load(YAML, {}) if p.id == "deepseek")
     assert ds.emulates_tools is True
-    rutas = fixed_routes(ds)
-    assert [r.model_id for r in rutas] == ["deepseek-chat", "deepseek-reasoner"]
-    assert all(r.capabilities.tools is True for r in rutas)
-    assert all(r.capabilities.vision is False for r in rutas)
+    routes = fixed_routes(ds)
+    assert [r.model_id for r in routes] == ["deepseek-chat", "deepseek-reasoner"]
+    assert all(r.capabilities.tools is True for r in routes)
+    assert all(r.capabilities.vision is False for r in routes)
     assert ds.base_url.endswith("/v1")
-    assert ds.timeout_s == 60.0   # el proof-of-work en WASM suma tiempo variable
+    assert ds.timeout_s == 60.0   # the WASM proof-of-work adds variable time
