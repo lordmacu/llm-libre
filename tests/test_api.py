@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from llm_libre.almacen import Almacen
 from llm_libre.api import Estado, crear_app, interpretar_pedido
-from llm_libre.auth import LimitadorPorLlave
+from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.proveedores import Proveedor
 from llm_libre.proxy import (LIMITE_PROBE_BAJO_DEMANDA_S, TOPE_PENDIENTES,
@@ -1313,7 +1313,7 @@ def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
     estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
                     llaves={"buena"}, tope_pago_diario=200,
-                    limitador=LimitadorPorLlave(2))
+                    limitador=PerKeyRateLimiter(2))
     cliente = TestClient(crear_app(estado))
 
     r1 = cliente.get("/v1/models", headers={"X-API-Key": "buena"})

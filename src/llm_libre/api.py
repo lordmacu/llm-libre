@@ -6,12 +6,12 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from llm_libre.auth import LimitadorPorLlave
+from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.modelos import METRICAS_NEUTRAS, Pedido
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPCION, HEALTH_DOCS,
                                MODELOS_DOCS, RANKING_DOCS, RESUMEN, TITULO, USO_DOCS,
                                VERSION, personalizar_openapi)
-from llm_libre.ranking import puntuar
+from llm_libre.ranking import score
 from llm_libre.router import clave_de_orden, compatibles, ordenar
 
 PERFILES = {"rapido", "balanceado", "potente"}
@@ -165,7 +165,7 @@ class Estado:
     proxy: object
     llaves: set
     tope_pago_diario: int
-    limitador: LimitadorPorLlave = field(default_factory=lambda: LimitadorPorLlave(60))
+    limitador: PerKeyRateLimiter = field(default_factory=lambda: PerKeyRateLimiter(60))
     proveedores: list = field(default_factory=list)   # lo usa el planificador
     http: object = None                                # cliente httpx compartido
     # Generador para el sorteo entre rutas empatadas (ver router.rotar_empates).
@@ -209,7 +209,7 @@ def crear_app(estado: Estado) -> FastAPI:
         llave = _resolver_llave(x_api_key, authorization)
         if not llave or llave not in estado.llaves:
             raise HTTPException(401, "llave invalida")
-        if not estado.limitador.permitir(llave, time.time()):
+        if not estado.limitador.allow(llave, time.time()):
             raise HTTPException(429, "demasiadas peticiones para esta llave")
         return llave
 
@@ -343,7 +343,7 @@ def crear_app(estado: Estado) -> FastAPI:
             m = metricas[r.clave]
             medida = m.calidad_medida_en is not None
             filas.append({"clave": r.clave, "tier": r.tier, "prioridad": r.prioridad,
-                          "puntaje": round(puntuar(m, "balanceado"), 4),
+                          "puntaje": round(score(m, "balanceado"), 4),
                           # "nunca medida" se dice, no se disfraza: mostrar el
                           # neutro en `calidad` como si alguien lo hubiera
                           # medido es lo que hacia invisible que `auto` estaba

@@ -8,7 +8,7 @@ import httpx
 
 from llm_libre.almacen import Almacen
 from llm_libre.api import Estado, crear_app
-from llm_libre.auth import LimitadorPorLlave
+from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.proveedores import cargar
 from llm_libre.proxy import Proxy
 from llm_libre.sondeo import ciclo
@@ -57,7 +57,7 @@ def crear_estado() -> Estado:
     proxy = Proxy({p.id: p for p in proveedores}, almacen, http)
     estado = Estado(almacen=almacen, proxy=proxy, llaves=llaves,
                     tope_pago_diario=int(os.getenv("TOPE_PAGO_DIARIO", "200")),
-                    limitador=LimitadorPorLlave(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
+                    limitador=PerKeyRateLimiter(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
     estado.proveedores = proveedores
     estado.http = http
     estado.aleatorio = random.Random() if ROTAR else None

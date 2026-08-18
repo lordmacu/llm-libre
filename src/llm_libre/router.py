@@ -1,5 +1,5 @@
 from llm_libre.modelos import METRICAS_NEUTRAS, Metricas, Pedido, Ruta
-from llm_libre.ranking import puntuar
+from llm_libre.ranking import score
 
 
 def compatibles(rutas: list[Ruta], pedido: Pedido) -> list[Ruta]:
@@ -43,7 +43,7 @@ def clave_de_orden(r: Ruta, m: Metricas, perfil: str,
     """
     return (m.en_cooldown_hasta > ahora, r.tier == "pago", r.prioridad,
             1 if m.calidad_medida_en is None else 0,
-            -puntuar(m, perfil))
+            -score(m, perfil))
 
 
 def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
@@ -155,7 +155,7 @@ def rotar_empates(ordenadas: list[Ruta], metricas: dict[str, Metricas],
                 ordenadas[j], metricas.get(ordenadas[j].clave, METRICAS_NEUTRAS), ahora) == cat:
             j += 1
         grupo = ordenadas[i:j]
-        puntajes = [puntuar(metricas.get(r.clave, METRICAS_NEUTRAS), perfil) for r in grupo]
+        puntajes = [score(metricas.get(r.clave, METRICAS_NEUTRAS), perfil) for r in grupo]
         mejor = puntajes[0]
         # `mejor <= 0` (todas las rutas del grupo puntuando cero) haria que el
         # piso fuera 0 y entrara TODO al sorteo, incluida una ruta que puntua

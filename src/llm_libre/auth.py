@@ -1,18 +1,18 @@
 from collections import defaultdict
 
 
-class LimitadorPorLlave:
-    """Ventana deslizante simple, en memoria. Depende de correr con UN solo worker."""
+class PerKeyRateLimiter:
+    """Simple in-memory sliding window. Assumes a single worker process."""
 
-    def __init__(self, por_minuto: int):
-        self.por_minuto = por_minuto
-        self._marcas: dict[str, list[float]] = defaultdict(list)
+    def __init__(self, per_minute: int):
+        self.per_minute = per_minute
+        self._hits: dict[str, list[float]] = defaultdict(list)
 
-    def permitir(self, llave: str, ahora: float) -> bool:
-        marcas = [t for t in self._marcas[llave] if ahora - t < 60.0]
-        if len(marcas) >= self.por_minuto:
-            self._marcas[llave] = marcas
+    def allow(self, key: str, now: float) -> bool:
+        hits = [t for t in self._hits[key] if now - t < 60.0]
+        if len(hits) >= self.per_minute:
+            self._hits[key] = hits
             return False
-        marcas.append(ahora)
-        self._marcas[llave] = marcas
+        hits.append(now)
+        self._hits[key] = hits
         return True

@@ -562,7 +562,7 @@ class Proxy:
             # BUFFEREA entera antes de poder decidir si es un tool call, asi que
             # para cuando se llama a _registrar_exito_una_vez ya paso toda la
             # generacion. Sin esto, esas rutas reportaban el tiempo TOTAL como
-            # ttft -- 7-27s para un modelo que razona -- y ranking.factor_latencia
+            # ttft -- 7-27s para un modelo que razona -- y ranking.latency_factor
             # las hundia en el puntaje justo por usarlas. Se estampa cuando llega
             # el PRIMER fragmento, que es lo que ttft significa.
             ttft_medido_ms = None
