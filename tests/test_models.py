@@ -36,7 +36,7 @@ def test_as_wire_emits_the_spanish_keys_the_error_bodies_use():
     """The 400/503 bodies serialise this, so these keys are the HTTP contract --
     see tests/test_wire_contract.py, which asserts them end to end."""
     wire = RouteRequest(model="x", needs_tools=True, min_context=1000).as_wire()
-    assert set(wire) == {"model", "needs_tools", "needs_vision",
+    assert set(wire) == {"model", "needs_tools", "needs_vision", "needs_images",
                          "min_context", "profile", "allow_paid"}
     assert wire["model"] == "x"
     assert wire["needs_tools"] is True

@@ -63,6 +63,15 @@ def test_endpoint_paths(client):
         assert client.get(path, headers=AUTH).status_code == 200, path
 
 
+def test_the_image_generation_endpoint_exists_at_the_openai_path(client):
+    """`POST /v1/images/generations`, so a client changes only base_url.
+
+    Asserted through the app's route table rather than by calling it: the
+    fixture has no image-capable route, so a call would 400 -- which proves the
+    filter works, not that the PATH is the one clients expect."""
+    assert "/v1/images/generations" in {r.path for r in client.app.routes}
+
+
 # --- response bodies ---
 
 def test_health_body_keys(client):
@@ -78,6 +87,8 @@ def test_ranking_row_keys(client):
         "key", "tier", "priority", "score", "quality", "quality_measured",
         "quality_assumed", "last_quality_probe", "last_probe", "reliability",
         "ttft_p50_ms", "latency_p50_ms", "cooldown_until", "tools", "vision",
+        # image OUTPUT -- a separate axis from `vision`, which is image input
+        "images",
         "context",
     }
 
@@ -113,8 +124,8 @@ def test_error_body_exposes_the_request_fields(client):
     detail = r.json()["detail"]
     assert "message" in detail
     assert set(detail["request"]) == {
-        "model", "needs_tools", "needs_vision", "min_context", "profile",
-        "allow_paid",
+        "model", "needs_tools", "needs_vision", "needs_images", "min_context",
+        "profile", "allow_paid",
     }
 
 
@@ -280,7 +291,11 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         == {"ix_probes", "ix_events"}
     assert [f[1] for f in con.execute("PRAGMA table_info(routes)")] == [
         "key", "provider", "model_id", "tier", "tools", "vision", "context",
-        "max_output", "last_seen", "active", "priority"]
+        "max_output", "last_seen", "active", "priority",
+        # Added after the rename: an old database gains it through the
+        # add-column migration, defaulting to 0 -- "cannot generate" is the safe
+        # direction for a row written before anyone measured it.
+        "images"]
     assert [f[1] for f in con.execute("PRAGMA table_info(probes)")] == [
         "key", "kind", "at", "ok", "latency_ms", "ttft_ms", "http_code",
         "cases_passed", "cases_total"]

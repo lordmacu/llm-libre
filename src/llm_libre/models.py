@@ -26,6 +26,13 @@ class Capabilities:
     vision: bool
     context: int
     max_output: int
+    # Image GENERATION -- a different axis from `vision`, which is image INPUT.
+    # A route can have either, both or neither: grok's imagine-agent-mode family
+    # generates but cannot see, mistral does both, and most free chat routes do
+    # neither. Defaulted to False so every existing construction site (tests,
+    # catalogue normalisation, the fixed-model YAML entries) keeps working
+    # unchanged and a provider has to CLAIM the capability to get it.
+    images: bool = False
 
 
 @dataclass(frozen=True)
@@ -65,6 +72,9 @@ class RouteRequest:
     model: str | None = None        # explicit id; None if an auto* alias arrived
     needs_tools: bool = False
     needs_vision: bool = False
+    # Set by POST /v1/images/generations, never by a chat request: it is what
+    # keeps that endpoint from ever attempting a route that cannot generate.
+    needs_images: bool = False
     min_context: int = 0
     profile: str = "balanced"       # "fast" | "balanced" | "strong"
     allow_paid: bool = True
@@ -83,6 +93,7 @@ class RouteRequest:
             "model": self.model,
             "needs_tools": self.needs_tools,
             "needs_vision": self.needs_vision,
+            "needs_images": self.needs_images,
             "min_context": self.min_context,
             "profile": self.profile,
             "allow_paid": self.allow_paid,

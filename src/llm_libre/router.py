@@ -91,6 +91,8 @@ def _satisfies(r: Route, p: RouteRequest) -> bool:
         return False
     if p.needs_vision and not c.vision:
         return False
+    if p.needs_images and not c.images:
+        return False
     if p.min_context and c.context < p.min_context:
         return False
     return True

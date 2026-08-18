@@ -136,8 +136,14 @@ def _default_capabilities(p: dict) -> Capabilities | None:
     data = p.get("default_capabilities")
     if not data:
         return None
+    # `images` is OPTIONAL, unlike the other four: it was added after every
+    # provider entry already existed, and a missing declaration must mean
+    # "cannot generate" rather than a KeyError at startup. It is also the safe
+    # default -- a provider gains the capability by claiming it, never by
+    # omission.
     return Capabilities(tools=bool(data["tools"]), vision=bool(data["vision"]),
-                       context=int(data["context"]), max_output=int(data["max_output"]))
+                       context=int(data["context"]), max_output=int(data["max_output"]),
+                       images=bool(data.get("images", False)))
 
 
 def _exceptions(p: dict) -> dict:
@@ -182,6 +188,7 @@ def fixed_routes(p: Provider) -> list[Route]:
     return [Route(p.id, m["id"], p.tier,
                  Capabilities(tools=True if p.emulates_tools else bool(m["tools"]),
                              vision=bool(m["vision"]),
-                             context=int(m["context"]), max_output=int(m["max_output"])),
+                             context=int(m["context"]), max_output=int(m["max_output"]),
+                             images=bool(m.get("images", False))),
                  priority=p.priority)
             for m in p.fixed_models]

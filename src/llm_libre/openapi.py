@@ -657,6 +657,51 @@ RANKING_DOCS = {
 
 # --- GET /v1/usage ---------------------------------------------------------
 
+IMAGES_DOCS = {
+    "tags": ["OpenAI-compatible"],
+    "summary": "Generate images, routed only to models that actually can",
+    "description": (
+        "OpenAI's image-generation contract. As with chat, a client changes only "
+        "`base_url`.\n\n"
+        "What this endpoint adds over calling a provider directly is the **filter**: "
+        "the gateway tracks image generation as a routing capability of its own "
+        "(`images` in `GET /v1/ranking`), separate from `vision` -- `vision` is image "
+        "INPUT, this is image OUTPUT, and a route can have either, both or neither. "
+        "Routes that cannot generate are dropped BEFORE any request is attempted, so a "
+        "prompt never spends a full timeout on a chat-only model just to be told it "
+        "cannot draw.\n\n"
+        "Failover, cooldowns, per-route telemetry and the daily paid cap all work "
+        "exactly as they do for chat, and the same `X-Route-Used` / `X-Tier` / "
+        "`X-Attempts` headers come back.\n\n"
+        "A `200` whose `data` array is EMPTY is not treated as a success: the gateway "
+        "counts it as a failed attempt for that route and moves to the next one, "
+        "rather than handing back `{\"data\": []}`.\n\n"
+        "`503` means every image-capable route is down, in cooldown, or out of quota "
+        "-- both upstreams rate-limit generation far more aggressively than chat."
+    ),
+    "responses": {
+        200: {"description": "One or more generated images.",
+              "content": {"application/json": {"example": {
+                  "created": 1755400000,
+                  "data": [{"url": "https://.../generated.png"}]}}}},
+        401: {"description": "Missing or invalid API key.",
+              "content": {"application/json": {"example": {"detail": "invalid api key"}}}},
+        400: {"description": "No route can generate images at all -- the pool has none, "
+                             "which is a different situation from them all being busy.",
+              "content": {"application/json": {"example": {"detail": {
+                  "message": "no route satisfies the request",
+                  "request": {"model": None, "needs_tools": False, "needs_vision": False,
+                              "needs_images": True, "min_context": 0,
+                              "profile": "balanced", "allow_paid": True},
+                  "active_routes": 52}}}}},
+        503: {"description": "Image-capable routes exist but none can serve right now.",
+              "content": {"application/json": {"example": {"error": {
+                  "message": "no routes available",
+                  "detail": "200 with no generated image",
+                  "next_release": None}}}}},
+    },
+}
+
 USAGE_DOCS = {
     "tags": ["Diagnostics"],
     "summary": "Today's paid-usage counter for the calling key",

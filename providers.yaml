@@ -204,10 +204,21 @@ providers:
     # is declared and the other five I suspected are NOT: claude-3-opus, gpt-4o
     # and grok-4-1-thinking-1129 gave 3/3 when repeated, their original "no" was
     # the roulette.
+    #
+    # `images: true` on those same three, added 2026-08-18: they are not merely
+    # the weak chat routes, they are the ONLY grok routes that generate images.
+    # grok-proxy exposes POST /v1/images/generations and rotates between exactly
+    # these three (3x999/hour). The capability is DECLARED here rather than
+    # discovered because /models says nothing about image output -- the same
+    # reason the other capabilities are declared.
+    #
+    # They deliberately stay in the CHAT pool too: nothing is excluded by
+    # declaration, the measured ranking decides. They score badly at chat and
+    # sink on their own, which self-corrects if grok ever changes what they do.
     exceptions:
-      imagine-agent-mode:          {tools: false, vision: false}
-      imagine-agent-mode-dev:      {tools: false, vision: false}
-      imagine-agent-mode-grok-4-5: {tools: false, vision: false}
+      imagine-agent-mode:          {tools: false, vision: false, images: true}
+      imagine-agent-mode-dev:      {tools: false, vision: false, images: true}
+      imagine-agent-mode-grok-4-5: {tools: false, vision: false, images: true}
 
   - id: mistral
     tier: free          # a free Le Chat account: no per-request billing
@@ -241,6 +252,12 @@ providers:
         # back named "Red". The proxy uploads images to Mistral's Azure Blob
         # storage and passes them in the files array -- a real path, not a claim.
         vision: true
+        # images:true -- image GENERATION, a different axis from `vision` (which
+        # is image INPUT). Unlike grok, where a separate family of models does
+        # it, Le Chat generates from this same model: mistral-proxy's
+        # POST /v1/images/generations drives it through the `beta-imagegen`
+        # feature flag on the same chat backend. So one route carries both.
+        images: true
         # Both are conservative FLOORS, DECLARED not measured: Mistral Medium
         # 3.5's published window is larger, but nothing here verified it, and
         # `context` is only used to filter by x_min_context. Raise it when it is

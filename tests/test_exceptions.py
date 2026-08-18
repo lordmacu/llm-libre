@@ -55,10 +55,13 @@ def test_the_yaml_declares_groks_exceptions():
     assert grok.default_capabilities.vision is True
     # Only the imagine-agent-mode family is left out: they are image-generation
     # agents, 0/3 on tool_calls when repeated, and grok_backend itself documents
-    # that they have no vision.
+    # that they have no vision. Since 2026-08-18 the exception also grants what
+    # they DO have -- images:true -- so the same three ids that are the worst
+    # chat routes are the only grok routes /v1/images/generations can use.
     assert set(grok.exceptions) == {
         "imagine-agent-mode", "imagine-agent-mode-dev", "imagine-agent-mode-grok-4-5"}
-    assert all(v == {"tools": False, "vision": False} for v in grok.exceptions.values())
+    assert all(v == {"tools": False, "vision": False, "images": True}
+               for v in grok.exceptions.values())
 
 
 def test_minimax_declares_measured_vision():

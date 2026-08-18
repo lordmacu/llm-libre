@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS routes (
     tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
     context INTEGER NOT NULL, max_output INTEGER NOT NULL,
     last_seen REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1,
-    priority INTEGER NOT NULL DEFAULT 100);
+    priority INTEGER NOT NULL DEFAULT 100,
+    images INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS probes (
     key TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL,
@@ -185,9 +186,19 @@ class Storage:
         if "is_client_error" not in event_columns:
             self._con.execute(
                 "ALTER TABLE events ADD COLUMN is_client_error INTEGER NOT NULL DEFAULT 0")
-        if "priority" not in self._columns("routes"):
+        route_columns = self._columns("routes")
+        if "priority" not in route_columns:
             self._con.execute(
                 "ALTER TABLE routes ADD COLUMN priority INTEGER NOT NULL DEFAULT 100")
+        if "images" not in route_columns:
+            # DEFAULT 0 is the safe direction: an existing row predates anyone
+            # measuring image generation, so it migrates to "cannot", not to a
+            # guess. The next catalogue sync overwrites it with what the provider
+            # actually declares -- claiming the capability wrongly would send an
+            # image request to a route that answers prose, which is the exact
+            # failure declaring capabilities exists to prevent.
+            self._con.execute(
+                "ALTER TABLE routes ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
 
     def upsert_routes(self, routes: list[Route], timestamp: float,
                       deactivate_missing: bool = True,
@@ -196,15 +207,15 @@ class Storage:
             c = r.capabilities
             self._con.execute(
                 """INSERT INTO routes (key, provider, model_id, tier, tools, vision,
-                       context, max_output, last_seen, active, priority)
-                   VALUES (?,?,?,?,?,?,?,?,?,1,?)
+                       context, max_output, last_seen, active, priority, images)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
                    ON CONFLICT(key) DO UPDATE SET
                        tools=excluded.tools, vision=excluded.vision,
                        context=excluded.context, max_output=excluded.max_output,
                        last_seen=excluded.last_seen, active=1,
-                       priority=excluded.priority""",
+                       priority=excluded.priority, images=excluded.images""",
                 (r.key, r.provider, r.model_id, r.tier, int(c.tools), int(c.vision),
-                 c.context, c.max_output, timestamp, r.priority))
+                 c.context, c.max_output, timestamp, r.priority, int(c.images)))
         # What was not seen in this pass is deactivated, not deleted: the history
         # is what makes it possible to detect a model rename. This step can be
         # skipped when the caller only brings a subset (e.g. syncing a single
@@ -286,10 +297,11 @@ class Storage:
     def active_routes(self) -> list[Route]:
         rows = self._con.execute(
             """SELECT provider, model_id, tier, tools, vision, context, max_output,
-                      priority
+                      priority, images
                FROM routes WHERE active = 1 ORDER BY key""").fetchall()
-        return [Route(p, m, t, Capabilities(bool(to), bool(vi), cx, ms), priority=pr)
-                for p, m, t, to, vi, cx, ms, pr in rows]
+        return [Route(p, m, t, Capabilities(bool(to), bool(vi), cx, ms, images=bool(im)),
+                      priority=pr)
+                for p, m, t, to, vi, cx, ms, pr, im in rows]
 
     def record_probe(self, key: str, kind: str, ok: bool, latency_ms: int,
                      ttft_ms: int, http_code: int, cases_passed: int,

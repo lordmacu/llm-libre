@@ -10,7 +10,7 @@ import httpx
 
 from llm_libre import tool_emulator as _emu
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
-from llm_libre.client import build_request
+from llm_libre.client import build_image_request, build_request
 from llm_libre.models import Route
 from llm_libre.reasoning import CompositeStreamTrimmer, trim
 
@@ -492,6 +492,98 @@ class Proxy:
             "detail": last_error,
             "next_release": (min(request_cooldowns.values())
                                    if request_cooldowns else None),
+        }}, None, attempts, "", last_code)
+
+    async def generate_images(self, routes: list[Route], body: dict, now: float,
+                              on_billable_attempt: Callable[[Route], None] | None = None
+                              ) -> ProxyResponse:
+        """`POST /images/generations` with the SAME failover machinery as chat.
+
+        It is a sibling of `complete`, not a branch inside it. The two share
+        everything that makes this a gateway rather than a proxy -- walk the
+        ordered chain, record an event per attempt, punish a 429 immediately,
+        turn any other failure into suspicion, count a billable paid attempt,
+        report `next_release` when the chain is exhausted -- and differ in the
+        three places where chat semantics simply do not apply:
+
+          - no reasoning trimming and no `raw`: there is no `content` to trim;
+          - no tool emulation: an image request carries no `tools`, and a
+            provider that emulates them must not have its prompt rewritten;
+          - what counts as an answer. For chat it is content-or-tool_calls; here
+            it is a non-empty `data` array. That distinction matters: BOTH
+            proxies can return a 200 whose body carries an empty `data` (a
+            content filter, a quota edge) and treating that as success would hand
+            the client `{"data": []}` and record a success for a route that
+            generated nothing, which is exactly how a broken route stays at the
+            head of the ranking.
+
+        No streaming counterpart: neither proxy streams image generation, and
+        the OpenAI contract for this endpoint has no stream parameter.
+        """
+        attempts = 0
+        last_error = None
+        last_code = 0
+        request_keys = {route.key for route in routes}
+        for route in routes:
+            provider = self.providers[route.provider]
+            url, headers, payload = build_image_request(provider, body, route.model_id)
+            attempts += 1
+            t0 = time.monotonic()
+            try:
+                resp = await self.http.post(url, headers=headers, json=payload,
+                                            timeout=_timeout_for(provider))
+                code = resp.status_code
+            except httpx.HTTPError as e:
+                code, resp, last_error = 0, None, str(e)
+            last_code = code
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            punish_at = now + latency_ms / 1000.0
+
+            if code == 200 and route.tier == "paid" and on_billable_attempt is not None:
+                on_billable_attempt(route)
+
+            data = None
+            if code == 200:
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = None
+                    last_error = "200 with a non-JSON body"
+                else:
+                    if not isinstance(data, dict):
+                        data = None
+                        last_error = "200 with a JSON body that is not an object"
+                    elif not (isinstance(data.get("data"), list) and data["data"]):
+                        data = None
+                        last_error = "200 with no generated image"
+
+            success = code == 200 and data is not None
+            # ttft stays 0 exactly as on the non-streaming chat path: nothing here
+            # measured a time-to-first-token, and writing the round-trip into that
+            # column is what made the p50 meaningless before (see storage.py).
+            self.store.record_event(route.key, success, 0, code, now,
+                                    latency_ms=latency_ms,
+                                    is_client_error=_is_client_error(code))
+
+            if success:
+                self._suspicions.pop(route.key, None)
+                self._paid_failures.pop(route.key, None)
+                self._clear_punishment(route.key)
+                return ProxyResponse(200, data, route, attempts, "", code)
+
+            if code == 429:
+                self._punish_429(route.key, punish_at, resp)
+            elif not _is_client_error(code):
+                self._react_to_non_429_failure(route, now, punish_at, is_probe=False)
+            last_error = last_error or f"HTTP {code}"
+
+        request_cooldowns = {c: v for c, v in self.cooldowns.items()
+                             if c in request_keys}
+        return ProxyResponse(503, {"error": {
+            "message": "no routes available",
+            "detail": last_error,
+            "next_release": (min(request_cooldowns.values())
+                             if request_cooldowns else None),
         }}, None, attempts, "", last_code)
 
     async def complete_stream(self, routes: list[Route], body: dict, now: float,

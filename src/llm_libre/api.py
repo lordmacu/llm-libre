@@ -9,8 +9,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.models import NEUTRAL_METRICS, RouteRequest
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
-                               MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE, USAGE_DOCS,
-                               VERSION, customise_openapi)
+                               IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
+                               USAGE_DOCS, VERSION, customise_openapi)
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
 
@@ -208,8 +208,14 @@ def create_app(state: State) -> FastAPI:
             raise HTTPException(429, "too many requests for this key")
         return key
 
-    def _routes_for(body: dict, key: str) -> tuple[list, object]:
+    def _routes_for(body: dict, key: str, needs_images: bool = False) -> tuple[list, object]:
         request = parse_request(body)
+        if needs_images:
+            # Set HERE, not in parse_request: it is decided by which endpoint was
+            # called, never by anything the client can put in the body. That is
+            # what makes it impossible for a chat request to be routed to an
+            # image generator, or the reverse.
+            request = replace(request, needs_images=True)
         active = state.store.active_routes()
         # An explicit id that no longer exists deserves a 404 with hints, not a
         # generic 400: it is exactly the failure this project exists to prevent.
@@ -310,6 +316,38 @@ def create_app(state: State) -> FastAPI:
             response_body = {**response_body, "x_reasoning": r.reasoning}
         return JSONResponse(response_body, status_code=r.status, headers=headers)
 
+    @app.post("/v1/images/generations", **IMAGES_DOCS)
+    async def images(request: Request, x_api_key: str | None = Header(None),
+                     authorization: str | None = Header(None)):
+        """OpenAI's image-generation contract, routed by the `images` capability.
+
+        The point of the endpoint is the FILTER: `compatible_routes` drops every
+        route that cannot generate before a single request is attempted, so a
+        prompt never spends 45s on a chat-only model to be told it cannot draw.
+        Today that leaves grok's three imagine-agent-mode routes and mistral's,
+        out of 52 -- the other 49 are never touched.
+
+        The same failover, cooldown, telemetry and paid-cap machinery as chat:
+        `proxy.generate_images` is a sibling of `proxy.complete`, not a special
+        case inside it. See its docstring for what genuinely differs.
+        """
+        key = require_api_key(x_api_key, authorization)
+        body = await request.json()
+        routes, _ = _routes_for(body, key, needs_images=True)
+        now = time.time()
+
+        def _count_paid_usage(route) -> None:
+            state.store.add_paid_usage(
+                key, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+
+        r = await state.proxy.generate_images(routes, body, now,
+                                              on_billable_attempt=_count_paid_usage)
+        headers = {"X-Attempts": str(r.attempts)}
+        if r.route is not None:
+            headers["X-Route-Used"] = r.route.key
+            headers["X-Tier"] = r.route.tier
+        return JSONResponse(r.json, status_code=r.status, headers=headers)
+
     @app.get("/v1/models", **MODELS_DOCS)
     def models(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         require_api_key(x_api_key, authorization)
@@ -360,6 +398,11 @@ def create_app(state: State) -> FastAPI:
                          "latency_p50_ms": m.latency_p50_ms,
                          "cooldown_until": m.cooldown_until,
                          "tools": r.capabilities.tools, "vision": r.capabilities.vision,
+                         # Two different axes on purpose: `vision` is image
+                         # INPUT, `images` is image OUTPUT. An operator asking
+                         # "why did my prompt 503?" needs to see which routes
+                         # POST /v1/images/generations could even consider.
+                         "images": r.capabilities.images,
                          "context": r.capabilities.context})
         return {"routes": rows}
 
