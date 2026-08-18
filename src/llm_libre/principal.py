@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 
-from llm_libre.almacen import Almacen
+from llm_libre.storage import Storage
 from llm_libre.api import Estado, crear_app
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.providers import load
@@ -51,8 +51,8 @@ def crear_estado() -> Estado:
             "llave, separadas por coma si son varias -- por ejemplo: "
             "LLM_LIBRE_API_KEYS=una-llave-larga-y-secreta")
     proveedores = load(YAML, dict(os.environ))
-    almacen = Almacen(RUTA_DB)
-    almacen.crear_esquema()
+    almacen = Storage(RUTA_DB)
+    almacen.create_schema()
     http = httpx.AsyncClient()
     proxy = Proxy({p.id: p for p in proveedores}, almacen, http)
     estado = Estado(almacen=almacen, proxy=proxy, llaves=llaves,

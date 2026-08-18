@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from llm_libre.almacen import Almacen
+from llm_libre.storage import Storage
 from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.modelos import Capacidades, Ruta
@@ -167,9 +167,9 @@ def test_model_ausente_o_nulo_sigue_cayendo_a_auto_sin_dar_400():
 
 @pytest.fixture
 def cliente():
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas(
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
@@ -185,9 +185,9 @@ def estado_cliente():
     """Como `cliente`, pero exponiendo tambien el `Estado`: los tests de
     /health necesitan sembrar eventos/cooldowns directamente en el almacen y
     el proxy, cosa que la fixture `cliente` no permite tocar desde afuera."""
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas(
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
@@ -291,9 +291,9 @@ def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
         return httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})
 
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas(
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -379,7 +379,7 @@ def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente)
 
 def test_la_sugerencia_del_404_en_vivo_no_incluye_el_modelo_recien_declarado_muerto(estado_cliente):
     estado, cliente = estado_cliente
-    estado.almacen.upsert_rutas(
+    estado.almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096)),
          Ruta("kilo", "a:freebie", "gratis", Capacidades(True, False, 100000, 4096))],
         1.0)
@@ -430,12 +430,12 @@ def test_health_no_es_ok_si_la_gratis_falla_de_verdad(estado_cliente):
     # proxy.cooldowns queda vacio -- la version vieja de /health diria "ok"
     # igual si solo mirara cooldowns.
     for _ in range(10):
-        estado.almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora)
+        estado.almacen.record_event("kilo/a:free", False, 0, 500, ahora)
     # Round 9: una sola sonda fallida ya no alcanza para /health (ver
-    # Almacen.tiene_evidencia_de_vida) -- dos consecutivas, sin exito de
+    # Storage.tiene_evidencia_de_vida) -- dos consecutivas, sin exito de
     # por medio, si.
-    estado.almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    estado.almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
+    estado.almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
+    estado.almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     assert estado.proxy.cooldowns == {}  # confirma que no es por cooldown
 
     r = cliente.get("/health")
@@ -456,9 +456,9 @@ def test_health_ok_si_la_gratis_esta_sana(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
     for _ in range(9):
-        estado.almacen.registrar_evento("kilo/a:free", True, 200, 200, ahora)
+        estado.almacen.record_event("kilo/a:free", True, 200, 200, ahora)
     for _ in range(1):
-        estado.almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora)
+        estado.almacen.record_event("kilo/a:free", False, 0, 500, ahora)
     assert cliente.get("/health").json()["estado"] == "ok"
 
 
@@ -468,7 +468,7 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
     estado, cliente = estado_cliente
 
     async def _forzar_429():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
         await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, time.time())
@@ -496,10 +496,10 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
 def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
-    estado.almacen.registrar_evento("kilo/a:free", True, 50, 200, ahora)
+    estado.almacen.record_event("kilo/a:free", True, 50, 200, ahora)
 
     async def _forzar_429():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
         await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
@@ -508,7 +508,7 @@ def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_client
     assert estado.proxy.cooldowns  # confirma que quedo en cooldown
 
     # Aislado: sin el cooldown, esta ruta SI cuenta como viva por si sola.
-    assert estado.almacen.tiene_evidencia_de_vida("kilo/a:free", ahora) is True
+    assert estado.almacen.has_liveness_evidence("kilo/a:free", ahora) is True
 
     r = cliente.get("/health")
     assert r.status_code != 200
@@ -528,9 +528,9 @@ def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_client
 def test_health_sigue_ok_con_30_403_pero_un_exito_reciente(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
-    estado.almacen.registrar_evento("kilo/a:free", True, 50, 200, ahora)
+    estado.almacen.record_event("kilo/a:free", True, 50, 200, ahora)
     for _ in range(30):
-        estado.almacen.registrar_evento("kilo/a:free", False, 0, 403, ahora)
+        estado.almacen.record_event("kilo/a:free", False, 0, 403, ahora)
     assert cliente.get("/health").json()["estado"] == "ok"
 
 
@@ -541,13 +541,13 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
     ruta_db = str(tmp_path / "salud_403.sqlite3")
     ahora = time.time()
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    almacen1.registrar_evento("kilo/a:free", True, 50, 200, ahora)
+    almacen1.record_event("kilo/a:free", True, 50, 200, ahora)
     for _ in range(30):
-        almacen1.registrar_evento("kilo/a:free", False, 0, 403, ahora)
+        almacen1.record_event("kilo/a:free", False, 0, 403, ahora)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -556,8 +556,8 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
     cliente1 = TestClient(crear_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -574,15 +574,15 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
     ruta_db = str(tmp_path / "salud_muerta.sqlite3")
     ahora = time.time()
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     for _ in range(10):
-        almacen1.registrar_evento("kilo/a:free", False, 0, 500, ahora)
+        almacen1.record_event("kilo/a:free", False, 0, 500, ahora)
     # Round 9: hacen falta DOS sondas fallidas consecutivas, no una.
-    almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
+    almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
+    almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -596,8 +596,8 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
     # Segundo proceso con un transport SANO, para probar que "caido" viene
     # de la TELEMETRIA ya persistida, no de trafico nuevo que este proceso
     # genere.
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -616,17 +616,17 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria(tmp_path):
     # un reinicio contra la misma base vacia.
     ruta_db = str(tmp_path / "salud_fresca.sqlite3")
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     estado1 = Estado(almacen=almacen1, proxy=Proxy({}, almacen1, httpx.AsyncClient()),
                      llaves={"buena"}, tope_pago_diario=200)
     cliente1 = TestClient(crear_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     estado2 = Estado(almacen=almacen2, proxy=Proxy({}, almacen2, httpx.AsyncClient()),
                      llaves={"buena"}, tope_pago_diario=200)
     cliente2 = TestClient(crear_app(estado2))
@@ -653,7 +653,7 @@ def test_health_sigue_ok_tras_30_400_seguidos(estado_cliente):
     ahora = time.time()
 
     async def _mandar_400_treinta_veces():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"})))
         for _ in range(30):
@@ -672,7 +672,7 @@ def test_health_cae_con_30_500_seguidos_igual_que_antes(estado_cliente):
     ahora = time.time()
 
     async def _mandar_500_treinta_veces():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for _ in range(30):
@@ -692,9 +692,9 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     # proceso viejo, este test lo detectaria y el de arriba no.
     ruta_db = str(tmp_path / "salud.sqlite3")
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
@@ -703,7 +703,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
 
     async def _mandar_400_treinta_veces():
-        rutas = almacen1.rutas_activas()
+        rutas = almacen1.active_routes()
         for _ in range(30):
             await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
 
@@ -712,8 +712,8 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     assert cliente1.get("/health").json()["estado"] == "ok"
 
     # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base.
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -732,7 +732,7 @@ def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
     antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
 
     async def _mandar(codigo, veces):
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"} if codigo < 500 else None)))
         for _ in range(veces):
@@ -770,7 +770,7 @@ def test_health_cae_con_30_seguidos_de_un_codigo_de_ruta(estado_cliente, codigo)
     ahora = time.time()
 
     async def _mandar_treinta_veces():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"})))
         for _ in range(30):
@@ -791,9 +791,9 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     # las 5 rutas realmente caidas, incluso despues de un reinicio).
     ruta_db = str(tmp_path / "salud_401.sqlite3")
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
@@ -802,7 +802,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
 
     async def _mandar_401_treinta_veces():
-        rutas = almacen1.rutas_activas()
+        rutas = almacen1.active_routes()
         for _ in range(30):
             await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
         await proxy1.esperar_sondas_pendientes()
@@ -810,11 +810,11 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     asyncio.run(_mandar_401_treinta_veces())
     # Round 9: la sospecha (30x401 reales) dispara UNA sonda bajo demanda
     # -- pero /health ahora exige DOS fallidas consecutivas (ver
-    # Almacen.tiene_evidencia_de_vida). Se agrega la confirmatoria
+    # Storage.tiene_evidencia_de_vida). Se agrega la confirmatoria
     # directamente: el mecanismo que la PRIMERA sonda se dispara sola ya
     # esta cubierto en test_proxy.py; este test es sobre PERSISTENCIA tras
     # un reinicio, no sobre el rate-limit real de 60s entre sondas.
-    almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
+    almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
     cliente1 = TestClient(crear_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
@@ -822,10 +822,10 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
 
     # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
     # con un transport SANO en el segundo proceso, para probar que la caida
-    # viene de la TELEMETRIA ya persistida (eventos con es_error_cliente=0),
+    # viene de la TELEMETRIA ya persistida (eventos con is_client_error=0),
     # no de ningun trafico que este segundo proceso vuelva a generar.
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -867,7 +867,7 @@ def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
         return httpx.Response(403, json={"error": "contenido flageado"})
 
     async def _quince_pedidos_identicos():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         for i in range(15):
             await estado.proxy.completar(rutas, {"model": "a:free", "messages": []},
@@ -895,7 +895,7 @@ def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_c
         return httpx.Response(200, content=payload_sin_contenido)
 
     async def _quince_streams_identicos():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         cuerpo = {"model": "auto", "stream": True,
                  "messages": [{"role": "user", "content": "piensa mucho"}]}
@@ -914,7 +914,7 @@ def test_health_cae_rapido_con_una_ruta_rota_de_verdad_via_sonda_bajo_demanda(es
     ahora = time.time()
 
     async def _umbral_pedidos():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for i in range(UMBRAL_SOSPECHA):
@@ -939,9 +939,9 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
                 {"message": {"role": "assistant", "content": "pong"}}]})
         return httpx.Response(403, json={"error": "contenido flageado"})
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
@@ -949,7 +949,7 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
 
     async def _quince_pedidos():
-        rutas = almacen1.rutas_activas()
+        rutas = almacen1.active_routes()
         for i in range(15):
             await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
         await proxy1.esperar_sondas_pendientes()
@@ -960,8 +960,8 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
 
     # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
     # sin que el proxy1 original (con su sonda ya resuelta) intervenga.
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -976,9 +976,9 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     ruta_db = str(tmp_path / "salud_sospecha_caida.sqlite3")
     ahora = time.time()
 
-    almacen1 = Almacen(ruta_db)
-    almacen1.crear_esquema()
-    almacen1.upsert_rutas(
+    almacen1 = Storage(ruta_db)
+    almacen1.create_schema()
+    almacen1.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
@@ -987,13 +987,13 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
 
     async def _dos_rachas_de_umbral_pedidos():
-        rutas = almacen1.rutas_activas()
+        rutas = almacen1.active_routes()
         for i in range(UMBRAL_SOSPECHA):
             await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
         await proxy1.esperar_sondas_pendientes()
         # Segunda racha, mas alla del rate-limit de sondas bajo demanda:
         # dispara una SEGUNDA sonda por el mecanismo real. Round 9 exige
-        # dos fallidas consecutivas (ver Almacen.tiene_evidencia_de_vida)
+        # dos fallidas consecutivas (ver Storage.tiene_evidencia_de_vida)
         # para que /health la trate como muerta -- una sola ya no alcanza.
         ahora2 = ahora + LIMITE_PROBE_BAJO_DEMANDA_S + UMBRAL_SOSPECHA + 10
         for i in range(UMBRAL_SOSPECHA):
@@ -1014,8 +1014,8 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     # Segundo proceso, con un transport SANO -- para probar que "caido"
     # viene de la sonda YA persistida, no de trafico nuevo que este proceso
     # genere.
-    almacen2 = Almacen(ruta_db)
-    almacen2.crear_esquema()
+    almacen2 = Storage(ruta_db)
+    almacen2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -1034,7 +1034,7 @@ def test_ranking_cae_con_401_seguidos_igual_que_con_500(estado_cliente):
     antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
 
     async def _mandar_401_treinta_veces():
-        rutas = estado.almacen.rutas_activas()
+        rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"})))
         for _ in range(30):
@@ -1062,16 +1062,16 @@ def test_ranking_desglosa_los_componentes(cliente):
 
 def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
     estado, cliente = estado_cliente
-    estado.almacen.upsert_rutas([
+    estado.almacen.upsert_routes([
         Ruta("chatgpt", "gpt-5:free", "gratis", Capacidades(True, False, 100000, 4096),
              prioridad=0),
-    ], 2.0, desactivar_faltantes=False)
+    ], 2.0, deactivate_missing=False)
     # chatgpt: prioridad maxima (0) pero puntaje MALO.
-    estado.almacen.registrar_sonda("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
-    estado.almacen.registrar_evento("chatgpt/gpt-5:free", False, 0, 500, 20.0)
+    estado.almacen.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
+    estado.almacen.record_event("chatgpt/gpt-5:free", False, 0, 500, 20.0)
     # kilo/a:free (prioridad 100, el default de la fixture): puntaje MEJOR.
-    estado.almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
-    estado.almacen.registrar_evento("kilo/a:free", True, 50, 200, 20.0)
+    estado.almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    estado.almacen.record_event("kilo/a:free", True, 50, 200, 20.0)
 
     filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
     claves = [f["clave"] for f in filas]
@@ -1092,13 +1092,13 @@ def test_ranking_manda_al_final_una_ruta_en_cooldown_aunque_puntue_mejor(estado_
     # router: una ruta en cooldown va al final, sin importar prioridad ni
     # puntaje.
     estado, cliente = estado_cliente
-    estado.almacen.upsert_rutas([
+    estado.almacen.upsert_routes([
         Ruta("chatgpt", "gpt-5:free", "gratis", Capacidades(True, False, 100000, 4096),
              prioridad=0),
-    ], 2.0, desactivar_faltantes=False)
+    ], 2.0, deactivate_missing=False)
     # chatgpt: la mejor prioridad Y el mejor puntaje -- pero esta castigada.
-    estado.almacen.registrar_sonda("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
-    estado.almacen.registrar_evento("chatgpt/gpt-5:free", True, 50, 200, 20.0)
+    estado.almacen.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    estado.almacen.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
     estado.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
 
     filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
@@ -1116,9 +1116,9 @@ def _estado_libre_y_pago(tope_pago_diario, hacer_resp_free, hacer_resp_paid):
     cada llamada (no un objeto compartido): las respuestas viajan por
     `.stream()`, cuyo estado interno solo se puede consumir una vez, y este
     helper puede invocarse mas de una vez por ruta dentro de un mismo test."""
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas([
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes([
         Ruta("free_prov", "f:free", "gratis", Capacidades(True, False, 100000, 4096)),
         Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
     ], 1.0)
@@ -1147,17 +1147,17 @@ def test_streaming_pago_cuenta_uso_y_el_tope_ata():
         hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
         hacer_resp_paid=lambda: httpx.Response(200, content=_sse("de", " pago")))
     dia = _hoy()
-    assert estado.almacen.uso_pago("buena", dia) == 0
+    assert estado.almacen.paid_usage("buena", dia) == 0
 
     r1 = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                       json={"model": "auto", "messages": [], "stream": True})
     assert r1.status_code == 200
     assert "de" in r1.text and "pago" in r1.text
-    assert estado.almacen.uso_pago("buena", dia) == 1  # (a) conto exactamente 1
+    assert estado.almacen.paid_usage("buena", dia) == 1  # (a) conto exactamente 1
 
     r2 = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                       json={"model": "auto", "messages": [], "stream": True})
-    assert estado.almacen.uso_pago("buena", dia) == 1  # el tope realmente ato
+    assert estado.almacen.paid_usage("buena", dia) == 1  # el tope realmente ato
     assert "error" in r2.text  # ninguna ruta viable: free sigue caida, pago se excluyo
 
 
@@ -1179,13 +1179,13 @@ def test_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
-    assert estado.almacen.uso_pago("buena", dia) == 1  # facturable, aunque no sirvio
+    assert estado.almacen.paid_usage("buena", dia) == 1  # facturable, aunque no sirvio
 
 
 def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas([
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes([
         Ruta("free_prov", "f:free", "gratis", Capacidades(True, False, 100000, 4096)),
         Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
     ], 1.0)
@@ -1208,7 +1208,7 @@ def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 503  # nada sirvio de verdad al cliente
-    assert estado.almacen.uso_pago("buena", dia) == 1  # pero SI se factura
+    assert estado.almacen.paid_usage("buena", dia) == 1  # pero SI se factura
 
 
 def test_streaming_servido_por_gratis_no_cuenta_uso_de_pago():
@@ -1224,7 +1224,7 @@ def test_streaming_servido_por_gratis_no_cuenta_uso_de_pago():
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
     assert "gra" in r.text and "tis" in r.text
-    assert estado.almacen.uso_pago("buena", dia) == 0
+    assert estado.almacen.paid_usage("buena", dia) == 0
 
 
 def test_streaming_sin_ninguna_ruta_viva_no_cuenta_uso_de_pago():
@@ -1239,7 +1239,7 @@ def test_streaming_sin_ninguna_ruta_viva_no_cuenta_uso_de_pago():
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200  # los headers ya salieron; el error va en el cuerpo SSE
     assert "error" in r.text
-    assert estado.almacen.uso_pago("buena", dia) == 0
+    assert estado.almacen.paid_usage("buena", dia) == 0
 
 
 def test_streaming_pago_cuenta_una_sola_vez_no_por_chunk():
@@ -1255,7 +1255,7 @@ def test_streaming_pago_cuenta_una_sola_vez_no_por_chunk():
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
-    assert estado.almacen.uso_pago("buena", dia) == 1
+    assert estado.almacen.paid_usage("buena", dia) == 1
 
 
 # --- Fix round 2 (final), cambio 1: `exigir_llave` acepta la llave tambien
@@ -1303,9 +1303,9 @@ def test_authorization_malformado_no_revienta_y_da_401(cliente):
 
 
 def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas(
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
@@ -1342,9 +1342,9 @@ def test_ranking_marca_como_no_medida_una_ruta_sin_sonda_de_calidad(cliente):
 def test_ranking_trae_la_fecha_de_la_ultima_sonda(estado_cliente):
     estado, cliente = estado_cliente
     # 2026-08-17T12:00:00Z y 2026-08-17T18:00:00Z
-    estado.almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
+    estado.almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
                                    1786968000.0)
-    estado.almacen.registrar_sonda("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
+    estado.almacen.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
                                    1786989600.0)
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert fila["calidad_medida"] is True
@@ -1359,7 +1359,7 @@ def test_una_ruta_en_cooldown_no_pierde_su_marca_de_calidad_medida(estado_client
     # cooldown, y asi perdia los campos nuevos: una ruta castigada aparecia
     # como "nunca medida" y el router la mandaba al fondo por partida doble.
     estado, cliente = estado_cliente
-    estado.almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
+    estado.almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
                                    1786968000.0)
     estado.proxy.cooldowns["kilo/a:free"] = time.time() + 600
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
@@ -1413,7 +1413,7 @@ def test_el_tope_de_pago_diario_da_503_no_400():
             {"message": {"role": "assistant", "content": "hola"}}]}),
         hacer_resp_paid=lambda: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": "pago"}}]}))
-    estado.almacen.sumar_uso_pago("buena", _hoy())          # tope agotado
+    estado.almacen.add_paid_usage("buena", _hoy())          # tope agotado
     estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
 
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
@@ -1429,7 +1429,7 @@ def test_el_503_por_indisponibilidad_no_reporta_liberacion_si_no_hay_cooldown():
         tope_pago_diario=9,
         hacer_resp_free=lambda: httpx.Response(500),
         hacer_resp_paid=lambda: httpx.Response(500))
-    estado.almacen.upsert_rutas([], 1.0, desactivar_faltantes=False)
+    estado.almacen.upsert_routes([], 1.0, deactivate_missing=False)
     estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "x_permitir_pago": False})
@@ -1443,9 +1443,9 @@ def test_el_503_por_indisponibilidad_no_reporta_liberacion_si_no_hay_cooldown():
 #     cliente con el default `x_crudo: false` no tenia forma de recuperarlo. ---
 
 def _cliente_que_piensa(contenido):
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas(
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "",
                               "/models", {}, [])}
@@ -1491,7 +1491,7 @@ def test_en_modo_crudo_no_hay_x_razonamiento_porque_sigue_en_el_content():
 #     `CONFIABILIDAD_NEUTRA` contra `UMBRAL_CONFIABILIDAD_SALUD`) desaparecio
 #     junto con `/health` basado en promedio -- `UMBRAL_CONFIABILIDAD_SALUD`
 #     ya no existe. El contrato que protegia ("una ruta sin telemetria cuenta
-#     como viva") sigue vivo, ahora en `Almacen.tiene_evidencia_de_vida` (ver
+#     como viva") sigue vivo, ahora en `Storage.tiene_evidencia_de_vida` (ver
 #     test_tiene_evidencia_de_vida_sin_ninguna_telemetria en test_almacen.py)
 #     y verificado end-to-end en test_health_ok_si_la_gratis_no_tiene_telemetria_aun
 #     y test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria mas

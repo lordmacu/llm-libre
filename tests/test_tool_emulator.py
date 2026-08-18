@@ -531,7 +531,7 @@ async def test_deepseek_emulates_tool_call():
     if not url:
         pytest.skip("DEEPSEEK_PROXY_URL not set")
 
-    from llm_libre.almacen import Almacen
+    from llm_libre.storage import Storage
     from llm_libre.modelos import Capacidades, Ruta
     from llm_libre.providers import load
     from llm_libre.proxy import Proxy
@@ -541,8 +541,8 @@ async def test_deepseek_emulates_tool_call():
 
     route = Ruta("deepseek", "deepseek-chat", "gratis",
                  Capacidades(tools=True, vision=False, contexto=64000, max_salida=8192))
-    store = Almacen(":memory:")
-    store.crear_esquema()
+    store = Storage(":memory:")
+    store.create_schema()
 
     async with httpx.AsyncClient(timeout=90) as http:
         proxy = Proxy(providers, store, http)
@@ -573,7 +573,7 @@ async def test_deepseek_text_response_without_tools():
     if not url:
         pytest.skip("DEEPSEEK_PROXY_URL not set")
 
-    from llm_libre.almacen import Almacen
+    from llm_libre.storage import Storage
     from llm_libre.modelos import Capacidades, Ruta
     from llm_libre.providers import load
     from llm_libre.proxy import Proxy
@@ -581,8 +581,8 @@ async def test_deepseek_text_response_without_tools():
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
     route = Ruta("deepseek", "deepseek-chat", "gratis",
                  Capacidades(tools=False, vision=False, contexto=64000, max_salida=8192))
-    store = Almacen(":memory:")
-    store.crear_esquema()
+    store = Storage(":memory:")
+    store.create_schema()
 
     async with httpx.AsyncClient(timeout=90) as http:
         proxy = Proxy(providers, store, http)

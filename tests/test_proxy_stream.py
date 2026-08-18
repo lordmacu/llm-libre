@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from llm_libre.almacen import Almacen
+from llm_libre.storage import Storage
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
@@ -40,8 +40,8 @@ def _sse_json(*trozos):
 
 
 def _proxy(handler, canvas=frozenset()):
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     prov = {
         "kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
                           unwraps_canvas="kilo" in canvas),
@@ -582,8 +582,8 @@ async def test_usa_el_timeout_propio_del_proveedor_en_streaming():
         vistos.append(req.extensions.get("timeout"))
         return httpx.Response(200, content=_sse("bien"))
 
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -618,8 +618,8 @@ async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real_en_stre
 
     chatgpt = next(p for p in load(YAML_REAL, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     p = Proxy({"chatgpt": chatgpt}, almacen,
              httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     [l async for l in p.completar_stream(

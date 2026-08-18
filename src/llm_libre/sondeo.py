@@ -32,7 +32,7 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provid
     La baja de rutas que ya no aparecen se decide POR PROVEEDOR, no para toda
     la sincronizacion: cada proveedor que responde bien se persiste (y sus
     rutas que desaparecieron de SU catalogo se desactivan) en el momento,
-    usando el scope `proveedor=` de Almacen.upsert_rutas -- sin ese scope, un
+    usando el scope `provider=` de Storage.upsert_routes -- sin ese scope, un
     UPDATE de "lo que no se vio se desactiva" no filtrado por proveedor
     tambien apagaria las rutas de proveedores ajenos a esta pasada (su
     visto_por_ultima_vez siempre es mas vieja que `ahora`). Que OTRO
@@ -53,7 +53,7 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provid
     existe para que un catalogo no se pudra sin aviso (§1 del diseno).
 
     Antes del loop por proveedor, un barrido aparte
-    (`Almacen.desactivar_proveedores_no_registrados`) apaga las rutas de
+    (`Storage.desactivar_proveedores_no_registrados`) apaga las rutas de
     cualquier proveedor que YA NO este en `proveedores` -- necesario porque
     el loop de abajo solo puede dar de baja, via su scope, lo que SIGUE en
     el registro; un proveedor sacado del YAML (p.ej. `openrouter` sin
@@ -63,17 +63,17 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provid
     `GET /v1/ranking`, y elegibles como candidatas que fallarian siempre.
     """
     conocidos = {p.id for p in proveedores}
-    desactivadas = almacen.desactivar_proveedores_no_registrados(conocidos)
+    desactivadas = almacen.deactivate_unregistered_providers(conocidos)
     if desactivadas:
         log.warning(
             "catalogo: %d ruta(s) desactivadas porque su proveedor ya no esta "
             "en proveedores.yaml (no se borran -- el historico sirve para "
-            "detectar renombres, ver Almacen.upsert_rutas)", desactivadas)
+            "detectar renombres, ver Storage.upsert_rutas)", desactivadas)
     total = 0
     for p in proveedores:
         if p.fixed_models:
             rutas = fixed_routes(p)
-            almacen.upsert_rutas(rutas, ahora, desactivar_faltantes=True, proveedor=p.id)
+            almacen.upsert_routes(rutas, ahora, deactivate_missing=True, provider=p.id)
             total += len(rutas)
             continue
         if not p.models_path:
@@ -119,7 +119,7 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provid
             continue
         # Este proveedor respondio bien: se persiste YA, con su propio scope,
         # sin esperar a saber que paso con el resto de la lista.
-        almacen.upsert_rutas(nuevas, ahora, desactivar_faltantes=True, proveedor=p.id)
+        almacen.upsert_routes(nuevas, ahora, deactivate_missing=True, provider=p.id)
         total += len(nuevas)
     return total
 
@@ -162,7 +162,7 @@ async def sondear_salud(proxy, almacen, rutas: list[Ruta], ahora: float) -> None
         # muerta -- una senal de capacidad momentanea no es evidencia de
         # muerte.
         if r.codigo_upstream != 429:
-            almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
+            almacen.record_probe(ruta.clave, "salud", r.estado == 200, ms, 0,
                                     r.codigo_upstream, 0, 0, ahora)
 
 
@@ -193,7 +193,7 @@ async def sondear_calidad(proxy, almacen, rutas: list[Ruta], ahora: float) -> No
             r = await proxy.completar([ruta], cuerpo, ahora, es_sonda=True)
             resultados.append(r.estado == 200 and caso.check(r.json))
         pasados, totales = evaluate(resultados)
-        almacen.registrar_sonda(ruta.clave, "calidad", pasados > 0, 0, 0, 200,
+        almacen.record_probe(ruta.clave, "calidad", pasados > 0, 0, 0, 200,
                                 pasados, totales, ahora)
 
 
@@ -212,8 +212,8 @@ async def ciclo(estado, contador: int) -> None:
     """
     ahora = time.time()
     await sincronizar_catalogo(estado.http, estado.proveedores, estado.almacen, ahora)
-    rutas = estado.almacen.rutas_activas()
+    rutas = estado.almacen.active_routes()
     await sondear_salud(estado.proxy, estado.almacen, rutas, ahora)
     if contador % CALIDAD_CADA_N_CICLOS == 0:
         await sondear_calidad(estado.proxy, estado.almacen, rutas, ahora)
-    estado.almacen.podar(ahora - RETENCION_DIAS * 86400)
+    estado.almacen.prune(ahora - RETENCION_DIAS * 86400)

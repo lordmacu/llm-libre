@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from llm_libre.almacen import Almacen
+from llm_libre.storage import Storage
 from llm_libre.modelos import Capacidades, Ruta
 
 
@@ -14,23 +14,23 @@ def _ruta(modelo="a:free", proveedor="kilo", tools=True, prioridad=100):
 
 @pytest.fixture
 def almacen():
-    a = Almacen(":memory:")
-    a.crear_esquema()
+    a = Storage(":memory:")
+    a.create_schema()
     return a
 
 
 def test_guarda_y_devuelve_rutas(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    activas = almacen.rutas_activas()
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    activas = almacen.active_routes()
     assert len(activas) == 1
     assert activas[0].clave == "kilo/a:free"
     assert activas[0].capacidades.tools is True
 
 
 def test_una_ruta_que_desaparece_se_desactiva_pero_no_se_borra(almacen):
-    almacen.upsert_rutas([_ruta("vieja:free"), _ruta("nueva:free")], momento=100.0)
-    almacen.upsert_rutas([_ruta("nueva:free")], momento=200.0)
-    activas = [r.modelo_id for r in almacen.rutas_activas()]
+    almacen.upsert_routes([_ruta("vieja:free"), _ruta("nueva:free")], timestamp=100.0)
+    almacen.upsert_routes([_ruta("nueva:free")], timestamp=200.0)
+    activas = [r.modelo_id for r in almacen.active_routes()]
     assert activas == ["nueva:free"]
     # sigue en la tabla: el historico sirve para detectar renombres
     fila = almacen._con.execute(
@@ -39,16 +39,16 @@ def test_una_ruta_que_desaparece_se_desactiva_pero_no_se_borra(almacen):
 
 
 def test_una_ruta_que_vuelve_se_reactiva(almacen):
-    almacen.upsert_rutas([_ruta("x:free")], momento=100.0)
-    almacen.upsert_rutas([], momento=200.0)
-    almacen.upsert_rutas([_ruta("x:free")], momento=300.0)
-    assert len(almacen.rutas_activas()) == 1
+    almacen.upsert_routes([_ruta("x:free")], timestamp=100.0)
+    almacen.upsert_routes([], timestamp=200.0)
+    almacen.upsert_routes([_ruta("x:free")], timestamp=300.0)
+    assert len(almacen.active_routes()) == 1
 
 
 def test_no_desactiva_nada_cuando_se_pide_conservar(almacen):
-    almacen.upsert_rutas([_ruta("vieja:free"), _ruta("nueva:free")], momento=100.0)
-    almacen.upsert_rutas([_ruta("nueva:free")], momento=200.0, desactivar_faltantes=False)
-    activas = sorted(r.modelo_id for r in almacen.rutas_activas())
+    almacen.upsert_routes([_ruta("vieja:free"), _ruta("nueva:free")], timestamp=100.0)
+    almacen.upsert_routes([_ruta("nueva:free")], timestamp=200.0, deactivate_missing=False)
+    activas = sorted(r.modelo_id for r in almacen.active_routes())
     assert activas == ["nueva:free", "vieja:free"]
     fila = almacen._con.execute(
         "SELECT visto_por_ultima_vez FROM rutas WHERE modelo_id = 'nueva:free'").fetchone()
@@ -62,10 +62,10 @@ def test_el_scope_de_proveedor_acota_la_baja_a_ese_proveedor(almacen):
     # sobrevivir: sin el scope, el UPDATE sin filtrar por proveedor la
     # habria apagado igual, porque su visto_por_ultima_vez tambien es
     # anterior al `momento` nuevo.
-    almacen.upsert_rutas([_ruta("vieja:free", proveedor="kilo")], momento=50.0)
-    almacen.upsert_rutas([_ruta("vieja:free", proveedor="otro")], momento=50.0)
-    almacen.upsert_rutas([_ruta("nueva:free", proveedor="kilo")], momento=200.0, proveedor="kilo")
-    activas = {r.clave for r in almacen.rutas_activas()}
+    almacen.upsert_routes([_ruta("vieja:free", proveedor="kilo")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("vieja:free", proveedor="otro")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("nueva:free", proveedor="kilo")], timestamp=200.0, provider="kilo")
+    activas = {r.clave for r in almacen.active_routes()}
     assert activas == {"kilo/nueva:free", "otro/vieja:free"}
 
 
@@ -74,10 +74,10 @@ def test_el_scope_de_proveedor_no_cambia_el_comportamiento_por_defecto(almacen):
     # scope, acota a toda la tabla -- exactamente lo que ya cubre
     # test_una_ruta_que_desaparece_se_desactiva_pero_no_se_borra. Este test
     # solo confirma que pasar proveedor=None explicito da lo mismo.
-    almacen.upsert_rutas([_ruta("vieja:free", proveedor="kilo"),
-                          _ruta("otra:free", proveedor="otro")], momento=100.0)
-    almacen.upsert_rutas([_ruta("otra:free", proveedor="otro")], momento=200.0, proveedor=None)
-    activas = {r.clave for r in almacen.rutas_activas()}
+    almacen.upsert_routes([_ruta("vieja:free", proveedor="kilo"),
+                          _ruta("otra:free", proveedor="otro")], timestamp=100.0)
+    almacen.upsert_routes([_ruta("otra:free", proveedor="otro")], timestamp=200.0, provider=None)
+    activas = {r.clave for r in almacen.active_routes()}
     assert activas == {"otro/otra:free"}   # kilo/vieja:free tambien se apaga, como antes
 
 
@@ -88,11 +88,11 @@ def test_el_scope_de_proveedor_no_cambia_el_comportamiento_por_defecto(almacen):
 #     Este barrido aparte cubre exactamente ese hueco. ---
 
 def test_desactivar_proveedores_no_registrados_apaga_las_rutas_del_que_se_fue(almacen):
-    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo")], momento=50.0)
-    almacen.upsert_rutas([_ruta("b:free", proveedor="openrouter")], momento=50.0)
-    apagadas = almacen.desactivar_proveedores_no_registrados({"kilo"})
+    almacen.upsert_routes([_ruta("a:free", proveedor="kilo")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("b:free", proveedor="openrouter")], timestamp=50.0)
+    apagadas = almacen.deactivate_unregistered_providers({"kilo"})
     assert apagadas == 1
-    claves = {r.clave for r in almacen.rutas_activas()}
+    claves = {r.clave for r in almacen.active_routes()}
     assert claves == {"kilo/a:free"}
     # No se borra: sigue en la tabla, solo inactiva -- mismo principio que
     # upsert_rutas con las rutas que desaparecen del catalogo de un proveedor.
@@ -102,27 +102,27 @@ def test_desactivar_proveedores_no_registrados_apaga_las_rutas_del_que_se_fue(al
 
 
 def test_desactivar_proveedores_no_registrados_no_toca_los_que_siguen(almacen):
-    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo"),
-                          _ruta("c:free", proveedor="chatgpt")], momento=50.0)
-    almacen.upsert_rutas([_ruta("b:free", proveedor="openrouter")], momento=50.0)
-    almacen.desactivar_proveedores_no_registrados({"kilo", "chatgpt"})
-    claves = {r.clave for r in almacen.rutas_activas()}
+    almacen.upsert_routes([_ruta("a:free", proveedor="kilo"),
+                          _ruta("c:free", proveedor="chatgpt")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("b:free", proveedor="openrouter")], timestamp=50.0)
+    almacen.deactivate_unregistered_providers({"kilo", "chatgpt"})
+    claves = {r.clave for r in almacen.active_routes()}
     assert claves == {"kilo/a:free", "chatgpt/c:free"}
 
 
 def test_desactivar_proveedores_no_registrados_no_hace_nada_si_todos_siguen(almacen):
-    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo")], momento=50.0)
-    apagadas = almacen.desactivar_proveedores_no_registrados({"kilo", "chatgpt", "minimax"})
+    almacen.upsert_routes([_ruta("a:free", proveedor="kilo")], timestamp=50.0)
+    apagadas = almacen.deactivate_unregistered_providers({"kilo", "chatgpt", "minimax"})
     assert apagadas == 0
-    assert len(almacen.rutas_activas()) == 1
+    assert len(almacen.active_routes()) == 1
 
 
 def test_desactivar_proveedores_no_registrados_es_idempotente(almacen):
     # Una ruta ya inactiva (por la razon que sea) no cuenta de nuevo ni se
     # re-toca en una segunda pasada.
-    almacen.upsert_rutas([_ruta("b:free", proveedor="openrouter")], momento=50.0)
-    primera = almacen.desactivar_proveedores_no_registrados({"kilo"})
-    segunda = almacen.desactivar_proveedores_no_registrados({"kilo"})
+    almacen.upsert_routes([_ruta("b:free", proveedor="openrouter")], timestamp=50.0)
+    primera = almacen.deactivate_unregistered_providers({"kilo"})
+    segunda = almacen.deactivate_unregistered_providers({"kilo"})
     assert primera == 1
     assert segunda == 0
 
@@ -133,25 +133,25 @@ def test_desactivar_proveedores_no_registrados_con_conjunto_vacio_no_apaga_nada(
     # que una decision real de "sin proveedores") no debe apagar el
     # catalogo ENTERO en el primer ciclo -- un conjunto vacio se trata como
     # "todavia no se sabe nada", no como "todos son huerfanos".
-    almacen.upsert_rutas([_ruta("a:free", proveedor="kilo"),
-                          _ruta("c:free", proveedor="chatgpt")], momento=50.0)
-    apagadas = almacen.desactivar_proveedores_no_registrados(set())
+    almacen.upsert_routes([_ruta("a:free", proveedor="kilo"),
+                          _ruta("c:free", proveedor="chatgpt")], timestamp=50.0)
+    apagadas = almacen.deactivate_unregistered_providers(set())
     assert apagadas == 0
-    assert {r.clave for r in almacen.rutas_activas()} == {"kilo/a:free", "chatgpt/c:free"}
+    assert {r.clave for r in almacen.active_routes()} == {"kilo/a:free", "chatgpt/c:free"}
 
 
 def test_la_calidad_sale_de_la_ultima_sonda_de_calidad(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)
-    almacen.registrar_sonda("kilo/a:free", "calidad", True, 500, 200, 200, 4, 5, 200.0)
-    assert almacen.metricas()["kilo/a:free"].calidad == pytest.approx(0.8)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)
+    almacen.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 4, 5, 200.0)
+    assert almacen.metrics()["kilo/a:free"].calidad == pytest.approx(0.8)
 
 
 def test_la_confiabilidad_mezcla_sondas_y_eventos(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 100.0)
-    almacen.registrar_evento("kilo/a:free", False, 0, 500, 150.0)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 100.0)
+    almacen.record_event("kilo/a:free", False, 0, 500, 150.0)
+    m = almacen.metrics()["kilo/a:free"]
     assert 0.0 < m.confiabilidad < 1.0
 
 
@@ -168,33 +168,33 @@ def test_la_confiabilidad_mezcla_sondas_y_eventos(almacen):
 #     siendo diagnosticables. ---
 
 def test_confiabilidad_ignora_eventos_marcados_como_error_del_cliente(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 400, 100.0 + i,
-                                 es_error_cliente=True)
-    m = almacen.metricas()["kilo/a:free"]
+        almacen.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
+                                 is_client_error=True)
+    m = almacen.metrics()["kilo/a:free"]
     # Sin ninguna otra observacion, la ventana queda VACIA (no las 30 filas
     # contando como fallo): confiabilidad cae al neutro, no a 0.
     assert m.confiabilidad == pytest.approx(0.8)   # CONFIABILIDAD_NEUTRA
 
 
 def test_confiabilidad_sigue_cayendo_con_fallos_que_no_son_del_cliente(almacen):
-    # Regresion directa: un 500 (es_error_cliente=False, el default) tiene
+    # Regresion directa: un 500 (is_client_error=False, el default) tiene
     # que seguir contando como antes.
-    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
-    m = almacen.metricas()["kilo/a:free"]
+        almacen.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.confiabilidad == pytest.approx(0.0)
 
 
 def test_confiabilidad_mezcla_error_del_cliente_e_ignora_solo_esos(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
     for i in range(10):
-        almacen.registrar_evento("kilo/a:free", False, 0, 400, 101.0 + i,
-                                 es_error_cliente=True)
-    m = almacen.metricas()["kilo/a:free"]
+        almacen.record_event("kilo/a:free", False, 0, 400, 101.0 + i,
+                                 is_client_error=True)
+    m = almacen.metrics()["kilo/a:free"]
     # El unico evento que "cuenta" es el exito: los 10 de error del cliente
     # quedan completamente afuera de la ventana.
     assert m.confiabilidad == pytest.approx(1.0)
@@ -227,8 +227,8 @@ def test_migra_una_base_vieja_sin_es_error_cliente_con_filas(tmp_path):
     con.commit()
     con.close()
 
-    almacen = Almacen(ruta_db)
-    almacen.crear_esquema()   # no debe reventar (ALTER TABLE, no CREATE)
+    almacen = Storage(ruta_db)
+    almacen.create_schema()   # no debe reventar (ALTER TABLE, no CREATE)
 
     # La fila vieja, escrita ANTES de que existiera es_error_cliente, migra
     # a 0 (comportamiento historico: SI cuenta como fallo) -- no se puede
@@ -238,7 +238,7 @@ def test_migra_una_base_vieja_sin_es_error_cliente_con_filas(tmp_path):
     assert fila[0] == 0
 
     # Y la base migrada sigue siendo escribible con el flag nuevo.
-    almacen.registrar_evento("kilo/vieja:free", False, 0, 400, 70.0, es_error_cliente=True)
+    almacen.record_event("kilo/vieja:free", False, 0, 400, 70.0, is_client_error=True)
     filas = almacen._con.execute(
         "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free' "
         "ORDER BY momento").fetchall()
@@ -246,44 +246,44 @@ def test_migra_una_base_vieja_sin_es_error_cliente_con_filas(tmp_path):
 
 
 def test_una_ruta_sin_datos_recibe_metricas_neutras(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.calidad == pytest.approx(0.6)
     assert m.en_cooldown_hasta == 0.0
 
 
 def test_el_uso_de_pago_se_cuenta_por_llave_y_dia(almacen):
-    assert almacen.uso_pago("k1", "2026-08-16") == 0
-    assert almacen.sumar_uso_pago("k1", "2026-08-16") == 1
-    assert almacen.sumar_uso_pago("k1", "2026-08-16") == 2
-    assert almacen.uso_pago("k1", "2026-08-17") == 0
-    assert almacen.uso_pago("k2", "2026-08-16") == 0
+    assert almacen.paid_usage("k1", "2026-08-16") == 0
+    assert almacen.add_paid_usage("k1", "2026-08-16") == 1
+    assert almacen.add_paid_usage("k1", "2026-08-16") == 2
+    assert almacen.paid_usage("k1", "2026-08-17") == 0
+    assert almacen.paid_usage("k2", "2026-08-16") == 0
 
 
 # --- Fix round 3, B2b/I3: distinguir "calidad medida 0.6" de "nunca medida". ---
 
 def test_una_ruta_nunca_sondeada_no_declara_fecha_de_calidad(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.calidad_medida_en is None
     assert m.ultima_sonda_en is None
     assert m.calidad == pytest.approx(0.6)   # el neutro sigue alimentando el puntaje
 
 
 def test_una_ruta_sondeada_declara_el_momento_de_su_ultima_sonda_de_calidad(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 2, 5, 300.0)
-    almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 900.0)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 2, 5, 300.0)
+    almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 900.0)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.calidad_medida_en == 900.0
     assert m.calidad == pytest.approx(0.8)
 
 
 def test_la_ultima_sonda_cuenta_tambien_las_de_salud(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 300.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", True, 120, 0, 200, 0, 0, 800.0)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 300.0)
+    almacen.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0, 800.0)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.ultima_sonda_en == 800.0        # la mas reciente de cualquier tipo
     assert m.calidad_medida_en == 300.0      # pero la de CALIDAD sigue siendo la suya
 
@@ -295,27 +295,27 @@ def test_la_ultima_sonda_cuenta_tambien_las_de_salud(almacen):
 #     `rapido` ordenaba por un numero que no significa nada. ---
 
 def test_el_ttft_p50_solo_cuenta_mediciones_de_ttft_de_verdad(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
     # Streaming: ttft real.
-    almacen.registrar_evento("kilo/a:free", True, 200, 200, 150.0)
+    almacen.record_event("kilo/a:free", True, 200, 200, 150.0)
     # No streaming: no hay ttft que medir, va el round-trip a latencia_ms.
-    almacen.registrar_evento("kilo/a:free", True, 0, 200, 160.0, latencia_ms=21000)
-    almacen.registrar_evento("kilo/a:free", True, 0, 200, 170.0, latencia_ms=19000)
-    assert almacen.metricas()["kilo/a:free"].ttft_p50_ms == 200.0
+    almacen.record_event("kilo/a:free", True, 0, 200, 160.0, latency_ms=21000)
+    almacen.record_event("kilo/a:free", True, 0, 200, 170.0, latency_ms=19000)
+    assert almacen.metrics()["kilo/a:free"].ttft_p50_ms == 200.0
 
 
 def test_la_latencia_total_se_guarda_aunque_no_alimente_el_ttft(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_evento("kilo/a:free", True, 0, 200, 160.0, latencia_ms=21000)
-    almacen.registrar_evento("kilo/a:free", True, 0, 200, 170.0, latencia_ms=19000)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_event("kilo/a:free", True, 0, 200, 160.0, latency_ms=21000)
+    almacen.record_event("kilo/a:free", True, 0, 200, 170.0, latency_ms=19000)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.latencia_p50_ms == 21000.0        # p50 de las dos observaciones
     assert m.ttft_p50_ms == 1500.0             # el neutro: ttft nunca se midio
 
 
 def test_sin_ninguna_observacion_de_ttft_se_usa_el_neutro(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    m = almacen.metricas()["kilo/a:free"]
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    m = almacen.metrics()["kilo/a:free"]
     assert m.ttft_p50_ms == 1500.0
     assert m.latencia_p50_ms is None
 
@@ -323,25 +323,25 @@ def test_sin_ninguna_observacion_de_ttft_se_usa_el_neutro(almacen):
 # --- Task 13: `prioridad` persiste y una base vieja migra sin perder datos. ---
 
 def test_upsert_rutas_persiste_la_prioridad(almacen):
-    almacen.upsert_rutas([_ruta("chatgpt:free", proveedor="chatgpt", prioridad=0)],
-                         momento=100.0)
-    activas = almacen.rutas_activas()
+    almacen.upsert_routes([_ruta("chatgpt:free", proveedor="chatgpt", prioridad=0)],
+                         timestamp=100.0)
+    activas = almacen.active_routes()
     assert len(activas) == 1
     assert activas[0].prioridad == 0
 
 
 def test_upsert_rutas_sin_prioridad_declarada_persiste_el_default_cien(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    assert almacen.rutas_activas()[0].prioridad == 100
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    assert almacen.active_routes()[0].prioridad == 100
 
 
 def test_resincronizar_actualiza_la_prioridad_de_una_ruta_existente(almacen):
     # Un cambio de `prioridad` en el YAML (p.ej. subir a un proveedor de
     # lugar) tiene que propagarse en la proxima sincronizacion, no quedar
     # pegado al valor con el que la ruta se vio por primera vez.
-    almacen.upsert_rutas([_ruta("a:free", prioridad=1)], momento=100.0)
-    almacen.upsert_rutas([_ruta("a:free", prioridad=0)], momento=200.0)
-    assert almacen.rutas_activas()[0].prioridad == 0
+    almacen.upsert_routes([_ruta("a:free", prioridad=1)], timestamp=100.0)
+    almacen.upsert_routes([_ruta("a:free", prioridad=0)], timestamp=200.0)
+    assert almacen.active_routes()[0].prioridad == 0
 
 
 # `_migrar()` ya tiene un caso (eventos.latencia_ms, ver el comentario de
@@ -376,10 +376,10 @@ def test_migra_una_base_vieja_con_filas_sin_perder_datos(tmp_path):
     con.close()
 
     # Abrir con el codigo NUEVO no debe reventar (ALTER TABLE, no CREATE).
-    almacen = Almacen(ruta_db)
-    almacen.crear_esquema()
+    almacen = Storage(ruta_db)
+    almacen.create_schema()
 
-    activas = almacen.rutas_activas()
+    activas = almacen.active_routes()
     assert len(activas) == 1
     assert activas[0].clave == "kilo/vieja:free"
     # La fila preexistente, sin ninguna prioridad en el momento en que se
@@ -388,10 +388,10 @@ def test_migra_una_base_vieja_con_filas_sin_perder_datos(tmp_path):
 
     # Y la base migrada sigue siendo escribible: una sincronizacion nueva
     # puede declarar prioridad para esa misma ruta o para una nueva.
-    almacen.upsert_rutas([_ruta("vieja:free", proveedor="kilo", prioridad=0)], momento=200.0)
-    almacen.upsert_rutas([_ruta("nueva:free", proveedor="chatgpt", prioridad=0)],
-                         momento=200.0, desactivar_faltantes=False)
-    activas = {r.clave: r.prioridad for r in almacen.rutas_activas()}
+    almacen.upsert_routes([_ruta("vieja:free", proveedor="kilo", prioridad=0)], timestamp=200.0)
+    almacen.upsert_routes([_ruta("nueva:free", proveedor="chatgpt", prioridad=0)],
+                         timestamp=200.0, deactivate_missing=False)
+    activas = {r.clave: r.prioridad for r in almacen.active_routes()}
     assert activas == {"kilo/vieja:free": 0, "chatgpt/nueva:free": 0}
 
 
@@ -403,10 +403,10 @@ def test_migrar_una_base_vieja_es_idempotente(tmp_path):
     con.executescript(_ESQUEMA_VIEJO_SIN_PRIORIDAD)
     con.close()
 
-    Almacen(ruta_db).crear_esquema()
-    otra_vez = Almacen(ruta_db)
-    otra_vez.crear_esquema()   # no debe reventar
-    assert otra_vez.rutas_activas() == []
+    Storage(ruta_db).create_schema()
+    otra_vez = Storage(ruta_db)
+    otra_vez.create_schema()   # no debe reventar
+    assert otra_vez.active_routes() == []
 
 
 # --- Revision round 6 de Task 13, Parte 2. La clasificacion correcta de
@@ -430,22 +430,22 @@ def test_migrar_una_base_vieja_es_idempotente(tmp_path):
 def test_tiene_evidencia_de_vida_sin_ninguna_telemetria(almacen):
     # Ruta recien vista: no nacio muerta, todavia no tuvo su primera
     # oportunidad ni para bien ni para mal.
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=100.0) is True
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=100.0) is True
 
 
 def test_tiene_evidencia_de_vida_con_un_exito_reciente_pese_a_muchos_fallos(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 403, 101.0 + i)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+        almacen.record_event("kilo/a:free", False, 0, 403, 101.0 + i)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 # --- Round 10, MEDIUM del gate: el chequeo de respaldo ("nada dentro de la
@@ -460,53 +460,53 @@ def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen
 def test_fallos_reales_solos_sin_ninguna_sonda_no_declaran_muerta(almacen):
     # El camino que el trafico real SOLO puede activar (sin ninguna sonda
     # de por medio) ya no alcanza -- ni con 30 fallos.
-    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+        almacen.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_fallos_reales_con_dos_sondas_fallidas_confirmando_si_declaran_muerta(almacen):
     # El camino REAL para llegar a "muerta": trafico real dispara sospecha
     # (round 8), sospecha dispara sondas, y son DOS sondas fallidas
     # consecutivas (round 9) las que confirman -- nunca el trafico solo.
-    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 500, 100.0 + i)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 131.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 132.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
+        almacen.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 131.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 132.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is False
 
 
 def test_tiene_evidencia_de_vida_si_los_fallos_son_todos_error_del_cliente(almacen):
     # Una ruta que SOLO recibio pedidos malformados (400/413/422, Parte 1)
     # todavia no tuvo su primera oportunidad de verdad -- se trata igual
     # que "sin telemetria", no como "muerta".
-    almacen.upsert_rutas([_ruta()], momento=100.0)
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 400, 100.0 + i,
-                                 es_error_cliente=True)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+        almacen.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
+                                 is_client_error=True)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_un_exito_fuera_de_la_ventana_con_solo_fallos_reales_recientes_no_declara_muerta(almacen):
-    from llm_libre.almacen import VENTANA_EVIDENCIA_VIDA_S
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
-    ahora = 100.0 + VENTANA_EVIDENCIA_VIDA_S + 1.0
+    from llm_libre.storage import LIVENESS_WINDOW_S
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
+    ahora = 100.0 + LIVENESS_WINDOW_S + 1.0
     for i in range(30):
-        almacen.registrar_evento("kilo/a:free", False, 0, 500, ahora - 10.0 + i * 0.1)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is True
+        almacen.record_event("kilo/a:free", False, 0, 500, ahora - 10.0 + i * 0.1)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=ahora) is True
 
 
 def test_un_exito_fuera_de_la_ventana_con_dos_sondas_fallidas_recientes_declara_muerta(almacen):
-    from llm_libre.almacen import VENTANA_EVIDENCIA_VIDA_S
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, 100.0)
-    ahora = 100.0 + VENTANA_EVIDENCIA_VIDA_S + 1.0
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is False
+    from llm_libre.storage import LIVENESS_WINDOW_S
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
+    ahora = 100.0 + LIVENESS_WINDOW_S + 1.0
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=ahora) is False
 
 
 # --- Round 9, hallazgo del gate ("el camino indirecto de /health"): desde
@@ -519,25 +519,25 @@ def test_un_exito_fuera_de_la_ventana_con_dos_sondas_fallidas_recientes_declara_
 #     alcanza -- hacen falta DOS consecutivas, sin exito de por medio. ---
 
 def test_una_sola_sonda_fallida_ya_no_alcanza_para_declarar_muerta(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_dos_sondas_fallidas_consecutivas_si_declaran_muerta(almacen):
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 140.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is False
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 140.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is False
 
 
 def test_una_sonda_fallida_justo_despues_de_un_exito_no_alcanza(almacen):
     # Un solo fallo precedido por un exito NO es "dos consecutivos": la
     # señal mas vieja de las dos ultimas es un exito, no otro fallo.
-    almacen.upsert_rutas([_ruta()], momento=100.0)
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, 140.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    almacen.record_event("kilo/a:free", True, 50, 200, 140.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 # --- Round 7, MEDIUM del gate: `tiene_evidencia_de_vida` solo miraba sondas
@@ -555,17 +555,17 @@ def test_una_sonda_fallida_justo_despues_de_un_exito_no_alcanza(almacen):
 #     cada 5h cuyos ultimos cuatro resultados son CONOCIDOS y se descartaban. ---
 
 def test_una_sonda_fallida_mas_reciente_que_un_exito_viejo_declara_la_ruta_muerta(almacen):
-    almacen.upsert_rutas([_ruta()], momento=0.0)
+    almacen.upsert_routes([_ruta()], timestamp=0.0)
     ahora = 100_000.0
     veinte_horas = 20 * 3600.0
     cinco_horas = 5 * 3600.0
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, ahora - veinte_horas)
+    almacen.record_event("kilo/a:free", True, 50, 200, ahora - veinte_horas)
     # Cuatro sondas de salud FALLIDAS desde entonces, una cada 5h -- todas
     # mas recientes que el exito de arriba, la ULTIMA hace apenas 1h.
     for i in range(1, 5):
-        almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
+        almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
                                 ahora - veinte_horas + i * cinco_horas)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=ahora) is False
+    assert almacen.has_liveness_evidence("kilo/a:free", now=ahora) is False
 
 
 def test_un_exito_real_mas_reciente_que_una_sonda_fallida_declara_la_ruta_viva(almacen):
@@ -573,14 +573,14 @@ def test_un_exito_real_mas_reciente_que_una_sonda_fallida_declara_la_ruta_viva(a
     # real (un cliente de verdad recibio respuesta), esa es la senal mas
     # nueva y gana -- la ruta esta viva AHORA, sin importar el tropiezo
     # anterior de la sonda.
-    almacen.upsert_rutas([_ruta()], momento=0.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
-    almacen.registrar_evento("kilo/a:free", True, 50, 200, 150.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+    almacen.upsert_routes([_ruta()], timestamp=0.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    almacen.record_event("kilo/a:free", True, 50, 200, 150.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_una_sonda_exitosa_mas_reciente_que_una_fallida_declara_la_ruta_viva(almacen):
-    almacen.upsert_rutas([_ruta()], momento=0.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
-    almacen.registrar_sonda("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
-    assert almacen.tiene_evidencia_de_vida("kilo/a:free", ahora=200.0) is True
+    almacen.upsert_routes([_ruta()], timestamp=0.0)
+    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    almacen.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True

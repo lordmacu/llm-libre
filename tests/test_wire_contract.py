@@ -24,7 +24,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_libre.almacen import Almacen
+from llm_libre.storage import Storage
 from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.modelos import EXTENSIONES_GATEWAY, Capacidades, Ruta
 from llm_libre.providers import Provider, load
@@ -35,9 +35,9 @@ YAML = "proveedores.yaml"
 
 @pytest.fixture
 def cliente():
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
-    almacen.upsert_rutas(
+    almacen = Storage(":memory:")
+    almacen.create_schema()
+    almacen.upsert_routes(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
@@ -171,8 +171,8 @@ def test_tier_values_are_wire():
 
 def test_sqlite_table_names_are_stable():
     """The DB lives on disk in production; renaming a table needs a migration."""
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     tablas = {row[0] for row in
               almacen._con.execute(
                   "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}

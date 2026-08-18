@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from llm_libre.modelos import Capacidades, Ruta
-from llm_libre.almacen import Almacen
+from llm_libre.storage import Storage
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAXIMO_S,
                              COOLDOWN_BASE_S, COOLDOWN_PAGO_DIRECTO_S,
@@ -33,8 +33,8 @@ def _ok(contenido="hola"):
 
 
 def _proxy(handler, proveedores=("kilo",), canvas=frozenset()):
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     cliente = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return Proxy({p: _prov(p, unwraps_canvas=p in canvas) for p in proveedores},
                  almacen, cliente)
@@ -416,7 +416,7 @@ async def test_al_cruzar_el_umbral_se_dispara_una_sonda_que_castiga_si_la_ruta_e
     await p.esperar_sondas_pendientes()
     assert p.cooldowns["kilo/a:free"] > 0.0
     # La sonda dejo su propia constancia en `sondas` -- la misma evidencia
-    # que lee Almacen.tiene_evidencia_de_vida para /health.
+    # que lee Storage.tiene_evidencia_de_vida para /health.
     fila = p.almacen._con.execute(
         "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
     assert fila == ("salud", 0)
@@ -497,8 +497,8 @@ async def test_usa_el_timeout_propio_del_proveedor_si_lo_declara():
         vistos.append(req.extensions.get("timeout"))
         return httpx.Response(200, json=_ok())
 
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -522,8 +522,8 @@ async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real():
 
     chatgpt = next(p for p in load(YAML_REAL, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
-    almacen = Almacen(":memory:")
-    almacen.crear_esquema()
+    almacen = Storage(":memory:")
+    almacen.create_schema()
     p = Proxy({"chatgpt": chatgpt}, almacen,
              httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     await p.completar([_ruta("gpt-5-3-mini", proveedor="chatgpt")], CUERPO, ahora=0.0)
@@ -1244,7 +1244,7 @@ async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas
     # UMBRAL_SOSPECHA son el trafico real que arma la sospecha), y ANTES
     # de que completar() llegue a su propia decision de castigo -- para
     # que el veredicto quede genuinamente sin resolver, no ya tomado.
-    original = p.almacen.registrar_evento
+    original = p.almacen.record_event
     contador = {"n": 0}
 
     def _registrar_evento_que_a_veces_revienta(*a, **kw):
@@ -1252,7 +1252,7 @@ async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas
         if contador["n"] > UMBRAL_SOSPECHA:
             raise RuntimeError("contencion simulada de sqlite bajo WAL")
         return original(*a, **kw)
-    p.almacen.registrar_evento = _registrar_evento_que_a_veces_revienta
+    p.almacen.record_event = _registrar_evento_que_a_veces_revienta
 
     for i in range(UMBRAL_SOSPECHA):
         await p.completar([_ruta("a:free")], CUERPO, ahora=float(i))

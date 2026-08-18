@@ -215,7 +215,7 @@ def crear_app(estado: Estado) -> FastAPI:
 
     def _rutas_para(cuerpo: dict, llave: str) -> tuple[list, object]:
         pedido = interpretar_pedido(cuerpo)
-        activas = estado.almacen.rutas_activas()
+        activas = estado.almacen.active_routes()
         # Un id explicito que ya no existe merece un 404 con pistas, no un 400 generico:
         # es exactamente el fallo que este proyecto existe para evitar.
         if pedido.modelo is not None and not any(r.modelo_id == pedido.modelo for r in activas):
@@ -226,7 +226,7 @@ def crear_app(estado: Estado) -> FastAPI:
         tope_alcanzado = False
         if pedido.permitir_pago:
             dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if estado.almacen.uso_pago(llave, dia) >= estado.tope_pago_diario:
+            if estado.almacen.paid_usage(llave, dia) >= estado.tope_pago_diario:
                 pedido = replace(pedido, permitir_pago=False)
                 tope_alcanzado = True
         ahora = time.time()
@@ -256,7 +256,7 @@ def crear_app(estado: Estado) -> FastAPI:
             # aparecia ni en /v1/uso ni contra TOPE_PAGO_DIARIO -- medido,
             # 40/40 llamadas facturables con `pago_hoy: 0`. Ver proxy.py
             # (`en_intento_facturable`) para donde se decide "facturable".
-            estado.almacen.sumar_uso_pago(
+            estado.almacen.add_paid_usage(
                 llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
         if cuerpo.get("stream"):
@@ -290,7 +290,7 @@ def crear_app(estado: Estado) -> FastAPI:
             # ruta sirvio, asi que no hay margen HTTP para cambiarlo a 404.
             raise HTTPException(404, {
                 "message": f"el modelo '{pedido.modelo}' ya no existe",
-                "sugerencias": _parecidos(pedido.modelo, estado.almacen.rutas_activas()),
+                "sugerencias": _parecidos(pedido.modelo, estado.almacen.active_routes()),
             })
         cabeceras = {"X-Intentos": str(r.intentos)}
         if r.ruta is not None:
@@ -318,7 +318,7 @@ def crear_app(estado: Estado) -> FastAPI:
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         exigir_llave(x_api_key, authorization)
         datos = [{"id": r.modelo_id, "object": "model", "owned_by": r.proveedor}
-                 for r in estado.almacen.rutas_activas()]
+                 for r in estado.almacen.active_routes()]
         datos += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIAS]
         return {"object": "list", "data": datos}
 
@@ -336,7 +336,7 @@ def crear_app(estado: Estado) -> FastAPI:
         # (que el router jamas elegiria ahora mismo) podia encabezar la
         # tabla. `en_cooldown_hasta` sigue expuesto por fila para
         # diagnostico; lo que cambia es el ORDEN.
-        activas = sorted(estado.almacen.rutas_activas(),
+        activas = sorted(estado.almacen.active_routes(),
                          key=lambda r: sort_key(r, metricas[r.clave], "balanceado", ahora))
         filas = []
         for r in activas:
@@ -371,7 +371,7 @@ def crear_app(estado: Estado) -> FastAPI:
     def uso(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         llave = exigir_llave(x_api_key, authorization)
         dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return {"dia": dia, "pago_hoy": estado.almacen.uso_pago(llave, dia),
+        return {"dia": dia, "pago_hoy": estado.almacen.paid_usage(llave, dia),
                 "tope": estado.tope_pago_diario}
 
     @app.get("/health", **HEALTH_DOCS)
@@ -382,7 +382,7 @@ def crear_app(estado: Estado) -> FastAPI:
         # bajo demanda -- que confirma que la ruta esta rota; el trafico de
         # un cliente real nunca excluye una ruta directo, ver el comentario
         # de cabecera de UMBRAL_SOSPECHA en proxy.py) Y evidencia POSITIVA de
-        # que sirve (`Almacen.tiene_evidencia_de_vida`).
+        # que sirve (`Storage.tiene_evidencia_de_vida`).
         #
         # Task 13, revision round 6, Parte 2: ESTO YA NO MIRA `confiabilidad`.
         # `confiabilidad` es un promedio de trafico reciente, y un promedio se
@@ -410,13 +410,13 @@ def crear_app(estado: Estado) -> FastAPI:
         # contenedor. El ranking puede darse el lujo de ser sensible: la
         # salud no.
         ahora = time.time()
-        activas = estado.almacen.rutas_activas()
+        activas = estado.almacen.active_routes()
         metricas = _metricas(estado, ahora)
 
         def _viva(r) -> bool:
             m = metricas.get(r.clave, METRICAS_NEUTRAS)
             return (m.en_cooldown_hasta <= ahora
-                    and estado.almacen.tiene_evidencia_de_vida(r.clave, ahora))
+                    and estado.almacen.has_liveness_evidence(r.clave, ahora))
 
         libres = [r for r in activas if _viva(r)]
         gratis = [r for r in libres if r.tier == "gratis"]
@@ -498,7 +498,7 @@ def _iso(momento: float | None) -> str | None:
 
 
 def _metricas(estado: Estado, ahora: float) -> dict:
-    base = estado.almacen.metricas()
+    base = estado.almacen.metrics()
     for clave, hasta in estado.proxy.cooldowns.items():
         if clave in base:
             # `replace` y no `type(m)(...)` posicional: reconstruir a mano deja

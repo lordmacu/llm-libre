@@ -233,7 +233,7 @@ _SOBRE_ELECCION = frozenset({"index"})
 # salida silenciosa de la revision 3, con un codigo distinto cada vez.
 #
 # PRINCIPIO: cuando no se puede saber de quien es la culpa, HAY QUE
-# CONTARLO -- para CONFIABILIDAD (una MEDICION, ver Almacen.registrar_evento
+# CONTARLO -- para CONFIABILIDAD (una MEDICION, ver Storage.registrar_evento
 # y _confiabilidad). Round 8 separa esto de EXCLUSION (cooldown): ver el
 # comentario de cabecera de UMBRAL_SOSPECHA para el principio opuesto que le
 # corresponde a esa otra pregunta.
@@ -261,7 +261,7 @@ def _es_error_del_cliente(codigo: int) -> bool:
     evidencia GENUINA sobre el pedido, nunca sobre la ruta. Cualquier otro
     codigo (401, 403, 404, 405, 409, o el que un proveedor invente manana)
     es evidencia de la ruta por DEFAULT y cuenta igual que un 500 hacia
-    confiabilidad (ver Almacen.registrar_evento) -- ver el comentario de
+    confiabilidad (ver Storage.record_event) -- ver el comentario de
     cabecera del conjunto para el principio completo ("cuando no se puede
     saber de quien es la culpa, hay que contarlo"). Desde round 8 esto ya
     NO decide directamente ningun cooldown -- ver UMBRAL_SOSPECHA: esa es
@@ -476,9 +476,9 @@ class Proxy:
                     ultimo_error = "200 sin contenido ni tool_calls"
 
             exito = codigo == 200 and datos is not None
-            self.almacen.registrar_evento(ruta.clave, exito, 0, codigo, ahora,
-                                          latencia_ms=latencia,
-                                          es_error_cliente=_es_error_del_cliente(codigo))
+            self.almacen.record_event(ruta.clave, exito, 0, codigo, ahora,
+                                          latency_ms=latencia,
+                                          is_client_error=_es_error_del_cliente(codigo))
 
             if exito:
                 self._sospechas.pop(ruta.clave, None)
@@ -579,7 +579,7 @@ class Proxy:
                 if not evento_registrado:
                     ttft = (ttft_medido_ms if ttft_medido_ms is not None
                             else int((time.monotonic() - t0) * 1000))
-                    self.almacen.registrar_evento(ruta.clave, True, ttft, 200, ahora)
+                    self.almacen.record_event(ruta.clave, True, ttft, 200, ahora)
                     evento_registrado = True
                     self._limpiar_castigo(ruta.clave)
                     self._sospechas.pop(ruta.clave, None)
@@ -597,9 +597,9 @@ class Proxy:
                         elif not _es_error_del_cliente(resp.status_code):
                             self._reaccionar_a_fallo_no_429(
                                 ruta, ahora, ahora_del_castigo, es_sonda=False)
-                        self.almacen.registrar_evento(
+                        self.almacen.record_event(
                             ruta.clave, False, 0, resp.status_code, ahora,
-                            es_error_cliente=_es_error_del_cliente(resp.status_code))
+                            is_client_error=_es_error_del_cliente(resp.status_code))
                         continue
                     if ruta.tier == "pago" and en_intento_facturable is not None:
                         en_intento_facturable(ruta)
@@ -685,7 +685,7 @@ class Proxy:
                         # camino normal -- intento FALLIDO y failover a la
                         # siguiente ruta. Nada se emitio, asi que sigue limpio.
                         if not evento_registrado:
-                            self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
+                            self.almacen.record_event(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
                             self._reaccionar_a_fallo_no_429(
                                 ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
@@ -788,7 +788,7 @@ class Proxy:
                         # queda sin respuesta -- se registra como intento
                         # FALLIDO y se cae a la siguiente ruta.
                         if not evento_registrado:
-                            self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
+                            self.almacen.record_event(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True
                             self._reaccionar_a_fallo_no_429(
                                 ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
@@ -818,7 +818,7 @@ class Proxy:
                     return
             except httpx.HTTPError:
                 if not evento_registrado:
-                    self.almacen.registrar_evento(ruta.clave, False, 0, 0, ahora)
+                    self.almacen.record_event(ruta.clave, False, 0, 0, ahora)
                     self._reaccionar_a_fallo_no_429(
                         ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
                 if emitido:
@@ -1025,7 +1025,7 @@ class Proxy:
         `es_sonda=True` sobre una cadena de UNA sola ruta -- el mismo
         camino que ya castiga de forma inequivoca -- y ademas deja
         constancia en `sondas` (tabla que alimenta tanto confiabilidad como
-        `Almacen.tiene_evidencia_de_vida`), exactamente como
+        `Storage.has_liveness_evidence`), exactamente como
         `sondeo.sondear_salud` para la periodica: para el resto del
         sistema, una sonda bajo demanda y una periodica son
         indistinguibles, solo cambia quien la disparo.
@@ -1072,7 +1072,7 @@ class Proxy:
                 # sonda bastarian para que `tiene_evidencia_de_vida`
                 # (round 9) la de por muerta -- una senal de capacidad
                 # momentanea no es evidencia de muerte.
-                self.almacen.registrar_sonda(ruta.clave, "salud", r.estado == 200, ms, 0,
+                self.almacen.record_probe(ruta.clave, "salud", r.estado == 200, ms, 0,
                                              r.codigo_upstream, 0, 0, ahora_resuelto)
             if r.estado == 200 and self._generacion_cooldown.get(ruta.clave, 0) == generacion_antes:
                 self._limpiar_castigo(ruta.clave)
