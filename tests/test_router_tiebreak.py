@@ -64,12 +64,12 @@ def test_the_draw_respects_the_yamls_priority():
 
 
 def test_an_unmeasured_route_is_not_drawn_against_a_measured_one():
-    routes = [r("medida"), r("nueva")]
-    met = {"kilo/medida": m(quality=0.9, measured_at=1000.0),
-           "kilo/nueva": m(quality=0.9, measured_at=None)}
+    routes = [r("measured"), r("new")]
+    met = {"kilo/measured": m(quality=0.9, measured_at=1000.0),
+           "kilo/new": m(quality=0.9, measured_at=None)}
     for s in range(40):
         out = order_routes(routes, met, RouteRequest(), 0.0, random.Random(s))
-        assert out[0].key == "kilo/medida"
+        assert out[0].key == "kilo/measured"
 
 
 def test_zero_scores_do_not_break_the_band():

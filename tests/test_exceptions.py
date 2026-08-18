@@ -10,7 +10,7 @@ from llm_libre.models import Capabilities
 from llm_libre.providers import load
 
 DEFAULTS = Capabilities(tools=True, vision=False, context=128000, max_output=8192)
-CATALOGUE = {"data": [{"id": "bueno"}, {"id": "sin-tools"}, {"id": "otro"}]}
+CATALOGUE = {"data": [{"id": "good"}, {"id": "no-tools"}, {"id": "other"}]}
 
 
 def _by_id(routes):
@@ -24,13 +24,13 @@ def test_without_exceptions_everything_inherits_the_defaults():
 
 def test_an_exception_overrides_only_the_declared_field():
     caps = _by_id(normalize("grok", CATALOGUE, 1, DEFAULTS,
-                            {"sin-tools": {"tools": False}}))
-    assert caps["sin-tools"].tools is False
-    assert caps["bueno"].tools is True
+                            {"no-tools": {"tools": False}}))
+    assert caps["no-tools"].tools is False
+    assert caps["good"].tools is True
     # whatever is NOT declared is inherited whole
-    assert caps["sin-tools"].context == 128000
-    assert caps["sin-tools"].max_output == 8192
-    assert caps["sin-tools"].vision is False
+    assert caps["no-tools"].context == 128000
+    assert caps["no-tools"].max_output == 8192
+    assert caps["no-tools"].vision is False
 
 
 def test_an_exception_for_an_id_that_does_not_exist_is_harmless():
@@ -41,8 +41,8 @@ def test_an_exception_for_an_id_that_does_not_exist_is_harmless():
 
 def test_several_fields_can_be_overridden_at_once():
     caps = _by_id(normalize("grok", CATALOGUE, 1, DEFAULTS,
-                            {"otro": {"tools": False, "vision": True}}))
-    assert caps["otro"].tools is False and caps["otro"].vision is True
+                            {"other": {"tools": False, "vision": True}}))
+    assert caps["other"].tools is False and caps["other"].vision is True
 
 
 def test_the_yaml_declares_groks_exceptions():

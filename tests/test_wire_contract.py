@@ -39,18 +39,18 @@ YAML = "providers.yaml"
 
 
 @pytest.fixture
-def cliente():
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes(
+def client():
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes(
         [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
-            "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}]})))
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200)
-    return TestClient(create_app(estado))
+    return TestClient(create_app(state))
 
 
 AUTH = {"Authorization": "Bearer buena"}
@@ -58,21 +58,21 @@ AUTH = {"Authorization": "Bearer buena"}
 
 # --- endpoint paths ---
 
-def test_endpoint_paths(cliente):
+def test_endpoint_paths(client):
     for path in ("/health", "/v1/models", "/v1/ranking", "/v1/usage"):
-        assert cliente.get(path, headers=AUTH).status_code == 200, path
+        assert client.get(path, headers=AUTH).status_code == 200, path
 
 
 # --- response bodies ---
 
-def test_health_body_keys(cliente):
-    body = cliente.get("/health").json()
+def test_health_body_keys(client):
+    body = client.get("/health").json()
     assert set(body) == {"status", "active_routes", "available_routes", "free_available"}
     assert body["status"] in {"ok", "degraded", "down"}
 
 
-def test_ranking_row_keys(cliente):
-    body = cliente.get("/v1/ranking", headers=AUTH).json()
+def test_ranking_row_keys(client):
+    body = client.get("/v1/ranking", headers=AUTH).json()
     assert set(body) == {"routes"}
     assert set(body["routes"][0]) == {
         "key", "tier", "priority", "score", "quality", "quality_measured",
@@ -82,20 +82,20 @@ def test_ranking_row_keys(cliente):
     }
 
 
-def test_usage_body_keys(cliente):
-    assert set(cliente.get("/v1/usage", headers=AUTH).json()) == {"day", "paid_today", "cap"}
+def test_usage_body_keys(client):
+    assert set(client.get("/v1/usage", headers=AUTH).json()) == {"day", "paid_today", "cap"}
 
 
-def test_models_body_keys(cliente):
-    body = cliente.get("/v1/models", headers=AUTH).json()
+def test_models_body_keys(client):
+    body = client.get("/v1/models", headers=AUTH).json()
     assert body["object"] == "list"
     assert {"id", "object", "owned_by"} <= set(body["data"][0])
 
 
 # --- response headers ---
 
-def test_response_headers(cliente):
-    r = cliente.post("/v1/chat/completions", headers=AUTH,
+def test_response_headers(client):
+    r = client.post("/v1/chat/completions", headers=AUTH,
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
     for header in ("X-Route-Used", "X-Attempts", "X-Tier"):
@@ -104,9 +104,9 @@ def test_response_headers(cliente):
 
 # --- error bodies: `request` mirrors what RouteRequest.as_wire() produces ---
 
-def test_error_body_exposes_the_request_fields(cliente):
+def test_error_body_exposes_the_request_fields(client):
     """400 and 503 bodies echo the normalised request -- these keys are wire."""
-    r = cliente.post("/v1/chat/completions", headers=AUTH,
+    r = client.post("/v1/chat/completions", headers=AUTH,
                      json={"model": "auto", "x_min_context": 99_000_000,
                            "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code in (400, 503)
@@ -118,8 +118,8 @@ def test_error_body_exposes_the_request_fields(cliente):
     }
 
 
-def test_error_body_diagnostic_keys(cliente):
-    r = cliente.post("/v1/chat/completions", headers=AUTH,
+def test_error_body_diagnostic_keys(client):
+    r = client.post("/v1/chat/completions", headers=AUTH,
                      json={"model": "auto", "x_min_context": 99_000_000,
                            "messages": [{"role": "user", "content": "hi"}]})
     detail = r.json()["detail"]
@@ -226,10 +226,10 @@ def test_the_yaml_key_names_are_literal(tmp_path):
 
 def test_sqlite_table_names_are_stable():
     """The DB lives on disk in production; renaming a table needs a migration."""
-    almacen = Storage(":memory:")
-    almacen.create_schema()
+    store = Storage(":memory:")
+    store.create_schema()
     tablas = {row[0] for row in
-              almacen._con.execute(
+              store._con.execute(
                   "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     assert {"routes", "probes", "events", "paid_usage"} <= tablas
 
@@ -244,8 +244,8 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
     routing blind. Every table, every column and both stored vocabularies (`tier`
     and the probe `kind`) are checked, plus idempotency: the same migration runs
     twice, because a container restart runs `create_schema` again."""
-    almacen = Storage(":memory:")
-    almacen._con.executescript("""
+    store = Storage(":memory:")
+    store._con.executescript("""
         CREATE TABLE rutas (clave TEXT PRIMARY KEY, proveedor TEXT, modelo_id TEXT,
             tier TEXT, tools INTEGER, vision INTEGER, contexto INTEGER,
             max_salida INTEGER, visto_por_ultima_vez REAL, activa INTEGER,
@@ -266,16 +266,16 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         INSERT INTO eventos VALUES ('kilo/a:free',13.0,1,250,200,900,0);
         INSERT INTO uso_pago VALUES ('secreta','2026-08-18',7);
     """)
-    almacen.create_schema()
-    almacen.create_schema()   # a restart runs it again: it must be a no-op
+    store.create_schema()
+    store.create_schema()   # a restart runs it again: it must be a no-op
 
-    con = almacen._con
-    assert {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")} \
+    con = store._con
+    assert {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}\
         == {"routes", "probes", "events", "paid_usage"}
     # The old indexes are dropped rather than carried over: renaming a table keeps
     # its index NAMES, so leaving them would mean two identical indexes per table.
     assert {r[0] for r in con.execute(
-        "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'ix_%'")} \
+        "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'ix_%'")}\
         == {"ix_probes", "ix_events"}
     assert [f[1] for f in con.execute("PRAGMA table_info(routes)")] == [
         "key", "provider", "model_id", "tier", "tools", "vision", "context",
@@ -295,6 +295,6 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         "kilo/a:free": "free", "minimax/M3": "paid"}
     assert {r[0] for r in con.execute("SELECT kind FROM probes")} == {"health", "quality"}
     assert con.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
-    assert almacen.paid_usage("secreta", "2026-08-18") == 7
-    assert [r.key for r in almacen.active_routes()] == ["kilo/a:free", "minimax/M3"]
-    assert almacen.metrics()["kilo/a:free"].quality == 4 / 5
+    assert store.paid_usage("secreta", "2026-08-18") == 7
+    assert [r.key for r in store.active_routes()] == ["kilo/a:free", "minimax/M3"]
+    assert store.metrics()["kilo/a:free"].quality == 4 / 5

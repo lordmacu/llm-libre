@@ -106,7 +106,7 @@ async def test_sync_propagates_the_providers_default_capabilities():
 
 async def test_a_down_provider_does_not_erase_the_others_catalogue():
     store = _store()
-    store.upsert_routes([_route("previa:free")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free")], timestamp=50.0)
 
     def handler(req):
         return httpx.Response(500)
@@ -157,27 +157,27 @@ async def test_a_200_with_empty_data_does_not_erase_the_previous_routes():
     # than a genuinely empty catalogue -- it must not authorise the UPDATE that
     # deactivates everything already known about it.
     store = _store()
-    store.upsert_routes([_route("previa:free")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=EMPTY_CATALOGUE)))
     prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
-    assert [r.key for r in store.active_routes()] == ["kilo/previa:free"]
+    assert [r.key for r in store.active_routes()] == ["kilo/previous:free"]
 
 
 async def test_a_200_whose_models_are_all_filtered_out_does_not_erase_previous_routes():
     store = _store()
-    store.upsert_routes([_route("previa:free")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE_ALL_FILTERED)))
     prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
-    assert [r.key for r in store.active_routes()] == ["kilo/previa:free"]
+    assert [r.key for r in store.active_routes()] == ["kilo/previous:free"]
 
 
 async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio():
     store = _store()
-    store.upsert_routes([_route("previa:free", provider="vacio")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free", provider="empty")], timestamp=50.0)
 
     def handler(req):
         if "k.test" in str(req.url):
@@ -187,22 +187,22 @@ async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("vacio", "free", "openai", "https://vacio.test", "", "/models", {}, []),
+        Provider("empty", "free", "openai", "https://empty.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
     assert "kilo/x:free" in keys_          # the provider that did answer was updated
-    assert "vacio/previa:free" in keys_    # the empty one kept what it had
+    assert "empty/previous:free" in keys_    # the empty one kept what it had
 
 
-async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este_vacio():
+async def test_a_healthy_provider_deactivates_its_own_own_stale_route_even_if_another_is_empty():
     # Finding 1, case (c) -- the one that separates a real fix from a blunt one.
-    # kilo had an old route that no longer appears in its new catalogue; vacio
-    # answers 200 with no models. vacio being empty must not hold back the removal
+    # kilo had an old route that no longer appears in its new catalogue; the empty
+    # one answers 200 with no models. That must not hold back the removal
     # of kilo/old:free: kilo answered correctly and its own disappearance is real.
     store = _store()
     store.upsert_routes([_route("old:free", provider="kilo")], timestamp=50.0)
-    store.upsert_routes([_route("previa:free", provider="vacio")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free", provider="empty")], timestamp=50.0)
 
     def handler(req):
         if "k.test" in str(req.url):
@@ -212,36 +212,36 @@ async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("vacio", "free", "openai", "https://vacio.test", "", "/models", {}, []),
+        Provider("empty", "free", "openai", "https://empty.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
-    assert keys_ == {"kilo/x:free", "vacio/previa:free"}
+    assert keys_ == {"kilo/x:free", "empty/previous:free"}
     assert "kilo/old:free" not in keys_    # deactivated: kilo answered, and no longer carries it
 
 
 async def test_a_healthy_provider_does_not_deactivate_another_providers_routes():
     # kilo's deactivation must be SCOPED to kilo: an old route belonging to
-    # "otro" (much older than `now`) must not fall victim to kilo's UPDATE. "otro"
+    # "other" (much older than `now`) must not fall victim to kilo's UPDATE. "other"
     # is STILL registered (with neither modelos_path nor modelos_fijos, so the
     # per-provider loop skips it without touching it) -- if it were not in `prov`,
     # the orphaned-provider sweep (Storage.deactivate_unregistered_providers, see
     # the separate block of tests below) would switch it off for a DIFFERENT
     # reason, and this test would stop isolating what it claims to test.
     store = _store()
-    store.upsert_routes([_route("vieja:free", provider="otro")], timestamp=10.0)
+    store.upsert_routes([_route("old:free", provider="other")], timestamp=10.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("otro", "free", "openai", "https://otro.test", "", "", {}, []),
+        Provider("other", "free", "openai", "https://other.test", "", "", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
-    assert keys_ == {"kilo/x:free", "otro/vieja:free"}
+    assert keys_ == {"kilo/x:free", "other/old:free"}
 
 
-CATALOGUE_COMPARTIDO = {"data": [
+SHARED_CATALOGUE = {"data": [
     {"id": "shared:free", "pricing": {"prompt": "0"}, "context_length": 1000,
      "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
      "supported_parameters": [], "top_provider": {"max_completion_tokens": 100}}]}
@@ -253,22 +253,22 @@ async def test_the_same_model_in_two_providers_only_the_one_that_lost_it_is_swit
     # and the other keeps it, they must be treated separately.
     store = _store()
     store.upsert_routes([_route("shared:free", provider="kilo")], timestamp=50.0)
-    store.upsert_routes([_route("shared:free", provider="otro")], timestamp=50.0)
+    store.upsert_routes([_route("shared:free", provider="other")], timestamp=50.0)
 
     def handler(req):
         if "k.test" in str(req.url):
             return httpx.Response(200, json=CATALOGUE)          # kilo ya no trae shared:free
-        return httpx.Response(200, json=CATALOGUE_COMPARTIDO)   # otro lo sigue trayendo
+        return httpx.Response(200, json=SHARED_CATALOGUE)   # the other provider still returns it
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("otro", "free", "openai", "https://o.test", "", "/models", {}, []),
+        Provider("other", "free", "openai", "https://o.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
     assert "kilo/shared:free" not in keys_   # kilo lo perdio: se apaga
-    assert "otro/shared:free" in keys_       # otro lo conserva: sigue activa
+    assert "other/shared:free" in keys_       # the other provider keeps it: still active
     assert "kilo/x:free" in keys_
 
 
@@ -280,7 +280,7 @@ async def test_a_200_with_a_non_json_body_is_a_failure_and_does_not_stop_the_oth
 
     def handler(req):
         if "roto.test" in str(req.url):
-            return httpx.Response(200, text="esto no es json")
+            return httpx.Response(200, text="this is not json")
         return httpx.Response(200, json=CATALOGUE)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -315,14 +315,14 @@ async def test_a_200_with_an_unexpected_shape_is_a_failure_and_does_not_stop_the
 # --- Removing a provider from providers.yaml (the real case: openrouter, with
 #     no OPENROUTER_API_KEY, whose 16 routes 401'd every time and only took up
 #     probe quota and ranking space proving they were dead) must not leave its
-#     routes at `activa=1` forever -- see
+#     routes at `active=1` forever -- see
 #     Storage.deactivate_unregistered_providers. This is the "through
 #     sync_catalogue" half of that coverage; the other half (the Storage method in
 #     isolation) lives in test_storage.py. ---
 
 async def test_sync_deactivates_the_routes_of_a_provider_removed_from_the_registry():
     store = _store()
-    store.upsert_routes([_route("previa:free", provider="openrouter")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free", provider="openrouter")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     # openrouter is NO LONGER in the list providers.load() returns -- this
@@ -332,8 +332,8 @@ async def test_sync_deactivates_the_routes_of_a_provider_removed_from_the_regist
     keys_ = {r.key for r in store.active_routes()}
     assert keys_ == {"kilo/x:free"}
     row = store._con.execute(
-        "SELECT active FROM routes WHERE key = 'openrouter/previa:free'").fetchone()
-    assert row == (0,)   # apagada, no borrada
+        "SELECT active FROM routes WHERE key = 'openrouter/previous:free'").fetchone()
+    assert row == (0,)   # switched off, not deleted
 
 
 async def test_sync_does_not_deactivate_routes_of_still_registered_providers():
@@ -344,7 +344,7 @@ async def test_sync_does_not_deactivate_routes_of_still_registered_providers():
     # orphan sweep (`deactivate_unregistered_providers`) did not touch it, not
     # that it "happened to reappear in the catalogue".
     store = _store()
-    store.upsert_routes([_route("previa:free", provider="openrouter")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free", provider="openrouter")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [
@@ -367,11 +367,11 @@ async def test_sync_with_an_empty_registry_does_not_switch_off_the_whole_catalog
     # must not trigger the orphan sweep -- see the guard in
     # Storage.deactivate_unregistered_providers.
     store = _store()
-    store.upsert_routes([_route("previa:free", provider="kilo")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free", provider="kilo")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     await sync_catalogue(http, [], store, now=100.0)
-    assert {r.key for r in store.active_routes()} == {"kilo/previa:free"}
+    assert {r.key for r in store.active_routes()} == {"kilo/previous:free"}
 
 
 async def test_sync_catalogue_does_not_let_a_broken_providers_exception_escape():
@@ -385,14 +385,14 @@ async def test_sync_catalogue_does_not_let_a_broken_providers_exception_escape()
         url = str(req.url)
         if "nojson.test" in url:
             return httpx.Response(200, text="<html>not json</html>")
-        if "raro.test" in url:
+        if "odd.test" in url:
             return httpx.Response(200, json={"error": "unauthorized"})
         return httpx.Response(200, json=CATALOGUE)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
         Provider("nojson", "free", "openai", "https://nojson.test", "", "/models", {}, []),
-        Provider("raro", "free", "openai", "https://raro.test", "", "/models", {}, []),
+        Provider("odd", "free", "openai", "https://odd.test", "", "/models", {}, []),
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
     ]
     total = await sync_catalogue(http, prov, store, now=100.0)
@@ -493,12 +493,12 @@ async def test_cycle_syncs_probes_health_and_probes_quality_on_cycle_zero():
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, store, http)
-    estado = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
+    state = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
                     providers=prov, http=http)
-    await cycle(estado, counter=0)
+    await cycle(state, counter=0)
     assert [r.key for r in store.active_routes()] == ["kilo/x:free"]
-    tipos = {t for (t,) in store._con.execute("SELECT kind FROM probes").fetchall()}
-    assert tipos == {"health", "quality"}
+    kinds = {t for (t,) in store._con.execute("SELECT kind FROM probes").fetchall()}
+    assert kinds == {"health", "quality"}
 
 
 async def test_cycle_does_not_probe_quality_outside_the_interval():
@@ -507,11 +507,11 @@ async def test_cycle_does_not_probe_quality_outside_the_interval():
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, store, http)
-    estado = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
+    state = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
                     providers=prov, http=http)
-    await cycle(estado, counter=1)
-    tipos = {t for (t,) in store._con.execute("SELECT kind FROM probes").fetchall()}
-    assert tipos == {"health"}
+    await cycle(state, counter=1)
+    kinds = {t for (t,) in store._con.execute("SELECT kind FROM probes").fetchall()}
+    assert kinds == {"health"}
 
 
 # --- Fix round 3, B4 (Blocking): section 8 says "paid routes are NOT probed".
@@ -567,9 +567,9 @@ async def test_the_full_cycle_does_not_probe_the_paid_route():
                     "context": 128000, "max_output": 32768}]),
     ]
     proxy = Proxy({p.id: p for p in prov}, store, http)
-    estado = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
+    state = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
                     providers=prov, http=http)
-    await cycle(estado, counter=1)   # contador 1: salud si, calidad no
+    await cycle(state, counter=1)   # counter 1: health yes, quality no
     assert {r.key for r in store.active_routes()} == {"kilo/x:free", "minimax/MiniMax-M3"}
     assert not any("m.test" in u for u in calls), "se le pego a la ruta de pago"
 
@@ -586,7 +586,7 @@ def _prov_kilo():
 
 async def _sincronizar_con(handler, caplog):
     store = _store()
-    store.upsert_routes([_route("previa:free")], timestamp=50.0)
+    store.upsert_routes([_route("previous:free")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     with caplog.at_level(logging.WARNING, logger="llm_libre.probing"):
         await sync_catalogue(http, _prov_kilo(), store, now=100.0)
@@ -597,27 +597,27 @@ async def test_a_network_error_is_logged_with_the_provider_and_the_reason(caplog
     def handler(req):
         raise httpx.ConnectError("no hay ruta al host")
 
-    texto = await _sincronizar_con(handler, caplog)
-    assert "kilo" in texto and "no hay ruta al host" in texto
+    text = await _sincronizar_con(handler, caplog)
+    assert "kilo" in text and "no hay ruta al host" in text
 
 
 async def test_a_non_200_status_is_logged(caplog):
-    texto = await _sincronizar_con(lambda req: httpx.Response(503), caplog)
-    assert "kilo" in texto and "503" in texto
+    text = await _sincronizar_con(lambda req: httpx.Response(503), caplog)
+    assert "kilo" in text and "503" in text
 
 
 async def test_a_malformed_body_is_logged(caplog):
-    texto = await _sincronizar_con(
+    text = await _sincronizar_con(
         lambda req: httpx.Response(200, text="<html>mantenimiento</html>"), caplog)
-    assert "kilo" in texto
-    assert "could not interpret" in texto
+    assert "kilo" in text
+    assert "could not interpret" in text
 
 
 async def test_an_empty_catalogue_is_logged(caplog):
-    texto = await _sincronizar_con(
+    text = await _sincronizar_con(
         lambda req: httpx.Response(200, json=EMPTY_CATALOGUE), caplog)
-    assert "kilo" in texto
-    assert "zero usable models" in texto
+    assert "kilo" in text
+    assert "zero usable models" in text
 
 
 async def test_a_healthy_sync_does_not_pollute_the_warning_logs(caplog):
@@ -650,29 +650,29 @@ async def test_the_health_probe_does_not_write_a_ttft_it_never_measured():
 #     "dead" with max_tokens=8, including the one that serves `auto` on a cold
 #     start. ---
 
-def _modelo_que_razona(tope_minimo=512, respuesta="pong"):
-    """Un proveedor que se comporta como los modelos gratis de verdad: si no le
-    alcanza el presupuesto, se lo gasta pensando y devuelve 200 con
+def _a_reasoning_model(min_budget=512, reply="pong"):
+    """A provider that behaves like the real free models: when the budget is not
+    enough, it burns it thinking and returns a 200 with
     finish_reason 'length' y content null."""
     def handler(req):
-        cuerpo = json.loads(req.content)
-        if cuerpo.get("max_tokens", 0) < tope_minimo:
+        body = json.loads(req.content)
+        if body.get("max_tokens", 0) < min_budget:
             return httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": None},
                  "finish_reason": "length"}]})
         return httpx.Response(200, json={"choices": [
-            {"message": {"role": "assistant", "content": respuesta},
+            {"message": {"role": "assistant", "content": reply},
              "finish_reason": "stop"}]})
     return handler
 
 
 async def test_the_health_probe_does_not_kill_a_model_by_denying_it_room_to_think():
-    p = _proxy(_modelo_que_razona())
+    p = _proxy(_a_reasoning_model())
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
         "SELECT ok FROM probes WHERE kind='health'").fetchone()
     assert row[0] == 1, ("el ping fabrico el fallo que dice medir: no le dio "
-                          "presupuesto suficiente al modelo")
+                          "the model a big enough budget")
 
 
 async def test_the_health_ping_cannot_lag_behind_the_batterys_cap():

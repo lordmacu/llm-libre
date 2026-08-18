@@ -16,7 +16,7 @@ def _load(name):
 
 def test_paid_models_are_discarded():
     data = {"data": [
-        {"id": "caro/modelo", "pricing": {"prompt": "0.0000015"},
+        {"id": "expensive/model", "pricing": {"prompt": "0.0000015"},
          "architecture": {"output_modalities": ["text"]}},
     ]}
     assert normalize("kilo", data) == []
@@ -37,7 +37,7 @@ def test_free_models_that_do_not_return_text_only_are_discarded():
 
 def test_normalize_stamps_the_providers_priority():
     data = {"data": [
-        {"id": "sin/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+        {"id": "without/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
          "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
          "supported_parameters": ["max_tokens"]},
     ]}
@@ -47,7 +47,7 @@ def test_normalize_stamps_the_providers_priority():
 
 def test_normalize_without_a_declared_priority_uses_the_default_of_one_hundred():
     data = {"data": [
-        {"id": "sin/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+        {"id": "without/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
          "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
          "supported_parameters": ["max_tokens"]},
     ]}
@@ -74,7 +74,7 @@ def test_multimodal_input_is_accepted_as_long_as_output_is_text():
 
 def test_absence_of_tools_is_detected():
     data = {"data": [
-        {"id": "sin/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+        {"id": "without/tools:free", "pricing": {"prompt": "0"}, "context_length": 4096,
          "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
          "supported_parameters": ["max_tokens", "temperature"]},
     ]}
@@ -82,7 +82,7 @@ def test_absence_of_tools_is_detected():
 
 
 def test_an_unreadable_price_is_treated_as_paid():
-    data = {"data": [{"id": "raro/modelo", "pricing": {},
+    data = {"data": [{"id": "odd/model", "pricing": {},
                       "architecture": {"output_modalities": ["text"]}}]}
     assert normalize("kilo", data) == []
 
@@ -109,7 +109,7 @@ def test_against_the_real_openrouter_catalogue():
 #     it in /models (name/description), which the normaliser used to throw away.
 #     Still discovery: not a single hardcoded id. ---
 
-def _model(mid, name="Un Modelo", description="Un modelo de chat general."):
+def _model(mid, name="A Model", description="A general chat model."):
     return {"id": mid, "name": name, "description": description,
             "pricing": {"prompt": "0"}, "context_length": 4096,
             "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
@@ -119,7 +119,7 @@ def _model(mid, name="Un Modelo", description="Un modelo de chat general."):
 
 def test_a_guardrail_is_discarded_by_its_own_description():
     data = {"data": [_model(
-        "vendor/lo-que-sea:free", "Vendor: Lo Que Sea (free)",
+        "vendor/whatever:free", "Vendor: Whatever (free)",
         "A compact 4B-parameter multimodal guardrail model. It moderates both "
         "inputs to and responses from LLMs.")]}
     assert normalize("kilo", data) == []
@@ -186,18 +186,18 @@ def test_the_real_openrouter_catalogue_no_longer_carries_the_classifier_or_meta_
 
 
 # --- Fix round 3, ALSO: `m["id"]` with no guard. A catalogue entry without an
-#     id blew up with KeyError; sondeo.py swallowed the whole thing and THAT
+#     id blew up with KeyError; probing.py swallowed the whole thing and THAT
 #     provider's catalogue froze forever, without a single log line. ---
 
 def test_an_entry_without_an_id_is_skipped_without_blowing_up_and_is_logged(caplog):
     data = {"data": [
         {"pricing": {"prompt": "0"}, "architecture": {"output_modalities": ["text"]}},
-        {"id": "bueno:free", "pricing": {"prompt": "0"},
+        {"id": "good:free", "pricing": {"prompt": "0"},
          "architecture": {"output_modalities": ["text"]}},
     ]}
     with caplog.at_level(logging.WARNING, logger="llm_libre.catalog"):
         routes = normalize("kilo", data)
-    assert [r.model_id for r in routes] == ["bueno:free"]
+    assert [r.model_id for r in routes] == ["good:free"]
     assert "without 'id'" in caplog.text
 
 
@@ -242,8 +242,8 @@ def test_chatgpt_discards_auto_because_it_is_a_reserved_id():
 #     "auto:" as an alias, never as a literal id). A provider publishing a real
 #     model called, say, "auto:fast" created a PERMANENTLY unreachable route:
 #     no request with `model: "auto:fast"` ever reaches
-#     `pedido.model == "auto:fast"`, because parse_request resolves it
-#     first as profile "fast" with modelo=None. ---
+#     `request.model == "auto:fast"`, because parse_request resolves it
+#     first as profile "fast" with model=None. ---
 
 def test_the_compound_auto_aliases_are_discarded_too():
     routes = normalize("prov", [
@@ -251,10 +251,10 @@ def test_the_compound_auto_aliases_are_discarded_too():
         {"id": "auto:strong", "name": "Collides with the compound alias"},
         {"id": "auto:tools", "name": "Collides with the compound alias"},
         {"id": "auto:vision", "name": "Collides with the compound alias"},
-        {"id": "un-modelo-real", "name": "Real model"},
+        {"id": "a-real-model", "name": "Real model"},
     ], default_capabilities=_CHATGPT_DEFAULTS)
     ids = {r.model_id for r in routes}
-    assert ids == {"un-modelo-real"}
+    assert ids == {"a-real-model"}
 
 
 def test_a_new_model_from_the_proxy_appears_without_touching_the_yaml():
@@ -282,10 +282,10 @@ def test_default_capabilities_skip_price_and_output_modality():
     # output_modalities (normally discarded) is accepted anyway, because those
     # two checks are skipped in this mode.
     data = {"data": [
-        {"id": "modelo-sin-metadatos", "description": "Un Modelo"},
+        {"id": "model-without-metadata", "description": "A Model"},
     ]}
     routes = normalize("chatgpt", data, default_capabilities=_CHATGPT_DEFAULTS)
-    assert [r.model_id for r in routes] == ["modelo-sin-metadatos"]
+    assert [r.model_id for r in routes] == ["model-without-metadata"]
     assert routes[0].capabilities == _CHATGPT_DEFAULTS
 
 
@@ -304,7 +304,7 @@ def test_a_provider_without_default_capabilities_keeps_the_original_behaviour():
     # with an explicit None) has to give EXACTLY what it gave before this change
     # -- price, output modality and speciality still filter as always.
     data = {"data": [
-        {"id": "caro/modelo", "pricing": {"prompt": "0.0000015"},
+        {"id": "expensive/model", "pricing": {"prompt": "0.0000015"},
          "architecture": {"output_modalities": ["text"]}},
     ]}
     assert normalize("kilo", data, default_capabilities=None) == []

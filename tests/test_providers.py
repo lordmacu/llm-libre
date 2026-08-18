@@ -152,7 +152,7 @@ def test_base_url_env_falls_back_to_the_default_when_the_variable_is_blank():
 def test_a_provider_without_base_url_env_is_unaffected(tmp_path):
     # kilo does not declare base_url_env: an environment variable that happens to
     # carry its id must not override its url.
-    kilo = next(p for p in load(YAML, {"KILO_URL": "https://otra.test"}) if p.id == "kilo")
+    kilo = next(p for p in load(YAML, {"KILO_URL": "https://another.test"}) if p.id == "kilo")
     assert kilo.base_url == "https://api.kilo.ai/api/gateway"
 
 
@@ -334,8 +334,8 @@ def test_base_url_env_appends_nothing_when_the_default_has_no_suffix(tmp_path):
         "    base_url_env: SUELTO_URL\n"
         "    base_url: https://suelto.test\n"
         "    models_path: /models\n")
-    p = load(str(yaml_no_suffix), {"SUELTO_URL": "https://otra.test"})[0]
-    assert p.base_url == "https://otra.test"
+    p = load(str(yaml_no_suffix), {"SUELTO_URL": "https://another.test"})[0]
+    assert p.base_url == "https://another.test"
 
 
 # --- Re-review: the normalisation rule was TOO eager -- it appended the suffix
@@ -380,7 +380,7 @@ def test_fixed_routes_uses_the_providers_real_priority_not_a_constant(tmp_path):
         "    dialect: openai\n"
         "    base_url: https://pago-futuro.test\n"
         "    fixed_models:\n"
-        "      - id: modelo-x\n"
+        "      - id: model-x\n"
         "        tools: true\n"
         "        vision: false\n"
         "        context: 1000\n"

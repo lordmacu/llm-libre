@@ -82,19 +82,19 @@ class _DelayedStream(httpx.AsyncByteStream):
 
     async def __aiter__(self):
         await asyncio.sleep(self._delay_before)
-        yield b'data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'
+        yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
         await asyncio.sleep(self._delay_after)
         yield b"data: [DONE]\n\n"
 
 
 async def test_it_passes_the_full_content_through():
-    p = _proxy(lambda req: httpx.Response(200, content=_sse("ho", "la")))
-    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "hola"
+    p = _proxy(lambda req: httpx.Response(200, content=_sse("h", "i")))
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "hi"
 
 
 async def test_it_trims_reasoning_split_across_chunks():
-    p = _proxy(lambda req: httpx.Response(200, content=_sse("ho", "<thi", "nk>zz</think>", "la")))
-    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "hola"
+    p = _proxy(lambda req: httpx.Response(200, content=_sse("h", "<thi", "nk>zz</think>", "i")))
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "hi"
 
 
 async def test_a_tag_that_never_closes_does_not_hang_the_stream():
@@ -109,10 +109,10 @@ async def test_it_unwraps_a_canvas_fence_split_across_chunks():
     # belongs to "chatgpt" (canvas={"chatgpt"}, see finding 1 of the review
     # below).
     p = _proxy(lambda req: httpx.Response(
-        200, content=_sse_json(':::writing{title="x"}\n', 'ho', 'la\n', ':::')),
+        200, content=_sse_json(':::writing{title="x"}\n', 'h', 'i\n', ':::')),
         canvas={"chatgpt"})
     text = await _collect(p.complete_stream([_route(provider="chatgpt")], BODY, 0.0))
-    assert text == "hola\n"
+    assert text == "hi\n"
 
 
 # --- Finding 1 of the review: the same case, but streaming and with a route
@@ -153,9 +153,9 @@ async def test_no_routes_emits_an_error_and_closes():
 
 
 async def test_raw_mode_does_not_trim_the_content():
-    p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>hola")))
+    p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>hi")))
     text = await _collect(p.complete_stream([_route()], BODY, 0.0, raw=True))
-    assert text == "<think>mmm</think>hola"
+    assert text == "<think>mmm</think>hi"
 
 
 async def test_it_does_not_discard_a_tool_calls_chunk_with_empty_content():
@@ -185,7 +185,7 @@ async def test_it_does_not_discard_a_chunk_with_finish_reason_and_empty_content(
     # SIBLING of `delta`, and with that shape the chunk was being lost. That is why
     # the bug went unnoticed: the only test covering it did not use the real
     # shape. Now it does.
-    body = (b'data: {"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
+    body = (b'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
              b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
              b'data: [DONE]\n\n')
     p = _proxy(lambda req: httpx.Response(200, content=body))
@@ -341,7 +341,7 @@ async def test_ttft_measures_the_first_token_not_the_end_of_the_stream():
     lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
     total_duration_ms = (time.monotonic() - t0) * 1000
 
-    assert any("hola" in l for l in lines)
+    assert any("hi" in l for l in lines)
     assert lines[-1].strip() == "data: [DONE]"
 
     rows = p.store._con.execute("SELECT ok, ttft_ms FROM events").fetchall()
@@ -359,7 +359,7 @@ async def test_ttft_measures_the_first_token_not_the_end_of_the_stream():
 async def test_the_streaming_path_does_write_a_ttft():
     # The flip side of I5: here the ttft CAN be measured, and it is the only path
     # that writes that column.
-    p = _proxy(lambda req: httpx.Response(200, content=_sse("hola")))
+    p = _proxy(lambda req: httpx.Response(200, content=_sse("hi")))
     await _collect(p.complete_stream([_route()], BODY, 0.0))
     row = p.store._con.execute("SELECT ttft_ms, latency_ms FROM events").fetchone()
     assert row[0] >= 0 and row[1] is None
@@ -370,8 +370,8 @@ async def test_a_whitespace_only_chunk_is_not_lost():
     # They do not count as a "useful response" when deciding success, but they
     # ARE client-facing text: they cannot be thrown away. They are held back and
     # go out, in order, alongside the first chunk with real content.
-    p = _proxy(lambda req: httpx.Response(200, content=_sse(" ", "hola", " ", "mundo")))
-    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == " hola mundo"
+    p = _proxy(lambda req: httpx.Response(200, content=_sse(" ", "hi", " ", "world")))
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == " hi world"
 
 
 async def test_a_pure_whitespace_stream_is_not_a_response():
@@ -401,7 +401,7 @@ ENVELOPE = '"id":"c1","object":"chat.completion.chunk","created":1,"model":"m"'
 
 async def test_it_does_not_lose_openais_real_final_chunk():
     body = (b'data: {' + ENVELOPE.encode() +
-              b',"choices":[{"index":0,"delta":{"role":"assistant","content":"hola"}}]}\n\n'
+              b',"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}\n\n'
               b'data: {' + ENVELOPE.encode() +
               b',"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
               b'data: [DONE]\n\n')
@@ -414,7 +414,7 @@ async def test_it_does_not_lose_openais_real_final_chunk():
 async def test_it_does_not_lose_the_usage_chunk():
     # stream_options.include_usage sends a final chunk with empty choices.
     body = (b'data: {' + ENVELOPE.encode() +
-              b',"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
+              b',"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
               b'data: {' + ENVELOPE.encode() +
               b',"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,'
               b'"total_tokens":4}}\n\n'
@@ -434,7 +434,7 @@ async def test_the_repeated_envelope_does_not_make_a_reasoning_chunk_useful():
     reasoning_stream = b"".join(
         b'data: {' + ENVELOPE.encode() +
         b',"choices":[{"index":0,"delta":{"content":"' + t + b'"}}]}\n\n'
-        for t in (b"<think>", b"pienso ", b"y pienso", b"</think>"))
+        for t in (b"<think>", b"thinking ", b"and thinking", b"</think>"))
     calls = []
 
     def handler(req):
@@ -497,7 +497,7 @@ async def test_it_warns_when_the_retention_buffer_overflows(caplog):
 #     threshold fires our own probe in the background, and that probe decides. ---
 
 def _ok():
-    return {"choices": [{"message": {"role": "assistant", "content": "hola"}}]}
+    return {"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
 
 
 def _ping(body: bytes) -> bool:
@@ -529,11 +529,11 @@ async def test_n_consecutive_streams_without_useful_content_punish_via_a_probe()
 
 async def test_a_streaming_success_clears_the_accumulated_suspicion():
     from llm_libre.proxy import SUSPICION_THRESHOLD
-    estado = {"n": 0}
+    state = {"n": 0}
 
     def handler(req):
-        estado["n"] += 1
-        if estado["n"] <= SUSPICION_THRESHOLD - 1:
+        state["n"] += 1
+        if state["n"] <= SUSPICION_THRESHOLD - 1:
             return httpx.Response(500)
         return httpx.Response(200, content=_sse("bien"))
 
@@ -612,7 +612,7 @@ async def test_chatgpt_uses_its_own_timeout_from_the_real_yaml_when_streaming():
         return httpx.Response(200, content=_sse("bien"))
 
     chatgpt = next(p for p in load(YAML_REAL, {}) if p.id == "chatgpt")
-    assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
+    assert chatgpt.timeout_s is not None   # if this fails, the YAML lost timeout_s
     store = Storage(":memory:")
     store.create_schema()
     p = Proxy({"chatgpt": chatgpt}, store,
@@ -714,10 +714,10 @@ async def test_a_flood_of_useless_chunks_does_not_punish_a_healthy_route():
 
     routes = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
     p = _proxy(handler)
-    cuerpo_auto = {"model": "auto", "stream": True,
-                  "messages": [{"role": "user", "content": "piensa mucho antes de responder"}]}
+    auto_body = {"model": "auto", "stream": True,
+                  "messages": [{"role": "user", "content": "think hard before answering"}]}
     for i in range(15):
-        [l async for l in p.complete_stream(routes, cuerpo_auto, float(i))]
+        [l async for l in p.complete_stream(routes, auto_body, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns == {}
 

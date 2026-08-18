@@ -40,8 +40,8 @@ def test_the_arithmetic_case_accepts_the_correct_answer():
 def test_the_format_case_penalises_a_reasoning_preamble():
     # nvidia/nemotron answers "Here's a thinking process:..." to a one-word request.
     case = next(c for c in CASES if c.name == "format")
-    assert case.check(_response("hola")) is True
-    assert case.check(_response("Here's a thinking process: ... hola")) is False
+    assert case.check(_response("hi")) is True
+    assert case.check(_response("Here's a thinking process: ... hi")) is False
 
 
 def test_the_json_case_validates_against_the_schema():

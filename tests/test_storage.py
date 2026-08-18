@@ -6,8 +6,8 @@ from llm_libre.storage import Storage
 from llm_libre.models import Capabilities, Route
 
 
-def _route(modelo="a:free", provider="kilo", tools=True, priority=100):
-    return Route(provider, modelo, "free",
+def _route(model="a:free", provider="kilo", tools=True, priority=100):
+    return Route(provider, model, "free",
                 Capabilities(tools=tools, vision=False, context=1000, max_output=100),
                 priority=priority)
 
@@ -28,13 +28,13 @@ def test_it_stores_and_returns_routes(store):
 
 
 def test_a_route_that_disappears_is_deactivated_not_deleted(store):
-    store.upsert_routes([_route("vieja:free"), _route("nueva:free")], timestamp=100.0)
-    store.upsert_routes([_route("nueva:free")], timestamp=200.0)
+    store.upsert_routes([_route("old:free"), _route("new:free")], timestamp=100.0)
+    store.upsert_routes([_route("new:free")], timestamp=200.0)
     active = [r.model_id for r in store.active_routes()]
-    assert active == ["nueva:free"]
+    assert active == ["new:free"]
     # still in the table: the history is what detects renames
     row = store._con.execute(
-        "SELECT active FROM routes WHERE model_id = 'vieja:free'").fetchone()
+        "SELECT active FROM routes WHERE model_id = 'old:free'").fetchone()
     assert row[0] == 0
 
 
@@ -46,12 +46,12 @@ def test_a_route_that_comes_back_is_reactivated(store):
 
 
 def test_it_deactivates_nothing_when_asked_to_keep(store):
-    store.upsert_routes([_route("vieja:free"), _route("nueva:free")], timestamp=100.0)
-    store.upsert_routes([_route("nueva:free")], timestamp=200.0, deactivate_missing=False)
+    store.upsert_routes([_route("old:free"), _route("new:free")], timestamp=100.0)
+    store.upsert_routes([_route("new:free")], timestamp=200.0, deactivate_missing=False)
     active = sorted(r.model_id for r in store.active_routes())
-    assert active == ["nueva:free", "vieja:free"]
+    assert active == ["new:free", "old:free"]
     row = store._con.execute(
-        "SELECT last_seen FROM routes WHERE model_id = 'nueva:free'").fetchone()
+        "SELECT last_seen FROM routes WHERE model_id = 'new:free'").fetchone()
     assert row[0] == 200.0
 
 
@@ -61,11 +61,11 @@ def test_the_provider_scope_limits_removal_to_that_provider(store):
     # not even mentioned in this call -- must survive: without the scope, an
     # UPDATE not filtered by provider would have switched it off too, because its
     # visto_por_ultima_vez is also older than the new `timestamp`.
-    store.upsert_routes([_route("vieja:free", provider="kilo")], timestamp=50.0)
-    store.upsert_routes([_route("vieja:free", provider="otro")], timestamp=50.0)
-    store.upsert_routes([_route("nueva:free", provider="kilo")], timestamp=200.0, provider="kilo")
+    store.upsert_routes([_route("old:free", provider="kilo")], timestamp=50.0)
+    store.upsert_routes([_route("old:free", provider="other")], timestamp=50.0)
+    store.upsert_routes([_route("new:free", provider="kilo")], timestamp=200.0, provider="kilo")
     active = {r.key for r in store.active_routes()}
-    assert active == {"kilo/nueva:free", "otro/vieja:free"}
+    assert active == {"kilo/new:free", "other/old:free"}
 
 
 def test_the_provider_scope_does_not_change_the_default_behaviour(store):
@@ -73,15 +73,15 @@ def test_the_provider_scope_does_not_change_the_default_behaviour(store):
     # scope, it covers the whole table -- exactly what
     # test_a_route_that_disappears_is_deactivated_not_deleted already covers. This
     # test only confirms that passing provider=None explicitly is the same.
-    store.upsert_routes([_route("vieja:free", provider="kilo"),
-                          _route("otra:free", provider="otro")], timestamp=100.0)
-    store.upsert_routes([_route("otra:free", provider="otro")], timestamp=200.0, provider=None)
+    store.upsert_routes([_route("old:free", provider="kilo"),
+                          _route("another:free", provider="other")], timestamp=100.0)
+    store.upsert_routes([_route("another:free", provider="other")], timestamp=200.0, provider=None)
     active = {r.key for r in store.active_routes()}
-    assert active == {"otro/otra:free"}   # kilo/vieja:free is switched off too, as before
+    assert active == {"other/another:free"}   # kilo/old:free is switched off too, as before
 
 
 # --- Removing a provider from providers.yaml (e.g. openrouter) must not
-#     leave its routes at activa=1 forever: sync_catalogue can only remove, via
+#     leave its routes at active=1 forever: sync_catalogue can only remove, via
 #     its scope, what is STILL in the registry -- a provider that disappears
 #     entirely never passes through that loop again. This separate sweep covers
 #     exactly that gap. ---
@@ -211,33 +211,33 @@ CREATE TABLE eventos (
 
 
 def test_it_migrates_an_old_database_without_the_client_error_flag(tmp_path):
-    db_path = str(tmp_path / "vieja_sin_flag.sqlite3")
+    db_path = str(tmp_path / "old_without_flag.sqlite3")
     con = sqlite3.connect(db_path)
     con.executescript(_OLD_SCHEMA_WITHOUT_CLIENT_ERROR_FLAG)
     con.execute(
         """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
                contexto, max_salida, visto_por_ultima_vez, activa, prioridad)
-           VALUES ('kilo/vieja:free','kilo','vieja:free','gratis',1,0,1000,100,50.0,1,100)""")
+           VALUES ('kilo/old:free','kilo','old:free','gratis',1,0,1000,100,50.0,1,100)""")
     con.execute(
         """INSERT INTO eventos (clave, momento, ok, ttft_ms, codigo_http, latencia_ms)
-           VALUES ('kilo/vieja:free', 60.0, 0, 0, 400, 20)""")
+           VALUES ('kilo/old:free', 60.0, 0, 0, 400, 20)""")
     con.commit()
     con.close()
 
     store = Storage(db_path)
-    store.create_schema()   # no debe reventar (ALTER TABLE, no CREATE)
+    store.create_schema()   # must not blow up (ALTER TABLE, not CREATE)
 
     # The old row, written BEFORE es_error_cliente existed, migrates to 0 (the
     # historical behaviour: it DOES count as a failure) -- an event that never
     # distinguished the cause cannot be reclassified retroactively.
     row = store._con.execute(
-        "SELECT is_client_error FROM events WHERE key = 'kilo/vieja:free'").fetchone()
+        "SELECT is_client_error FROM events WHERE key = 'kilo/old:free'").fetchone()
     assert row[0] == 0
 
     # And the migrated database is still writable with the new flag.
-    store.record_event("kilo/vieja:free", False, 0, 400, 70.0, is_client_error=True)
+    store.record_event("kilo/old:free", False, 0, 400, 70.0, is_client_error=True)
     rows = store._con.execute(
-        "SELECT is_client_error FROM events WHERE key = 'kilo/vieja:free' "
+        "SELECT is_client_error FROM events WHERE key = 'kilo/old:free' "
         "ORDER BY at").fetchall()
     assert [f[0] for f in rows] == [0, 1]
 
@@ -368,7 +368,7 @@ def test_it_migrates_an_old_database_with_rows_without_losing_data(tmp_path):
     con.execute(
         """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
                contexto, max_salida, visto_por_ultima_vez, activa)
-           VALUES ('kilo/vieja:free','kilo','vieja:free','gratis',1,0,1000,100,50.0,1)""")
+           VALUES ('kilo/old:free','kilo','old:free','gratis',1,0,1000,100,50.0,1)""")
     con.commit()
     con.close()
 
@@ -378,18 +378,18 @@ def test_it_migrates_an_old_database_with_rows_without_losing_data(tmp_path):
 
     active = store.active_routes()
     assert len(active) == 1
-    assert active[0].key == "kilo/vieja:free"
+    assert active[0].key == "kilo/old:free"
     # The pre-existing row, with no priority at the time it was written,
     # migrates to the default (100), not to NULL nor to an invented value.
     assert active[0].priority == 100
 
     # And the migrated database is still writable: a new sync can declare a
     # priority for that same route or for a new one.
-    store.upsert_routes([_route("vieja:free", provider="kilo", priority=0)], timestamp=200.0)
-    store.upsert_routes([_route("nueva:free", provider="chatgpt", priority=0)],
+    store.upsert_routes([_route("old:free", provider="kilo", priority=0)], timestamp=200.0)
+    store.upsert_routes([_route("new:free", provider="chatgpt", priority=0)],
                          timestamp=200.0, deactivate_missing=False)
     active = {r.key: r.priority for r in store.active_routes()}
-    assert active == {"kilo/vieja:free": 0, "chatgpt/nueva:free": 0}
+    assert active == {"kilo/old:free": 0, "chatgpt/new:free": 0}
 
 
 def test_migrating_an_old_database_is_idempotent(tmp_path):

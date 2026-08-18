@@ -1,21 +1,22 @@
-"""Contenido de documentacion OpenAPI/Swagger para llm-libre (Task 14).
+"""OpenAPI/Swagger documentation content for llm-libre (Task 14).
 
-En INGLES a proposito -- el resto del codigo, sus comentarios y el spec
-quedan en espanol; solo el texto que termina sirviendose en `/docs` y
-`/openapi.json` (el entregable de Task 14) esta en ingles aca.
+This module changes NO runtime behaviour: it only assembles text, examples and
+JSON Schema fragments that `api.create_app` wires in through FastAPI's native
+parameters (`summary`, `description`, `responses`, `openapi_extra`) and through
+`customise_openapi`, which replaces `app.openapi` -- a function that runs only
+when someone asks for `/docs` or `/openapi.json`, never on the path of a real
+request.
 
-Este modulo NO cambia comportamiento de runtime: solo arma texto,
-ejemplos y fragmentos de JSON Schema que `api.create_app` conecta via los
-parametros nativos de FastAPI (`summary`, `description`, `responses`,
-`openapi_extra`) y via `customise_openapi`, que reemplaza `app.openapi`
--- una funcion que solo corre cuando alguien pide `/docs` u
-`/openapi.json`, nunca en el camino de una peticion real. En particular,
-`POST /v1/chat/completions` NO gana un modelo Pydantic: el `requestBody`
-de aca abajo es puramente descriptivo (`openapi_extra`), y el endpoint
-real sigue leyendo `await request.json()` (ver api.completions) para que
-un campo desconocido siga llegando al proveedor tal cual -- ver
-`tests/test_api.py::test_un_campo_desconocido_llega_al_proveedor_tal_cual`
-y `tests/test_cliente.py` para la prueba de que esto sigue intacto.
+In particular, `POST /v1/chat/completions` does NOT gain a Pydantic model: the
+`requestBody` below is purely descriptive (`openapi_extra`), and the real
+endpoint keeps reading `await request.json()` (see api.completions) so that an
+unknown field still reaches the provider verbatim. See
+`tests/test_api.py::test_an_unknown_field_reaches_the_provider_verbatim` and
+`tests/test_client.py` for the proof that this is still intact.
+
+The example bodies below are WIRE FORMAT: they are what a client reads in
+/docs and copies into its own code. When a message string changes in api.py,
+it has to change here too -- there is no test tying them together.
 """
 
 from fastapi.openapi.utils import get_openapi
@@ -445,12 +446,12 @@ stripping entirely.
                  "this gateway checks for (an unrecognized `auto:<suffix>` "
                  "alias, or `model` / `x_requires` / `x_min_context` sent "
                  "with the wrong type -- these three always answer with the "
-                 "same `{message, campo, valor_recibido}` shape)."),
+                 "same `{message, field, received_value}` shape)."),
              "content": {"application/json": {"examples": {
                  "impossible_capability": {
                      "summary": "No route can ever satisfy this combination",
                      "value": {"detail": {
-                         "message": "ninguna ruta cumple lo pedido",
+                         "message": "no route satisfies the request",
                          "request": {"model": None, "needs_tools": False,
                                    "needs_vision": True, "min_context": 0,
                                    "profile": "balanced", "allow_paid": True},
@@ -458,23 +459,23 @@ stripping entirely.
                  "unknown_alias_suffix": {
                      "summary": "'auto:<typo>' -- not silently treated as plain 'auto'",
                      "value": {"detail": {
-                         "message": "alias de modelo desconocido: 'auto:tolls'",
+                         "message": "unknown model alias: 'auto:tolls'",
                          "suggestions": ["auto", "auto:fast", "auto:strong",
                                         "auto:tools", "auto:vision"]}}},
                  "invalid_x_min_context": {
                      "summary": "x_min_context is not a number",
                      "value": {"detail": {
-                         "message": "x_min_context debe ser un numero entero",
-                         "field": "x_min_context", "received_value": "cien mil"}}},
+                         "message": "x_min_context must be an integer",
+                         "field": "x_min_context", "received_value": "a hundred thousand"}}},
                  "invalid_x_requires": {
                      "summary": "x_requires is neither a string nor a list of strings",
                      "value": {"detail": {
-                         "message": "x_requires debe ser un string o una lista de strings",
+                         "message": "x_requires must be a string or a list of strings",
                          "field": "x_requires", "received_value": 5}}},
                  "invalid_model_type": {
                      "summary": "model is not a string",
                      "value": {"detail": {
-                         "message": "model debe ser un string",
+                         "message": "model must be a string",
                          "field": "model", "received_value": 5}}},
              }}}},
         401: {"description": "Missing or invalid API key.",
@@ -484,7 +485,7 @@ stripping entirely.
                             "in the local catalog) because the provider itself "
                             "just returned a live 404 for it.",
              "content": {"application/json": {"example": {"detail": {
-                 "message": "el modelo 'poolside/laguna-m.1:free' ya no existe",
+                 "message": "the model 'poolside/laguna-m.1:free' no longer exists",
                  "suggestions": ["poolside/laguna-s-2.1:free", "poolside/laguna-xs-2.1:free"],
              }}}}},
         429: {"description": "Per-key rate limit exceeded.",

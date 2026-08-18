@@ -24,7 +24,7 @@ def sort_key(r: Route, m: Metrics, profile: str,
     """The ordering key `(in-cooldown, tier == "paid", priority, unmeasured,
     -score)`, factored out so that ANY place wanting to show "the router's real
     order" (today, /v1/ranking) uses the SAME logic instead of inventing its own
-    -- /v1/ranking used to sort by score alone, without `prioridad`, and could
+    -- /v1/ranking used to sort by score alone, without `priority`, and could
     show one route at the top while `X-Ruta-Usada` said something else. See the
     docstring of `order_routes` for why each position is where it is.
 
@@ -53,11 +53,11 @@ def order_routes(routes: list[Route], metrics: dict[str, Metrics], request: Rout
     An INVARIANT nothing below may break: PAID routes always go last, regardless
     of their `priority` or their score. That is why `tier == "paid"` is the
     FIRST criterion of the tuple (False < True orders free before paid) and
-    `prioridad` -- an entirely separate concept, see Ruta.priority -- only comes
-    after: a paid route with `prioridad: 0` cannot buy a place ahead of free
+    `priority` -- an entirely separate concept, see Route.priority -- only comes
+    after: a paid route with `priority: 0` cannot buy a place ahead of free
     ones. Money is the reason.
 
-    Within the same tier, `prioridad` (lower first) decides before the score: it
+    Within the same tier, `priority` (lower first) decides before the score: it
     is the manual order declared in the YAML (e.g. an in-house provider before
     third-party ones). At equal priority, the criterion that predates this change
     stays intact: a route never probed by the quality battery

@@ -59,7 +59,7 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     remove, via its scope, what is STILL in the registry; a provider taken out of
     the YAML (e.g. `openrouter` with no `OPENROUTER_API_KEY`, whose routes all
     ended up in cooldown from 401s) never passes through that loop again, so
-    without the sweep its routes would stay `activa=1` forever: visible in
+    without the sweep its routes would stay `active=1` forever: visible in
     `GET /v1/models` and `GET /v1/ranking`, and eligible as candidates that would
     always fail.
     """

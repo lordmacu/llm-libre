@@ -63,7 +63,7 @@ async def test_chatgpt_proxy_answers_a_real_chat_when_configured():
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(chatgpt.base_url.rstrip("/") + "/chat/completions",
                          json={"model": model_id,
-                               "messages": [{"role": "user", "content": "di hola"}]})
+                               "messages": [{"role": "user", "content": "say hi"}]})
     assert r.status_code == 200, f"chatgpt-proxy stopped answering anonymous chat ({model_id})"
     data = r.json()
     content = data["choices"][0]["message"]["content"]

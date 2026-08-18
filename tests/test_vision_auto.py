@@ -14,7 +14,7 @@ def r(model, vision, provider="kilo"):
 
 
 def test_plain_text_does_not_require_vision():
-    assert _has_image({"messages": [{"role": "user", "content": "hola"}]}) is False
+    assert _has_image({"messages": [{"role": "user", "content": "hi"}]}) is False
 
 
 def test_an_image_url_part_requires_vision():
@@ -35,7 +35,7 @@ def test_an_image_in_an_older_turn_counts_as_well():
 
 
 def test_a_malformed_body_does_not_blow_up():
-    for c in ({}, {"messages": "hola"}, {"messages": [None, 3]},
+    for c in ({}, {"messages": "hi"}, {"messages": [None, 3]},
               {"messages": [{"content": [None, "x"]}]}, {"messages": None}):
         assert _has_image(c) is False
 
@@ -51,7 +51,7 @@ def test_an_image_rules_out_the_routes_without_vision():
 def test_without_an_image_the_blind_routes_still_serve():
     routes = [r("ciego", vision=False), r("ve", vision=True)]
     request = parse_request({"model": "auto",
-                             "messages": [{"role": "user", "content": "hola"}]})
+                             "messages": [{"role": "user", "content": "hi"}]})
     assert request.needs_vision is False
     assert len(order_routes(routes, {}, request, 0.0)) == 2
 

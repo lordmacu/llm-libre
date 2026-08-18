@@ -15,7 +15,7 @@ class Provider:
 
     NOTE ON NAMES: these fields may be renamed freely, but the YAML KEYS they are
     read from may not -- `load` below reads them as string literals, and
-    tests/test_wire_contract.py freezes them. `prioridad` is the one field kept
+    tests/test_wire_contract.py freezes them. `priority` is the one field kept
     in Spanish for now: `Ruta.priority` shares the name, and the two are renamed
     together when modelos.py is migrated.
     """

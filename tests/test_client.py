@@ -44,7 +44,7 @@ def test_the_body_is_a_shallow_copy_and_does_not_mutate_the_original():
     nested structures (such as 'messages') are shared with the original on
     purpose and stay immutable during failover.
     """
-    messages = [{"role": "user", "content": "hola"}]
+    messages = [{"role": "user", "content": "hi"}]
     original = {"model": "auto", "messages": messages}
     url, headers, returned = build_request(_prov(), original, real_model="real")
 

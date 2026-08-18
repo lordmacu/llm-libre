@@ -30,10 +30,10 @@ def test_routes_with_insufficient_context_are_dropped():
 
 
 def test_it_orders_by_descending_score():
-    routes = [r("malo:free"), r("bueno:free")]
-    metrics = {"kilo/malo:free": m(quality=0.3), "kilo/bueno:free": m(quality=0.95)}
+    routes = [r("bad:free"), r("good:free")]
+    metrics = {"kilo/bad:free": m(quality=0.3), "kilo/good:free": m(quality=0.95)}
     out = order_routes(routes, metrics, RouteRequest(), now=0.0)
-    assert [x.model_id for x in out] == ["bueno:free", "malo:free"]
+    assert [x.model_id for x in out] == ["good:free", "bad:free"]
 
 
 def test_paid_routes_always_go_last_even_when_they_score_better():
@@ -61,7 +61,7 @@ def test_it_excludes_routes_in_cooldown_but_not_expired_ones():
 def test_an_explicit_model_filters_but_keeps_both_providers():
     routes = [r("comun:free", provider="kilo"),
               r("comun:free", provider="openrouter"),
-              r("otro:free", provider="kilo")]
+              r("other:free", provider="kilo")]
     out = order_routes(routes, {}, RouteRequest(model="comun:free"), now=0.0)
     assert len(out) == 2
     assert {x.provider for x in out} == {"kilo", "openrouter"}
@@ -75,7 +75,7 @@ def test_no_candidates_returns_an_empty_list():
 
 def test_a_route_without_metrics_uses_the_neutral_ones_not_zeros():
     # kilo/conocida:free scores 0.3*0.5*latency_factor(1500) = 0.075 on balanced.
-    # kilo/nueva:free (no metrics) scores with NEUTRAL_METRICS (0.6, 0.8, 1500):
+    # kilo/new:free (no metrics) scores with NEUTRAL_METRICS (0.6, 0.8, 1500):
     # 0.6*0.8*latency_factor(1500) = 0.24, so it beats the known one and comes first.
     # If the fallback were Metrics(0,0,0,0) it would score 0 and land LAST: the
     # order would invert and this assert would fail, which is exactly what this
@@ -85,11 +85,11 @@ def test_a_route_without_metrics_uses_the_neutral_ones_not_zeros():
     # routes end up equally "unmeasured" so that what decides the order is the
     # score, which is the only thing this test wants to protect. The
     # measured-before-assumed criterion has its own tests, below.
-    routes = [r("conocida:free"), r("nueva:free")]
+    routes = [r("conocida:free"), r("new:free")]
     metrics = {"kilo/conocida:free": m(quality=0.3, reliability=0.5, ttft=1500,
                                        measured_at=None)}
     out = order_routes(routes, metrics, RouteRequest(), now=0.0)
-    assert [x.model_id for x in out] == ["nueva:free", "conocida:free"]
+    assert [x.model_id for x in out] == ["new:free", "conocida:free"]
 
 
 # --- Fix round 3, B2 (Blocking), half (b): a route that never went through the
@@ -99,23 +99,23 @@ def test_a_route_without_metrics_uses_the_neutral_ones_not_zeros():
 #     to 25h. It has to stay reachable, though, or it would never be measured. ---
 
 def test_a_never_probed_route_goes_after_one_with_measured_quality():
-    routes = [r("nueva:free"), r("medida:free")]
+    routes = [r("new:free"), r("measured:free")]
     metrics = {
         # The measured one scores WORSE on balanced (0.35*0.9*f(500) = 0.24) than
         # the new one with the neutrals (0.6*0.9*f(200) = 0.48): if the order were
         # by score alone, the new one would win. It must lose anyway.
-        "kilo/medida:free": m(quality=0.35, ttft=500, measured_at=1000.0),
-        "kilo/nueva:free": m(quality=0.6, ttft=200, measured_at=None),
+        "kilo/measured:free": m(quality=0.35, ttft=500, measured_at=1000.0),
+        "kilo/new:free": m(quality=0.6, ttft=200, measured_at=None),
     }
     out = order_routes(routes, metrics, RouteRequest(), now=0.0)
-    assert [x.model_id for x in out] == ["medida:free", "nueva:free"]
+    assert [x.model_id for x in out] == ["measured:free", "new:free"]
 
 
 def test_a_never_probed_route_stays_in_the_chain_so_it_can_be_measured():
-    routes = [r("nueva:free"), r("medida:free")]
-    metrics = {"kilo/medida:free": m(quality=0.9, measured_at=1000.0)}
+    routes = [r("new:free"), r("measured:free")]
+    metrics = {"kilo/measured:free": m(quality=0.9, measured_at=1000.0)}
     out = order_routes(routes, metrics, RouteRequest(), now=0.0)
-    assert "nueva:free" in [x.model_id for x in out]
+    assert "new:free" in [x.model_id for x in out]
 
 
 def test_between_two_never_probed_routes_the_score_still_decides():
@@ -233,7 +233,7 @@ def test_a_request_without_tools_prefers_chatgpt_for_its_priority():
 
 def test_a_hand_picked_chatgpt_id_still_routes_straight_through():
     chatgpt = _rp("gpt-5-3-mini", 0, provider="chatgpt", tools=False)
-    kilo = _rp("otro:free", 1)
+    kilo = _rp("other:free", 1)
     out = order_routes([chatgpt, kilo], {}, RouteRequest(model="gpt-5-3-mini"), now=0.0)
     assert [x.model_id for x in out] == ["gpt-5-3-mini"]
 

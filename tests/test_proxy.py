@@ -16,7 +16,7 @@ from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAX_S,
 
 YAML_REAL = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
-BODY = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
+BODY = {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}
 
 
 def _route(model, provider="kilo", tier="free"):
@@ -28,16 +28,16 @@ def _prov(pid="kilo", tier="free", unwraps_canvas=False):
                      unwraps_canvas=unwraps_canvas)
 
 
-def _ok(contenido="hola"):
+def _ok(contenido="hi"):
     return {"choices": [{"message": {"role": "assistant", "content": contenido}}]}
 
 
 def _proxy(handler, providers=("kilo",), canvas=frozenset()):
     store = Storage(":memory:")
     store.create_schema()
-    cliente = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     return Proxy({p: _prov(p, unwraps_canvas=p in canvas) for p in providers},
-                 store, cliente)
+                 store, client)
 
 
 async def test_it_returns_the_first_route_that_answers():
@@ -132,20 +132,20 @@ async def test_no_routes_returns_a_503_without_trying():
 
 
 async def test_it_trims_the_reasoning_from_the_response():
-    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>mmm</think>hola")))
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>mmm</think>hi")))
     r = await p.complete([_route("a:free")], BODY, now=0.0)
-    assert r.json["choices"][0]["message"]["content"] == "hola"
+    assert r.json["choices"][0]["message"]["content"] == "hi"
     assert r.reasoning == "mmm"
 
 
 async def test_it_unwraps_the_canvas_fence_on_the_non_streaming_path():
     # Only a provider declaring unwraps_canvas=True (chatgpt-proxy) unwraps it --
     # see finding 1 of the review, below.
-    fence = (':::writing{title="x"}\nhola\n:::')
+    fence = (':::writing{title="x"}\nhi\n:::')
     p = _proxy(lambda req: httpx.Response(200, json=_ok(fence)),
               providers=("chatgpt",), canvas={"chatgpt"})
     r = await p.complete([_route("a:free", provider="chatgpt")], BODY, now=0.0)
-    assert r.json["choices"][0]["message"]["content"] == "hola\n"
+    assert r.json["choices"][0]["message"]["content"] == "hi\n"
 
 
 # --- Finding 1 of the Task 13 review: canvas unwrapping was GLOBAL, but
@@ -155,16 +155,16 @@ async def test_it_unwraps_the_canvas_fence_on_the_non_streaming_path():
 #     those markers intact. ---
 
 async def test_a_provider_without_canvas_unwrapping_leaves_docusaurus_markers_alone():
-    nota = ":::note\nGuarda el token en el .env.\n:::"
-    p = _proxy(lambda req: httpx.Response(200, json=_ok(nota)))   # kilo, sin canvas={}
+    note = ":::note\nGuarda el token en el .env.\n:::"
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(note)))   # kilo, sin canvas={}
     r = await p.complete([_route("a:free")], BODY, now=0.0)
-    assert r.json["choices"][0]["message"]["content"] == nota
+    assert r.json["choices"][0]["message"]["content"] == note
 
 
 async def test_raw_mode_does_not_touch_the_content():
-    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>mmm</think>hola")))
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>mmm</think>hi")))
     r = await p.complete([_route("a:free")], BODY, now=0.0, raw=True)
-    assert r.json["choices"][0]["message"]["content"] == "<think>mmm</think>hola"
+    assert r.json["choices"][0]["message"]["content"] == "<think>mmm</think>hi"
     assert r.reasoning == ""
 
 
@@ -282,17 +282,17 @@ async def test_a_200_with_only_tool_calls_is_still_a_success():
 async def test_a_200_that_is_all_reasoning_does_not_count_as_a_success():
     # What the client sees is what decides: if nothing is left after trimming the
     # <think>, the route answered nothing.
-    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>pienso y pienso</think>")))
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>thinking and thinking</think>")))
     r = await p.complete([_route("a:free")], BODY, now=0.0)
     assert r.status == 503
 
 
 async def test_in_raw_mode_a_pure_reasoning_200_is_still_a_success():
     # With x_raw the client asked for the content verbatim: there IS an answer there.
-    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>pienso</think>")))
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>thinking</think>")))
     r = await p.complete([_route("a:free")], BODY, now=0.0, raw=True)
     assert r.status == 200
-    assert r.json["choices"][0]["message"]["content"] == "<think>pienso</think>"
+    assert r.json["choices"][0]["message"]["content"] == "<think>thinking</think>"
 
 
 async def test_next_release_excludes_cooldowns_from_another_request():
@@ -362,7 +362,7 @@ async def test_a_200_with_non_object_json_moves_to_the_next_route():
     def handler(req):
         calls.append(req.url)
         if len(calls) == 1:
-            return httpx.Response(200, json=["esto no es una respuesta"])
+            return httpx.Response(200, json=["this is not a response"])
         return httpx.Response(200, json=_ok())
 
     p = _proxy(handler)
@@ -791,14 +791,14 @@ async def test_an_identical_failure_in_a_single_route_chain_does_not_punish_a_he
     assert p.cooldowns == {}
 
 
-@pytest.mark.parametrize("armar_handler", [
+@pytest.mark.parametrize("build_handler", [
     lambda: (lambda req: httpx.Response(200, json=_ok()) if _ping(req.content)
              else httpx.Response(451, json={"error": "no disponible por razones legales"})),
     lambda: (lambda req: httpx.Response(200, json=_ok()) if _ping(req.content)
              else httpx.Response(200, json=_ok(contenido=None))),
 ])
-async def test_more_identical_failure_vectors_in_a_single_route_chain_do_not_punish(armar_handler):
-    p = _proxy(armar_handler())
+async def test_more_identical_failure_vectors_in_a_single_route_chain_do_not_punish(build_handler):
+    p = _proxy(build_handler())
     for i in range(15):
         await p.complete(_multi("a:free"), BODY, now=float(i))
     await p.wait_for_pending_probes()
@@ -975,7 +975,7 @@ async def test_a_success_resets_the_suspicion_counter_not_a_clock():
     await p.complete([_route("a:free")], BODY, now=3.0)
     await p.complete([_route("a:free")], BODY, now=4.0)
     await p.wait_for_pending_probes()
-    assert "kilo/a:free" not in p.cooldowns  # solo dos failures NUEVOS, no alcanza
+    assert "kilo/a:free" not in p.cooldowns  # only two NEW failures: not enough
 
 
 # --- Round 9, HIGH 4 from the gate: round 8 excluded paid routes from the entire
@@ -1096,7 +1096,7 @@ async def test_a_successful_probe_does_not_erase_a_429_newer_than_itself():
     p = _proxy(handler)
     for i in range(SUSPICION_THRESHOLD):
         await p.complete([_route("a:free")], BODY, now=float(i))
-    await probe_in_flight.wait()  # la sonda arranco y quedo congelada en vuelo
+    await probe_in_flight.wait()  # the probe started and is frozen mid-flight
 
     # Meanwhile a REAL 429 arrives through normal traffic -- newer than the probe
     # that has not finished yet.

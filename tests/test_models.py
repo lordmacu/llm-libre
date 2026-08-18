@@ -8,7 +8,7 @@ def test_a_routes_key_joins_provider_and_model():
 
 
 def test_a_route_without_a_declared_priority_lands_last_by_default():
-    r = Route("kilo", "modelo:free", "free",
+    r = Route("kilo", "model:free", "free",
               Capabilities(tools=True, vision=False, context=1000, max_output=100))
     assert r.priority == 100
 

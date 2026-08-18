@@ -453,10 +453,10 @@ def test_inject_still_converts_tool_messages_when_no_callable_tools():
 
 def test_inject_forwards_non_dict_messages_untouched():
     """Rejecting a malformed message is the provider's call, not ours."""
-    body = {"model": "m", "messages": ["hola", {"role": "user", "content": "hi"}],
+    body = {"model": "m", "messages": ["hi", {"role": "user", "content": "hi"}],
             "tools": [WEATHER_TOOL]}
     result = inject_into_body(body)
-    assert "hola" in result["messages"]
+    assert "hi" in result["messages"]
 
 
 # --- tool_choice: "none" is a guarantee, not a request ---

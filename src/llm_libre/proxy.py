@@ -429,7 +429,7 @@ class Proxy:
                     data = resp.json()
                 except ValueError:
                     data = None
-                    last_error = "200 con body no-JSON"
+                    last_error = "200 with a non-JSON body"
                 else:
                     # Valid JSON that is not an object (e.g. a list): `_clean`
                     # below does data.get(...) and would blow up with an
@@ -438,7 +438,7 @@ class Proxy:
                     # a non-JSON body, and BEFORE touching `data`.
                     if not isinstance(data, dict):
                         data = None
-                        last_error = "200 con body JSON que no es un objeto"
+                        last_error = "200 with a JSON body that is not an object"
 
             # Same place and same treatment as the guard above: a 200 that carries
             # no answer inside is not a success either. Trimming the reasoning
@@ -451,7 +451,7 @@ class Proxy:
                 reasoning_text = "" if raw else self._clean(data, provider.unwraps_canvas)
                 if not has_answer(data):
                     data = None
-                    last_error = "200 sin content ni tool_calls"
+                    last_error = "200 with neither content nor tool_calls"
 
             success = code == 200 and data is not None
             self.store.record_event(route.key, success, 0, code, now,
@@ -859,7 +859,7 @@ class Proxy:
         if segundos is not None and math.isfinite(segundos) and segundos >= 0:
             return segundos
         if segundos is not None:
-            return None  # negativo o no-finito: como si no hubiera Retry-After
+            return None  # negative or non-finite: as if there were no Retry-After
         try:
             from email.utils import parsedate_to_datetime
             fecha = parsedate_to_datetime(valor)

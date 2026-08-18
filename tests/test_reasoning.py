@@ -3,28 +3,28 @@ from llm_libre.reasoning import (CanvasFenceTrimmer, CompositeStreamTrimmer,
 
 
 def test_trims_a_complete_block():
-    clean, reasoning = trim("<think>pienso mucho</think>hola")
-    assert clean == "hola"
-    assert reasoning == "pienso mucho"
+    clean, reasoning = trim("<think>thinking hard</think>hi")
+    assert clean == "hi"
+    assert reasoning == "thinking hard"
 
 
 def test_text_without_tags_passes_through_untouched():
-    assert trim("hola mundo") == ("hola mundo", "")
+    assert trim("hello world") == ("hello world", "")
 
 
 def test_accepts_all_three_tag_spellings():
     for open_tag, close_tag in (("<think>", "</think>"),
                                 ("<thinking>", "</thinking>"),
                                 ("<reasoning>", "</reasoning>")):
-        assert trim(f"{open_tag}x{close_tag}listo")[0] == "listo"
+        assert trim(f"{open_tag}x{close_tag}done")[0] == "done"
 
 
 def test_a_tag_that_never_closes_swallows_no_useful_text():
     # Everything after it is reasoning; the client gets what came before,
     # neither empty nor hanging.
-    clean, reasoning = trim("antes<think>y nunca cierro")
-    assert clean == "antes"
-    assert reasoning == "y nunca cierro"
+    clean, reasoning = trim("before<think>and I never close")
+    assert clean == "before"
+    assert reasoning == "and I never close"
 
 
 def test_several_blocks_in_one_response():
@@ -34,13 +34,13 @@ def test_several_blocks_in_one_response():
 
 
 def test_streaming_with_the_tag_split_at_every_possible_position():
-    text = "hola<think>secreto</think>chau"
-    expected = "holachau"
+    text = "hi<think>secret</think>bye"
+    expected = "hibye"
     for cut in range(1, len(text)):
         trimmer = ReasoningTrimmer()
         out = trimmer.feed(text[:cut]) + trimmer.feed(text[cut:]) + trimmer.close()
         assert out == expected, f"failed cutting at {cut}"
-        assert trimmer.reasoning == "secreto", f"failed cutting at {cut}"
+        assert trimmer.reasoning == "secret", f"failed cutting at {cut}"
 
 
 def test_streaming_character_by_character():
@@ -54,12 +54,12 @@ def test_streaming_character_by_character():
 def test_streaming_holds_back_nothing_that_cannot_be_a_tag():
     # Emit as early as possible: only a possible tag prefix is held back.
     trimmer = ReasoningTrimmer()
-    assert trimmer.feed("hola mundo") == "hola mundo"
+    assert trimmer.feed("hello world") == "hello world"
 
 
 def test_streaming_holds_an_ambiguous_prefix_until_resolved():
     trimmer = ReasoningTrimmer()
-    assert trimmer.feed("hola<thi") == "hola"
+    assert trimmer.feed("hi<thi") == "hi"
     assert trimmer.feed("nk>oculto</think>fin") == "fin"
     assert trimmer.reasoning == "oculto"
 
@@ -88,9 +88,9 @@ def test_strips_the_canvas_fence_keeping_the_content():
 def test_trim_unwraps_the_fence_only_when_the_caller_asks():
     # trim() (the entry point of the non-streaming path) must do both things
     # when unwrap_canvas=True: keep trimming <think> AND unwrap the canvas fence.
-    clean, reasoning = trim("<think>pienso</think>" + _FENCE, unwrap_canvas=True)
+    clean, reasoning = trim("<think>thinking</think>" + _FENCE, unwrap_canvas=True)
     assert clean == _CONTENT
-    assert reasoning == "pienso"
+    assert reasoning == "thinking"
 
 
 def test_a_bare_canvas_fence_ends_up_free_of_markers():
@@ -102,28 +102,28 @@ def test_a_bare_canvas_fence_ends_up_free_of_markers():
 def test_trim_leaves_fences_alone_by_default():
     # The default (unwrap_canvas=False) is deliberate: ':::nota{...}' is also
     # standard Docusaurus/MDX syntax. A provider that does not declare
-    # desenvuelve_canvas (Kilo, OpenRouter) must not lose those markers --
+    # unwraps_canvas (Kilo, OpenRouter) must not lose those markers --
     # <think> IS still always trimmed, which is orthogonal.
-    clean, reasoning = trim("<think>pienso</think>" + _FENCE)
+    clean, reasoning = trim("<think>thinking</think>" + _FENCE)
     assert clean == _FENCE
-    assert reasoning == "pienso"
+    assert reasoning == "thinking"
 
 
 def test_ordinary_content_without_a_fence_is_untouched():
-    assert strip_canvas_fences("hola mundo, todo normal.") == "hola mundo, todo normal."
+    assert strip_canvas_fences("hello world, all normal.") == "hello world, all normal."
 
 
 def test_triple_colon_that_is_not_a_fence_is_untouched():
     # ':::' appears but NOT at the start of a line as a real marker: not a
     # single character may be touched.
-    text = "el separador de esta plantilla es ::: en este formato, nada mas."
+    text = "this template's separator is ::: in that format, nothing else."
     assert strip_canvas_fences(text) == text
 
 
 def test_triple_colon_at_line_start_without_a_word_is_not_an_opening():
     # ':::' followed by a space (not by a word) does not satisfy the opening
     # syntax: it is preserved verbatim.
-    text = "::: esto no es una cerca\nsegunda linea"
+    text = "::: this is not a fence\nsecond line"
     assert strip_canvas_fences(text) == text
 
 
@@ -131,8 +131,8 @@ def test_a_fence_that_never_closes_loses_no_content():
     # Unlike an unclosed <think> (which swallows everything as reasoning), an
     # unclosed canvas fence discards nothing: only the opening marker, already
     # identified with certainty, is removed.
-    text = ':::writing{title="x"}\nhola\nmundo sin cerrar'
-    assert strip_canvas_fences(text) == "hola\nmundo sin cerrar"
+    text = ':::writing{title="x"}\nhi\nworld never closed'
+    assert strip_canvas_fences(text) == "hi\nworld never closed"
 
 
 def test_streaming_with_the_fence_split_at_every_possible_position():
@@ -149,7 +149,7 @@ def test_streaming_the_fence_character_by_character():
 
 
 def test_streaming_embedded_triple_colon_is_untouched():
-    text = "el separador es ::: y sigue el texto normal despues de eso."
+    text = "the separator is ::: and normal text follows after it."
     for cut in range(1, len(text)):
         trimmer = CanvasFenceTrimmer()
         out = trimmer.feed(text[:cut]) + trimmer.feed(text[cut:]) + trimmer.close()
@@ -157,8 +157,8 @@ def test_streaming_embedded_triple_colon_is_untouched():
 
 
 def test_streaming_a_fence_that_never_closes_loses_no_content():
-    text = ':::writing{title="x"}\nhola\nmundo sin cerrar'
-    expected = "hola\nmundo sin cerrar"
+    text = ':::writing{title="x"}\nhi\nworld never closed'
+    expected = "hi\nworld never closed"
     for cut in range(1, len(text)):
         trimmer = CanvasFenceTrimmer()
         out = trimmer.feed(text[:cut]) + trimmer.feed(text[cut:]) + trimmer.close()
@@ -193,26 +193,26 @@ def test_without_line_start_tracking_answer_text_would_be_lost():
 
 
 def test_the_opening_pattern_requires_the_whole_line_to_be_the_marker():
-    # ":::nota" is a valid prefix, but "esto no es cerca" ruins the rest of the
+    # ":::nota" is a valid prefix, but "this is not a fence" ruins the rest of the
     # line: the opening marker requires the ENTIRE LINE, not a prefix. If the
     # pattern were loosened (e.g. stopped anchoring the end), this line would be
     # swallowed whole instead of preserved.
-    text = ":::nota esto no es cerca\nsegunda linea\n"
+    text = ":::nota this is not a fence\nsecond line\n"
     assert strip_canvas_fences(text) == text
 
 
 def test_the_closing_pattern_requires_the_exact_line_not_any_triple_colon():
-    # A ':::otro' line INSIDE an open fence is not the close -- the close is
+    # A ':::other' line INSIDE an open fence is not the close -- the close is
     # EXACTLY ':::' alone. If the closing pattern were loosened (e.g. accepted
-    # any line starting with ':::'), this fence would be cut short and "resto
+    # any line starting with ':::'), this fence would be cut short and "the real rest
     # real" would end up OUTSIDE, treated as if it had never been inside (and
     # here it would also be lost, left as an invalid opening line).
     text = (':::writing{title="x"}\n'
-            'primera linea\n'
-            ':::otro\n'
-            'resto real\n'
+            'first line\n'
+            ':::other\n'
+            'the real rest\n'
             ':::')
-    expected = 'primera linea\n:::otro\nresto real\n'
+    expected = 'first line\n:::other\nthe real rest\n'
     assert strip_canvas_fences(text) == expected
 
 

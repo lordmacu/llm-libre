@@ -61,7 +61,7 @@ _DISCARD = re.compile("|".join(_SPECIALITY + _META_ROUTER), re.IGNORECASE)
 # INFO from the round 6 review: the literal "auto" is not enough. `ALIAS` in
 # api.py (and `parse_request`) also treats as a reserved alias ANY id of the
 # form "auto:<suffix>" -- "auto:fast", "auto:strong", "auto:tools",
-# "auto:vision" -- resolving it ALWAYS before comparing against `pedido.model`.
+# "auto:vision" -- resolving it ALWAYS before comparing against `request.model`.
 # A provider publishing a real model under one of those ids (or any other
 # "auto:*" api.py adds tomorrow) created a permanently unreachable route, by
 # exactly the mechanism that already justified reserving "auto". That is why
@@ -119,7 +119,7 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
     routes: list[Route] = []
     for m in items:
         # An entry with no `id` (or that is not even a dict) used to blow up with
-        # KeyError/AttributeError; sondeo.py swallowed it and that provider's
+        # KeyError/AttributeError; probing.py swallowed it and that provider's
         # ENTIRE catalogue froze forever, without a single log line saying so.
         # The broken entry is skipped and the fact is recorded.
         if not isinstance(m, dict):
