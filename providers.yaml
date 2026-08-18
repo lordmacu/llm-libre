@@ -16,18 +16,18 @@
 # primero (nunca mezclar los dos). Default 100 si no se declara. NO rompe el
 # invariante de que las rutas de pago van siempre al final: eso lo decide
 # `tier`, no `prioridad` (ver router.ordenar).
-proveedores:
+providers:
   - id: chatgpt
     tier: free          # no cuesta plata: NO consume el tope de pago
-    prioridad: 0           # antes que todo lo demas
-    dialecto: openai
+    priority: 0           # antes que todo lo demas
+    dialect: openai
     base_url_env: CHATGPT_PROXY_URL   # la URL real se define en el entorno;
     base_url: http://127.0.0.1:8888/v1   # default si la variable no esta.
     # OJO con el /v1: las rutas reales del proxy son /v1/chat/completions y
     # /v1/models (no /chat/completions a secas, como Kilo/OpenRouter) -- sin
     # el /v1 en base_url, cliente.armar_peticion arma una URL de chat
     # invalida. Mismo patron que minimax (base_url: .../v1).
-    modelos_path: /models
+    models_path: /models
     # Task 14: ningun proveedor declaraba timeout_s, asi que un chatgpt-proxy
     # colgado costaba hasta TIMEOUT_S=90s completo POR INTENTO -- y chatgpt
     # tiene prioridad:0, asi que es la PRIMERA ruta que prueba CADA pedido
@@ -46,7 +46,7 @@ proveedores:
     # responde en el rango tipico, no en el peor caso de una generacion
     # completa. No se toca el timeout de ningun otro proveedor.
     timeout_s: 45
-    desenvuelve_canvas: true   # ver el hallazgo 1 de la revision en catalogo.py/razonamiento.py:
+    unwraps_canvas: true   # ver el hallazgo 1 de la revision en catalogo.py/razonamiento.py:
                                 # es el UNICO proveedor que de verdad filtra el modo canvas al
                                 # content -- ':::nota{...}' tambien es sintaxis Docusaurus/MDX
                                 # legitima, y aplicarla a ciegas le arranca las marcas a Kilo/
@@ -67,7 +67,7 @@ proveedores:
     # prose to agentic clients that were waiting for a structured call. That is
     # exactly the silent failure that declaring tools:false exists to prevent --
     # a 500 fails honestly and triggers failover, prose does not.
-    capacidades_por_defecto:
+    default_capabilities:
       # Its /v1/models IS dynamic but never carries capability metadata, so
       # capabilities are declared once here and catalogo.normalizar applies them
       # to every discovered id.
@@ -82,8 +82,8 @@ proveedores:
       # the only barrier keeping tool-calling traffic away from this provider.
       tools: false
       vision: false
-      contexto: 128000
-      max_salida: 8192
+      context: 128000
+      max_output: 8192
     # Los alias legacy (gpt-4o, gpt-4o-mini, gpt-4, gpt-3.5-turbo) y el id
     # "auto" que el propio /v1/models expone NO se filtran aca: se
     # autoidentifican (description empieza con "Alias →") o son un id
@@ -96,8 +96,8 @@ proveedores:
     # Misma prioridad que kilo A PROPOSITO: no hay evidencia de que sea mejor ni
     # peor, asi que decide el ranking medido, que es para lo que existe. La
     # prioridad es preferencia manual, no una corazonada.
-    prioridad: 1
-    dialecto: openai
+    priority: 1
+    dialect: openai
     base_url_env: PERPLEXITY_PROXY_URL
     base_url: http://127.0.0.1:8891/v1   # default; el /v1 es obligatorio (ver chatgpt)
     # Su /v1/models publica 124 modelos (gpt5, claude46sonnet, grok4, gemini31pro...)
@@ -110,15 +110,15 @@ proveedores:
     # on 2026-08-18, same as chatgpt (see the long note there for why claiming a
     # capability this provider does not have is worse than admitting it lacks
     # one). Only deepseek passed that test.
-    modelos_fijos:
+    fixed_models:
       # tools:false verified natively AND through emulation -- neither works.
       # vision:false: no soporta imagenes de entrada.
       # contexto: piso conservador, el proxy ignora max_tokens de todas formas.
       - id: turbo
         tools: false
         vision: false
-        contexto: 32000
-        max_salida: 4096
+        context: 32000
+        max_output: 4096
     # Latencia medida (2026-08-17): 1.85-2.47s, mas rapido que chatgpt-proxy
     # (3.5-4.4s). Aun asi 45s de techo, como chatgpt: acota un cuelgue sin
     # cortar una generacion larga legitima.
@@ -127,28 +127,28 @@ proveedores:
   - id: deepseek
     tier: free
     # Misma prioridad que kilo y perplexity: que decida el ranking medido.
-    prioridad: 1
-    dialecto: openai
+    priority: 1
+    dialect: openai
     base_url_env: DEEPSEEK_PROXY_URL
     base_url: http://127.0.0.1:8892/v1
     # Modelos declarados: su /v1/models es una lista fija de tres, sin metadatos.
     # A diferencia de perplexity, aca los modelos SI difieren de verdad --
     # verificado el 2026-08-17: deepseek-chat acerto la trampa del bate y la
     # pelota (0.05) y el reasoner razona antes de responder.
-    modelos_fijos:
+    fixed_models:
       # tools:false verificado: manda las tools sin reventar pero nunca devuelve
       # tool_calls, contesta en prosa -- mas peligroso que un 500, porque un
       # cliente agentico recibiria texto donde espera una llamada estructurada.
       - id: deepseek-chat
         tools: false
         vision: false
-        contexto: 64000
-        max_salida: 8192
+        context: 64000
+        max_output: 8192
       - id: deepseek-reasoner
         tools: false
         vision: false
-        contexto: 64000
-        max_salida: 8192
+        context: 64000
+        max_output: 8192
     # NO se declara deepseek-vision: no se verifico entrada de imagenes, y
     # declarar una capacidad sin comprobarla es como enrutar a ciegas.
     # Latencia medida: 4.2-4.5s. 60s de techo: el proof-of-work en WASM suma
@@ -158,16 +158,16 @@ proveedores:
     # armar_peticion convierte `tools` en instrucciones de texto en el system
     # prompt; proxy.py detecta si la respuesta es un JSON de tool call y lo
     # convierte al formato OpenAI. Ver emulador_tools.py y test_emulador_tools.py.
-    emula_tools: true
+    emulates_tools: true
 
   - id: grok
     tier: free          # el proxy corre sobre el tier gratuito de Grok
-    prioridad: 1
-    dialecto: openai
+    priority: 1
+    dialect: openai
     base_url_env: GROK_PROXY_URL
     base_url: http://127.0.0.1:8893/v1
-    clave_env: GROK_API_KEY   # el proxy exige Authorization: Bearer <API_KEY>
-    modelos_path: /models
+    api_key_env: GROK_API_KEY   # el proxy exige Authorization: Bearer <API_KEY>
+    models_path: /models
     # Mismo patron que chatgpt: los ids se DESCUBREN de /models (33 el
     # 2026-08-18, con un pool de alta tasa por detras), pero ese catalogo solo
     # trae id/object/created/owned_by/notes -- ni capacidades ni contexto --
@@ -176,7 +176,7 @@ proveedores:
     # OJO: /models expone un id "auto" propio de Grok que COLISIONA con el
     # alias "auto" de llm-libre. No hace falta hacer nada: catalogo.es_id_reservado
     # ya lo descarta, que es exactamente para lo que existe.
-    capacidades_por_defecto:
+    default_capabilities:
       # tools Y vision en TRUE, y el camino hasta este valor merece quedar
       # escrito porque casi nos cuesta 30 rutas utiles.
       #
@@ -194,8 +194,8 @@ proveedores:
       # 488x232. Las que no, abajo.
       tools: true
       vision: true
-      contexto: 128000
-      max_salida: 8192
+      context: 128000
+      max_output: 8192
     # La familia imagine-agent-mode es lo unico realmente distinto: son
     # agentes de generacion de imagenes, no de chat. 0/3 en tool_calls al
     # repetir, y el propio grok_backend lo dice: "imagine-agent-mode* NO
@@ -203,18 +203,18 @@ proveedores:
     # razon por la que esta excepcion se declara y las otras cinco que
     # sospeche NO: claude-3-opus, gpt-4o y grok-4-1-thinking-1129 dieron 3/3
     # al repetir, su "no" original era la ruleta.
-    excepciones:
+    exceptions:
       imagine-agent-mode:          {tools: false, vision: false}
       imagine-agent-mode-dev:      {tools: false, vision: false}
       imagine-agent-mode-grok-4-5: {tools: false, vision: false}
 
   - id: kilo
     tier: free
-    prioridad: 1
-    dialecto: openai
+    priority: 1
+    dialect: openai
     base_url: https://api.kilo.ai/api/gateway
-    clave_env: KILO_API_KEY          # OPCIONAL: sin clave el tier anonimo funciona igual
-    modelos_path: /models
+    api_key_env: KILO_API_KEY          # OPCIONAL: sin clave el tier anonimo funciona igual
+    models_path: /models
 
   # openrouter (patron "todo descubierto", igual que kilo -- ver la nota de
   # cabecera) SACADO del registro en produccion: nunca se definio
@@ -240,11 +240,11 @@ proveedores:
 
   - id: minimax
     tier: paid
-    prioridad: 2
-    dialecto: openai
+    priority: 2
+    dialect: openai
     base_url: https://api.minimax.io/v1
-    clave_env: MINIMAX_API_KEY
-    modelos_fijos:
+    api_key_env: MINIMAX_API_KEY
+    fixed_models:
       # Verificado 2026-08-16 contra la API real: chat, tools y streaming OK.
       # contexto es un PISO conservador usado solo para filtrar por x_min_contexto;
       # subirlo si se confirma uno mayor.
@@ -255,5 +255,5 @@ proveedores:
         # rojo correctamente. Era una capacidad que teniamos y no usabamos:
         # con vision:false, un pedido con imagen ni siquiera la consideraba.
         vision: true
-        contexto: 128000
-        max_salida: 32768
+        context: 128000
+        max_output: 32768

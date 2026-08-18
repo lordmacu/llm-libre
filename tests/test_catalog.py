@@ -260,7 +260,7 @@ def test_the_compound_auto_aliases_are_discarded_too():
 def test_a_new_model_from_the_proxy_appears_without_touching_the_yaml():
     # The "con_modelo_nuevo" fixture simulates ChatGPT's real backend adding a
     # model tomorrow (gpt-5-7) that does not exist today: it has to show up on
-    # its own, without anyone editing proveedores.yaml or this test.
+    # its own, without anyone editing providers.yaml or this test.
     routes = normalize("chatgpt", _load("chatgpt_models_con_modelo_nuevo.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
     ids = {r.model_id for r in routes}

@@ -1,13 +1,13 @@
 # The provider model
 
-How a provider is declared, and what each field in `proveedores.yaml`
+How a provider is declared, and what each field in `providers.yaml`
 buys you. The goal of this design is that **adding a provider is a config
 change, not a code change** -- every field here exists to make that true
 for one specific real-world constraint a provider might have.
 
 ## The three registration patterns
 
-Every provider in `proveedores.yaml` fits one of three shapes, depending on
+Every provider in `providers.yaml` fits one of three shapes, depending on
 what its own `/models` endpoint can tell the gateway:
 
 | Pattern | Model ids come from | Capabilities come from | Who uses it |
@@ -18,7 +18,7 @@ what its own `/models` endpoint can tell the gateway:
 
 > **A note on OpenRouter, mentioned throughout this doc as an example of
 > the "fully discovered" pattern:** it is not currently in the live
-> `proveedores.yaml` (removed 2026-08-17 -- `OPENROUTER_API_KEY` was never
+> `providers.yaml` (removed 2026-08-17 -- `OPENROUTER_API_KEY` was never
 > configured in production, so all of its routes 401ed on every request
 > and just sat in cooldown, eating almost half the catalog's probe budget
 > and ranking-table space to repeatedly prove they were dead). It stays
@@ -188,7 +188,7 @@ one provider's config.
   `timeout_s - ε` seconds, forever, would never trip it at all -- that
   attempt could stay open far longer than `timeout_s` in total. Set this
   for a provider you know can hang rather than fail cleanly -- see
-  `proveedores.yaml`'s own comment on the `chatgpt` entry for a worked
+  `providers.yaml`'s own comment on the `chatgpt` entry for a worked
   example of picking a number from measured latency data, not a guess --
   but do not read it as a hard cap on how long any single attempt can
   possibly run.
@@ -198,7 +198,7 @@ one provider's config.
 In the common case (a provider whose `/models` is as informative as
 Kilo/OpenRouter's), this really is config-only:
 
-1. Add an entry to `proveedores.yaml` with `id`, `tier`, `dialecto:
+1. Add an entry to `providers.yaml` with `id`, `tier`, `dialecto:
    openai`, `base_url`, and `modelos_path` (plus `clave_env` if it needs an
    API key).
 2. If its `/models` does not report capabilities, add
@@ -217,7 +217,7 @@ Kilo/OpenRouter's), this really is config-only:
    would defeat the point of a free-first gateway.
 4. **Restart the process.** `proveedores.cargar()` only runs once, at
    startup (`principal.crear_estado`) -- there is no mechanism that
-   re-reads `proveedores.yaml` on its own, so a YAML edit needs a restart
+   re-reads `providers.yaml` on its own, so a YAML edit needs a restart
    before anything downstream sees it. ("Wait for the next sync cycle"
    alone does *not* work, despite `sincronizar_catalogo` running
    periodically: it always operates on the same in-memory provider list

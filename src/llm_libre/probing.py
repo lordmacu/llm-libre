@@ -21,7 +21,9 @@ log = logging.getLogger(__name__)
 
 # How often the quality battery runs (it burns free quota, hence not every pass)
 # and how long old telemetry is retained before being pruned.
-QUALITY_EVERY_N_CYCLES = int(os.getenv("SONDEO_CALIDAD_CADA_N_CICLOS", "5"))
+QUALITY_EVERY_N_CYCLES = int(os.getenv("QUALITY_PROBE_EVERY_N_CYCLES")
+                             or os.getenv("SONDEO_CALIDAD_CADA_N_CICLOS")
+                             or "5")   # legacy name honoured, see main._env
 RETENTION_DAYS = 30
 
 
@@ -66,7 +68,7 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     if deactivated:
         log.warning(
             "catalogue: %d route(s) deactivated because their provider is no "
-            "longer in proveedores.yaml (they are not deleted -- the history is "
+            "longer in providers.yaml (they are not deleted -- the history is "
             "used to detect renames, see Storage.upsert_routes)", deactivated)
     total = 0
     for p in providers:
@@ -128,7 +130,7 @@ async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
     # function receives active_routes(), which includes minimax/MiniMax-M3, and
     # every pass used to hit it: ~5 billable calls a day that also bypass
     # add_paid_usage, so they show up neither in /v1/uso nor against
-    # TOPE_PAGO_DIARIO. Real money, invisible.
+    # DAILY_PAID_CAP. Real money, invisible.
     for route in (r for r in routes if r.tier == "free"):
         t0 = time.monotonic()
         # HIGH 1 (round 9): without `is_probe=True` a failure here only

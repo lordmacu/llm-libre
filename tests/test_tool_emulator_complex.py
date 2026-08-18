@@ -11,7 +11,7 @@ import pytest
 
 pytestmark = pytest.mark.vivo
 
-YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
+YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 WEATHER_TOOL = {"type": "function", "function": {
     "name": "get_weather",

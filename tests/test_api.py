@@ -1051,7 +1051,7 @@ def test_the_ranking_breaks_down_the_components(client):
 
 
 # --- Finding 3 of the Task 13 review: /v1/ranking ordered ONLY by score and did
-#     not carry `prioridad`, so it could show kilo/k:free
+#     not carry `priority`, so it could show kilo/k:free
 #     arriba de todo mientras X-Route-Used decia chatgpt/gpt-5-0 -- el
 #     endpoint the README describes as the place to audit WHY the router chose
 #     what it chose stopped explaining it. It now orders with the SAME key as
@@ -1163,7 +1163,7 @@ def test_paid_streaming_counts_usage_and_the_cap_binds():
 #     model that burns its budget) is BILLED by the provider anyway, even though
 #     the gateway treats it as failed and continues the chain. Measured: 40/40
 #     billable calls with
-#     `pago_hoy: 0`, TOPE_PAGO_DIARIO never acting. Now every
+#     `pago_hoy: 0`, DAILY_PAID_CAP never acting. Now every
 #     attempt with status 200 against a paid route, whether it serves or not. ---
 
 def test_paid_streaming_bills_an_empty_200_even_though_it_serves_nothing():

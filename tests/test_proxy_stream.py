@@ -11,7 +11,7 @@ from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
 
-YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
+YAML_REAL = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 BODY = {"model": "auto", "messages": [], "stream": True}
 
@@ -599,7 +599,7 @@ async def test_it_uses_the_global_timeout_when_streaming_if_the_provider_declare
 
 
 # --- Task 14: the same test as the one in test_proxy.py but on the streaming
-#     path, with chatgpt's REAL config (proveedores.yaml, loaded with
+#     path, with chatgpt's REAL config (providers.yaml, loaded with
 #     providers.load -- the same path as production), not a synthetic provider. It
 #     goes red if the YAML loses timeout_s or if complete_stream stops reading
 #     Provider.timeout_s for that route. ---

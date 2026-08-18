@@ -19,12 +19,12 @@ back there for the mechanics.
   live in `Proxy`'s process memory and reset on every restart regardless of
   the volume.
 - **What losing it costs**: less than it sounds like, and faster to earn
-  back than "up to `SONDEO_SALUD_HORAS`" would suggest -- **the planificador
+  back than "up to `HEALTH_PROBE_HOURS`" would suggest -- **the planificador
   runs its first full sondeo cycle immediately on startup, before its first
-  sleep**, not after `SONDEO_SALUD_HORAS`. Concretely: `planificador`'s
+  sleep**, not after `HEALTH_PROBE_HOURS`. Concretely: `planificador`'s
   loop counter starts at `0`, and `ciclo(estado, 0)` -- catalog sync, a
   health probe against every free route, AND (because `0 %
-  SONDEO_CALIDAD_CADA_N_CICLOS == 0` for any sane value of that setting)
+  QUALITY_PROBE_EVERY_N_CYCLES == 0` for any sane value of that setting)
   the FULL quality battery against every free route -- runs right away,
   concurrently with the process becoming ready to serve traffic, on every
   single restart. Verified directly: a fresh `Almacen`/`Proxy` pair running
@@ -33,7 +33,7 @@ back there for the mechanics.
   after losing the file (or after ANY restart, empty database or not): the
   catalog and a first quality measurement for every free route are both
   back within roughly one sondeo pass -- seconds to low minutes, bounded by
-  how long that many HTTP round-trips take, not by `SONDEO_SALUD_HORAS`.
+  how long that many HTTP round-trips take, not by `HEALTH_PROBE_HOURS`.
   What genuinely takes longer to rebuild is the **history**: `confiabilidad`
   and `ttft_p50_ms` are computed over a rolling window of past probes and
   real traffic (see the routing doc), so a fresh database starts every
@@ -80,7 +80,7 @@ extra on-demand probe, sampling the provider more often than the fixed
 periodic schedule would -- does not flip the whole service to `caido` and
 trigger a container restart over nothing.
 
-⚠️ **`SONDEO_SALUD_HORAS` has a soft ceiling that `configuration.md` does
+⚠️ **`HEALTH_PROBE_HOURS` has a soft ceiling that `configuration.md` does
 not mention: `VENTANA_EVIDENCIA_VIDA_S`, hardcoded to 24h.** `/health`
 only looks for a signal (a real success, or any health probe result)
 within the trailing 24h; outside that window it falls back to "has this
@@ -88,16 +88,16 @@ route ever been probed at all" -- and once a route HAS been probed at
 least once, ever, that fallback stops treating it as "no evidence yet" and
 starts treating a stale signal as **no current evidence**, i.e. dead.
 Verified directly: a route whose only recorded signal is a *successful*
-health probe from 26h ago (simulating `SONDEO_SALUD_HORAS` set at or
+health probe from 26h ago (simulating `HEALTH_PROBE_HOURS` set at or
 above roughly 24-26h, with no real traffic reaching that route in the
 meantime to refresh the signal) is reported as having **no** evidence of
 life -- despite that signal being a success, not a failure. Set
-`SONDEO_SALUD_HORAS` at or anywhere near 24h and, for any route that is
+`HEALTH_PROBE_HOURS` at or anywhere near 24h and, for any route that is
 not receiving a steady trickle of real traffic to independently refresh
 its evidence between probes, expect `/health` to eventually flip that
 route to dead purely from the probe cadence being too slow for the fixed
 evidence window -- not from anything actually being wrong with the route.
-Keep `SONDEO_SALUD_HORAS` well under 24h (the default, 5h, has roughly 4x
+Keep `HEALTH_PROBE_HOURS` well under 24h (the default, 5h, has roughly 4x
 headroom); if the periodic cadence ever needs to go that high for
 quota reasons, the on-demand probe mechanism (fired from real traffic
 between periodic cycles, see the routing doc) is the intended way to keep
@@ -181,7 +181,7 @@ This is easy to forget and worth stating plainly: **every probe the
 gateway sends to a free provider is a real request against that
 provider's free-tier quota**, indistinguishable from traffic a client
 sent. This includes the periodic health probe (roughly every
-`SONDEO_SALUD_HORAS`, default 5h, per free route), the periodic quality
+`HEALTH_PROBE_HOURS`, default 5h, per free route), the periodic quality
 battery (roughly once a day, up to 5 requests per free route, one per
 battery case), and the on-demand probes the gateway fires itself when
 client traffic raises suspicion about a route (rate-limited, but able to

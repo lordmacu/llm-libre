@@ -16,7 +16,7 @@ invisible at the call site:
   field silently changed the HTTP contract. `RouteRequest.as_wire()` now makes
   that mapping explicit; this file asserts what it produces.
 - `providers.load` reads YAML keys as string literals, so the `Provider`
-  dataclass fields may be renamed freely but the keys in `proveedores.yaml` may
+  dataclass fields may be renamed freely but the keys in `providers.yaml` may
   not.
 
 The surface has since been translated ON PURPOSE -- a deliberate, breaking
@@ -35,7 +35,7 @@ from llm_libre.models import GATEWAY_EXTENSIONS, Capabilities, Route
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
 
-YAML = "proveedores.yaml"
+YAML = "providers.yaml"
 
 
 @pytest.fixture
@@ -170,6 +170,56 @@ def test_yaml_keys_are_still_understood():
 def test_tier_values_are_wire():
     provs = load(YAML, {})
     assert {p.tier for p in provs} <= {"free", "paid"}
+
+
+def test_the_yaml_key_names_are_literal(tmp_path):
+    """The complement to the test above, which only proves the CURRENT file
+    parses. `providers.load` reads these keys as string literals, so a rename on
+    either side alone -- the code or the file -- fails silently: `.get()` returns
+    the default and the provider quietly loses its priority, its timeout or its
+    tool emulation. Spelled out here so both sides move together or not at all."""
+    yaml_file = tmp_path / "providers.yaml"
+    yaml_file.write_text(
+        "providers:\n"
+        "  - id: p\n"
+        "    tier: free\n"
+        "    dialect: openai\n"
+        "    base_url: https://p.test/v1\n"
+        "    api_key_env: P_KEY\n"
+        "    models_path: /models\n"
+        "    priority: 7\n"
+        "    timeout_s: 42\n"
+        "    unwraps_canvas: true\n"
+        "    emulates_tools: true\n"
+        "    extra_headers:\n"
+        "      X-Thing: yes\n"
+        "    default_capabilities:\n"
+        "      tools: false\n"
+        "      vision: true\n"
+        "      context: 128000\n"
+        "      max_output: 4096\n"
+        "    exceptions:\n"
+        "      weird-model:\n"
+        "        tools: false\n"
+        "    fixed_models:\n"
+        "      - id: m\n"
+        "        tools: true\n"
+        "        vision: false\n"
+        "        context: 1000\n"
+        "        max_output: 100\n", encoding="utf-8")
+    p = load(str(yaml_file), {"P_KEY": "secret"})[0]
+    assert (p.id, p.tier, p.dialect) == ("p", "free", "openai")
+    assert p.api_key == "secret"
+    assert p.models_path == "/models"
+    assert p.priority == 7
+    assert p.timeout_s == 42.0
+    assert p.unwraps_canvas is True
+    assert p.emulates_tools is True
+    assert p.extra_headers == {"X-Thing": True}
+    assert p.default_capabilities.context == 128000
+    assert p.default_capabilities.max_output == 4096
+    assert p.exceptions == {"weird-model": {"tools": False}}
+    assert p.fixed_models[0]["id"] == "m"
 
 
 # --- persisted schema ---

@@ -11,7 +11,7 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Provider:
-    """One entry of proveedores.yaml, already resolved against the environment.
+    """One entry of providers.yaml, already resolved against the environment.
 
     NOTE ON NAMES: these fields may be renamed freely, but the YAML KEYS they are
     read from may not -- `load` below reads them as string literals, and
@@ -117,7 +117,7 @@ def _resolve_base_url(p: dict, env: dict) -> str:
     if not env_path:
         log.warning(
             "%s: %s='%s' carries no path; appending the '%s' suffix that "
-            "proveedores.yaml declares for this provider. Defining the variable "
+            "providers.yaml declares for this provider. Defining the variable "
             "with the suffix already included avoids this warning.",
             p["id"], env_var, from_env, suffix)
         # join_path parses and rebuilds (urlsplit/urlunsplit), it does not
@@ -126,24 +126,24 @@ def _resolve_base_url(p: dict, env: dict) -> str:
     if env_path != suffix:
         log.warning(
             "%s: %s='%s' carries a path ('%s') different from the '%s' suffix "
-            "proveedores.yaml declares by default for this provider; it is used "
+            "providers.yaml declares by default for this provider; it is used "
             "AS IS, unmodified -- if that was accidental, fix the variable.",
             p["id"], env_var, from_env, env_path, suffix)
     return from_env
 
 
 def _default_capabilities(p: dict) -> Capabilities | None:
-    data = p.get("capacidades_por_defecto")
+    data = p.get("default_capabilities")
     if not data:
         return None
     return Capabilities(tools=bool(data["tools"]), vision=bool(data["vision"]),
-                       context=int(data["contexto"]), max_output=int(data["max_salida"]))
+                       context=int(data["context"]), max_output=int(data["max_output"]))
 
 
 def _exceptions(p: dict) -> dict:
-    """Per-model-id overrides on `capacidades_por_defecto`.
+    """Per-model-id overrides on `default_capabilities`.
 
-    `capacidades_por_defecto` declares ONE capability set for every id discovered
+    `default_capabilities` declares ONE capability set for every id discovered
     from /models, and that is enough when the catalogue is homogeneous. Grok's is
     not: of its 31 models, 25 return a real tool_call and 6 do not (measured
     2026-08-18 against the proxy, not assumed). Without exceptions the choice
@@ -154,34 +154,34 @@ def _exceptions(p: dict) -> dict:
     default. An id that does not appear here uses the whole default, which is the
     normal case.
     """
-    return {str(k): dict(v or {}) for k, v in (p.get("excepciones") or {}).items()}
+    return {str(k): dict(v or {}) for k, v in (p.get("exceptions") or {}).items()}
 
 
 def load(yaml_path: str, env: dict) -> list[Provider]:
-    """Read proveedores.yaml. The KEYS below are the config contract -- see the
+    """Read providers.yaml. The KEYS below are the config contract -- see the
     note in Provider and tests/test_wire_contract.py."""
     with open(yaml_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return [Provider(
-        id=p["id"], tier=p["tier"], dialect=p["dialecto"],
+        id=p["id"], tier=p["tier"], dialect=p["dialect"],
         base_url=_resolve_base_url(p, env),
-        api_key=(env.get(p.get("clave_env", ""), "") or "").strip(),
-        models_path=p.get("modelos_path", ""),
-        extra_headers=p.get("cabeceras_extra", {}) or {},
-        fixed_models=p.get("modelos_fijos", []) or [],
-        priority=int(p.get("prioridad", 100)),
+        api_key=(env.get(p.get("api_key_env", ""), "") or "").strip(),
+        models_path=p.get("models_path", ""),
+        extra_headers=p.get("extra_headers", {}) or {},
+        fixed_models=p.get("fixed_models", []) or [],
+        priority=int(p.get("priority", 100)),
         default_capabilities=_default_capabilities(p),
         exceptions=_exceptions(p),
-        unwraps_canvas=bool(p.get("desenvuelve_canvas", False)),
+        unwraps_canvas=bool(p.get("unwraps_canvas", False)),
         timeout_s=(float(p["timeout_s"]) if p.get("timeout_s") is not None else None),
-        emulates_tools=bool(p.get("emula_tools", False)),
-    ) for p in data["proveedores"]]
+        emulates_tools=bool(p.get("emulates_tools", False)),
+    ) for p in data["providers"]]
 
 
 def fixed_routes(p: Provider) -> list[Route]:
     return [Route(p.id, m["id"], p.tier,
                  Capabilities(tools=True if p.emulates_tools else bool(m["tools"]),
                              vision=bool(m["vision"]),
-                             context=int(m["contexto"]), max_output=int(m["max_salida"])),
+                             context=int(m["context"]), max_output=int(m["max_output"])),
                  priority=p.priority)
             for m in p.fixed_models]

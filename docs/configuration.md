@@ -12,12 +12,12 @@ sets these in its own UI, one variable at a time, precisely so there is no
 | `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (the YAML's own default, which does not work in production) | Address of the self-hosted `chatgpt-proxy` service. **Include the `/v1` suffix if you can** -- its real routes are `/v1/chat/completions` and `/v1/models`, not the bare paths Kilo uses. If you set only a bare host (no path at all), the gateway adds `/v1` for you and logs a warning about it. If you set something with its *own* path that is not `/v1` (e.g. a reverse-proxy mount like `.../v2`), that is respected exactly as given -- never silently rewritten -- with only a warning in case it was a mistake. |
 | `KILO_API_KEY` | *(unset)* | Optional -- see the callout below for what "optional" actually depends on. |
 | `MINIMAX_API_KEY` | *(unset)* | Key for the paid fallback provider. Without it, the paid escape hatch simply cannot be used (every attempt against it fails); free-tier routing is unaffected. |
-| `SONDEO_SALUD_HORAS` | `5` | Hours between health-probe cycles for every free route. **Keep this well under 24h** -- see the callout in [`operations-runbook.md`](operations-runbook.md#get-health-the-three-states-and-what-each-one-implies) for why a value at or near 24h eventually makes `/health` misreport low-traffic routes as dead, unrelated to whether they actually are. |
-| `SONDEO_CALIDAD_CADA_N_CICLOS` | `5` | How many health cycles pass between quality-battery runs (so, by default, roughly once a day). See the runbook for what this costs in free-tier quota. |
-| `TOPE_PAGO_DIARIO` | `200` | Daily request allowance against the paid fallback, per key. Counted in requests, not tokens or money -- see `GET /v1/uso`. |
-| `LIMITE_POR_MINUTO` | `60` | Per-key rate limit, requests per minute. |
+| `HEALTH_PROBE_HOURS` | `5` | Hours between health-probe cycles for every free route. **Keep this well under 24h** -- see the callout in [`operations-runbook.md`](operations-runbook.md#get-health-the-three-states-and-what-each-one-implies) for why a value at or near 24h eventually makes `/health` misreport low-traffic routes as dead, unrelated to whether they actually are. |
+| `QUALITY_PROBE_EVERY_N_CYCLES` | `5` | How many health cycles pass between quality-battery runs (so, by default, roughly once a day). See the runbook for what this costs in free-tier quota. |
+| `DAILY_PAID_CAP` | `200` | Daily request allowance against the paid fallback, per key. Counted in requests, not tokens or money -- see `GET /v1/uso`. |
+| `PER_MINUTE_LIMIT` | `60` | Per-key rate limit, requests per minute. |
 | `RUTA_DB` | `/datos/llm-libre.sqlite3` | Path to the SQLite file (catalog + all telemetry). See the runbook for why this needs to sit on a persistent volume. |
-| `PROVEEDORES_YAML` | `proveedores.yaml` | Path to the provider registry file. |
+| `PROVIDERS_YAML` | `providers.yaml` | Path to the provider registry file. |
 
 ## `KILO_API_KEY`: what "optional" actually means
 

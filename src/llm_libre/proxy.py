@@ -969,7 +969,7 @@ class Proxy:
         -- but that CANNOT mean nothing excludes them: without this, a broken paid
         route bills every request, forever, with no mechanism taking it out of
         rotation (measured: 40/40 billable calls, `/v1/uso` at `pago_hoy: 0`
-        because only SUCCESS was counted, `TOPE_PAGO_DIARIO` never acting -- see
+        because only SUCCESS was counted, `DAILY_PAID_CAP` never acting -- see
         api.py for the other side of this fix, counting what was BILLED). A DIRECT
         punishment is reintroduced (no probe, as in round 7), with the SAME
         threshold as free-route suspicion, scoped to paid routes specifically:

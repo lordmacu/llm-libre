@@ -46,7 +46,7 @@ def test_several_fields_can_be_overridden_at_once():
 
 
 def test_the_yaml_declares_groks_exceptions():
-    provs = load("proveedores.yaml", dict(os.environ))
+    provs = load("providers.yaml", dict(os.environ))
     grok = [p for p in provs if p.id == "grok"][0]
     assert grok.default_capabilities.tools is True
     # vision True: the proxy resolves the image on its own (resolve_vision_model
@@ -63,6 +63,6 @@ def test_the_yaml_declares_groks_exceptions():
 
 def test_minimax_declares_measured_vision():
     from llm_libre.providers import fixed_routes
-    provs = load("proveedores.yaml", {"MINIMAX_API_KEY": "x"})
+    provs = load("providers.yaml", {"MINIMAX_API_KEY": "x"})
     mm = [r for p in provs if p.id == "minimax" for r in fixed_routes(p)]
     assert mm and mm[0].capabilities.vision is True

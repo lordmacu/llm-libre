@@ -13,18 +13,38 @@ from llm_libre.providers import load
 from llm_libre.proxy import Proxy
 from llm_libre.storage import Storage
 
-# The environment variable NAMES stay as they are: they are operator surface,
-# configured in Coolify and in .env, and renaming one silently changes behaviour
-# on the next deploy with nothing to catch it.
-YAML = os.getenv("PROVEEDORES_YAML", "proveedores.yaml")
-DB_PATH = os.getenv("RUTA_DB", "/datos/llm-libre.sqlite3")
-HEALTH_PROBE_HOURS = float(os.getenv("SONDEO_SALUD_HORAS", "5"))
+def _env(new_name: str, legacy_name: str, default: str) -> str:
+    """Read a deployment variable under its CURRENT name, falling back to the
+    Spanish one it used to have.
+
+    Environment variables are operator surface: they do not live in this repo,
+    they live in Coolify's UI and in whatever .env a machine happens to have.
+    Renaming one in the code alone means the next deploy silently ignores the
+    configured value and falls back to the default -- with nothing to catch it,
+    because a default is a perfectly valid value. Three of these ARE configured
+    in Coolify right now (DB_PATH, PER_MINUTE_LIMIT, DAILY_PAID_CAP), and
+    DB_PATH falling back to its default would point the gateway at a different
+    file than the one holding the telemetry.
+
+    So the new name wins and the old one is honoured as a fallback: renaming
+    them in Coolify becomes something that can happen calmly, after the deploy,
+    instead of a step that has to land in the same minute as the code. The
+    legacy branch is a MIGRATION AID -- once the variables are renamed in the
+    deployment, this function and its `legacy_name` argument can go.
+    """
+    return os.getenv(new_name) or os.getenv(legacy_name) or default
+
+
+YAML = _env("PROVIDERS_YAML", "PROVEEDORES_YAML", "providers.yaml")
+DB_PATH = _env("DB_PATH", "RUTA_DB", "/datos/llm-libre.sqlite3")
+HEALTH_PROBE_HOURS = float(_env("HEALTH_PROBE_HOURS", "SONDEO_SALUD_HORAS", "5"))
 # Draw between tied routes. On by default: with the quality battery giving 1.00
 # to the entire catalogue (see quality_suite.py), a strict order ALWAYS sends
 # traffic to the same route and burns one provider's quota while the others watch.
-# Turning it off (ROTAR_EMPATES=false) restores the previous deterministic order,
+# Turning it off (ROTATE_TIES=false) restores the previous deterministic order,
 # useful when debugging an odd response.
-SHUFFLE_TIES = os.getenv("ROTAR_EMPATES", "true").strip().lower() not in ("false", "0", "no")
+SHUFFLE_TIES = _env("ROTATE_TIES", "ROTAR_EMPATES", "true").strip().lower() \
+    not in ("false", "0", "no")
 
 
 def build_state() -> State:
@@ -46,20 +66,20 @@ def build_state() -> State:
     api_keys = {k.strip() for k in os.getenv("LLM_LIBRE_API_KEYS", "").split(",") if k.strip()}
     if not api_keys:
         raise RuntimeError(
-            "LLM_LIBRE_API_KEYS no esta definida (o esta vacia): sin al menos "
-            "una llave el servicio arrancaria pero rechazaria el 100% de las "
-            "peticiones a /v1/* con 401 para cualquier llamador, mientras "
-            "/health seguiria informando 'ok'. Definila con al menos una "
-            "llave, separadas por coma si son varias -- por ejemplo: "
-            "LLM_LIBRE_API_KEYS=una-llave-larga-y-secreta")
+            "LLM_LIBRE_API_KEYS is not set (or is empty): without at least one "
+            "key the service would start but reject 100% of requests to /v1/* "
+            "with 401, for every caller, while /health kept reporting 'ok'. Set "
+            "it to at least one key, comma-separated if there are several -- for "
+            "example: LLM_LIBRE_API_KEYS=a-long-secret-key")
     providers = load(YAML, dict(os.environ))
     store = Storage(DB_PATH)
     store.create_schema()
     http = httpx.AsyncClient()
     proxy = Proxy({p.id: p for p in providers}, store, http)
     state = State(store=store, proxy=proxy, api_keys=api_keys,
-                  daily_paid_cap=int(os.getenv("TOPE_PAGO_DIARIO", "200")),
-                  rate_limiter=PerKeyRateLimiter(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
+                  daily_paid_cap=int(_env("DAILY_PAID_CAP", "TOPE_PAGO_DIARIO", "200")),
+                  rate_limiter=PerKeyRateLimiter(
+                      int(_env("PER_MINUTE_LIMIT", "LIMITE_POR_MINUTO", "60"))))
     state.providers = providers
     state.http = http
     state.rng = random.Random() if SHUFFLE_TIES else None

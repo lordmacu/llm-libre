@@ -65,7 +65,7 @@ async def test_sync_adds_the_paid_fixed_models():
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [Provider("minimax", "paid", "openai", "https://m.test", "k", "",
                       {}, [{"id": "MiniMax-M3", "tools": True, "vision": False,
-                            "contexto": 128000, "max_salida": 32768}])]
+                            "context": 128000, "max_output": 32768}])]
     await sync_catalogue(http, prov, store, now=100.0)
     routes = store.active_routes()
     assert [r.key for r in routes] == ["minimax/MiniMax-M3"]
@@ -312,7 +312,7 @@ async def test_a_200_with_an_unexpected_shape_is_a_failure_and_does_not_stop_the
     assert [r.key for r in store.active_routes()] == ["kilo/x:free"]
 
 
-# --- Removing a provider from proveedores.yaml (the real case: openrouter, with
+# --- Removing a provider from providers.yaml (the real case: openrouter, with
 #     no OPENROUTER_API_KEY, whose 16 routes 401'd every time and only took up
 #     probe quota and ranking space proving they were dead) must not leave its
 #     routes at `activa=1` forever -- see
@@ -326,7 +326,7 @@ async def test_sync_deactivates_the_routes_of_a_provider_removed_from_the_regist
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     # openrouter is NO LONGER in the list providers.load() returns -- this
-    # simulates having removed it from proveedores.yaml.
+    # simulates having removed it from providers.yaml.
     prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
@@ -351,7 +351,7 @@ async def test_sync_does_not_deactivate_routes_of_still_registered_providers():
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
         Provider("minimax", "paid", "openai", "https://m.test", "k", "", {},
                   [{"id": "MiniMax-M3", "tools": True, "vision": False,
-                    "contexto": 128000, "max_salida": 32768}]),
+                    "context": 128000, "max_output": 32768}]),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
@@ -363,7 +363,7 @@ async def test_sync_does_not_deactivate_routes_of_still_registered_providers():
 
 async def test_sync_with_an_empty_registry_does_not_switch_off_the_whole_catalogue():
     # Gate review: `providers=[]` (a syntactically valid but truncated or badly
-    # edited `proveedores.yaml`, more likely than a deliberate "no providers")
+    # edited `providers.yaml`, more likely than a deliberate "no providers")
     # must not trigger the orphan sweep -- see the guard in
     # Storage.deactivate_unregistered_providers.
     store = _store()
@@ -517,7 +517,7 @@ async def test_cycle_does_not_probe_quality_outside_the_interval():
 # --- Fix round 3, B4 (Blocking): section 8 says "paid routes are NOT probed".
 #     probe_quality already filtered by tier; probe_health did not, and it receives
 #     active_routes(), which includes minimax/MiniMax-M3. That was ~5 billable
-#     calls a day, invisible to add_paid_usage, /v1/usage and TOPE_PAGO_DIARIO. ---
+#     calls a day, invisible to add_paid_usage, /v1/usage and DAILY_PAID_CAP. ---
 
 async def test_the_health_probe_does_not_spend_money_on_paid_routes():
     calls = []
@@ -564,7 +564,7 @@ async def test_the_full_cycle_does_not_probe_the_paid_route():
         Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
         Provider("minimax", "paid", "openai", "https://m.test", "k", "", {},
                   [{"id": "MiniMax-M3", "tools": True, "vision": False,
-                    "contexto": 128000, "max_salida": 32768}]),
+                    "context": 128000, "max_output": 32768}]),
     ]
     proxy = Proxy({p.id: p for p in prov}, store, http)
     estado = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,

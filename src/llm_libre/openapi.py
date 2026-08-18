@@ -52,7 +52,7 @@ Every endpoint except `GET /health` requires an API key, accepted through
 ## Rate limiting
 
 Each key is limited to a fixed number of requests per minute (see the
-`LIMITE_POR_MINUTO` deployment variable). Exceeding it returns `429`.
+`PER_MINUTE_LIMIT` deployment variable). Exceeding it returns `429`.
 
 ## Status codes, and why four of them are easy to confuse
 

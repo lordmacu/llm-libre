@@ -14,7 +14,7 @@ from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAX_S,
                              GLOBAL_PROBE_LIMIT_PER_MINUTE, SUSPICION_THRESHOLD,
                              GLOBAL_PROBE_WINDOW_S, Proxy, _is_client_error)
 
-YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
+YAML_REAL = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 BODY = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
@@ -500,7 +500,7 @@ async def test_it_uses_the_providers_own_timeout_when_declared():
     assert seen[0]["read"] == 20.0
 
 
-# --- Task 14: chatgpt's REAL config (proveedores.yaml, not a synthetic provider)
+# --- Task 14: chatgpt's REAL config (providers.yaml, not a synthetic provider)
 #     now declares timeout_s -- see the justification for the number in the YAML
 #     itself. It loads the real file with providers.load (the same path as
 #     production) so this test goes red if someone changes the value in the YAML

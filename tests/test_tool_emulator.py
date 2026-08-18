@@ -11,7 +11,7 @@ from llm_libre.tool_emulator import (
     parse_tool_calls,
 )
 
-YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
+YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 WEATHER_TOOL = {"type": "function", "function": {
     "name": "get_weather",

@@ -3,7 +3,7 @@ from pathlib import Path
 from llm_libre.models import Capabilities
 from llm_libre.providers import fixed_routes, load
 
-YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
+YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 
 def test_it_loads_the_registered_providers():
@@ -59,13 +59,13 @@ def test_the_extra_headers_are_preserved(tmp_path):
     # on any particular provider using it today.
     yaml_with_headers = tmp_path / "con_cabeceras.yaml"
     yaml_with_headers.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
-        "    dialecto: openai\n"
+        "    dialect: openai\n"
         "    base_url: https://suelto.test\n"
-        "    modelos_path: /models\n"
-        "    cabeceras_extra:\n"
+        "    models_path: /models\n"
+        "    extra_headers:\n"
         "      X-Title: llm-libre\n")
     p = load(str(yaml_with_headers), {})[0]
     assert p.extra_headers["X-Title"] == "llm-libre"
@@ -122,12 +122,12 @@ def test_minimax_sits_at_priority_two():
 def test_a_provider_without_priority_in_the_yaml_uses_the_default_of_one_hundred(tmp_path):
     yaml_no_priority = tmp_path / "sin_prioridad.yaml"
     yaml_no_priority.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
-        "    dialecto: openai\n"
+        "    dialect: openai\n"
         "    base_url: https://suelto.test\n"
-        "    modelos_path: /models\n")
+        "    models_path: /models\n")
     p = load(str(yaml_no_priority), {})[0]
     assert p.priority == 100
 
@@ -158,8 +158,8 @@ def test_a_provider_without_base_url_env_is_unaffected(tmp_path):
 
 # --- Task 13 follow-up: chatgpt moved from modelos_fijos to DISCOVERED (its
 #     /v1/models is now dynamic), but it still carries no capability metadata --
-#     which is why it declares `capacidades_por_defecto` instead of
-#     `modelos_fijos`. It is a GENERAL mechanism: any provider whose catalogue is
+#     which is why it declares `default_capabilities` instead of
+#     `fixed_models`. It is a GENERAL mechanism: any provider whose catalogue is
 #     equally bare can use it, it is not special to chatgpt. ---
 
 def test_chatgpt_is_discovered_via_models_path_not_via_fixed_models():
@@ -190,12 +190,12 @@ def test_minimax_declares_no_default_capabilities_either():
 def test_a_provider_without_default_capabilities_in_the_yaml_gets_none(tmp_path):
     yaml_no_defaults = tmp_path / "sin_defaults.yaml"
     yaml_no_defaults.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
-        "    dialecto: openai\n"
+        "    dialect: openai\n"
         "    base_url: https://suelto.test\n"
-        "    modelos_path: /models\n")
+        "    models_path: /models\n")
     p = load(str(yaml_no_defaults), {})[0]
     assert p.default_capabilities is None
 
@@ -213,7 +213,7 @@ def test_a_provider_without_default_capabilities_in_the_yaml_gets_none(tmp_path)
 # --- Finding 1 of the review: canvas unwrapping was GLOBAL, and ':::nota{...}'
 #     is also standard Docusaurus/MDX syntax -- it was verified live that a Kilo
 #     route lost those legitimate documentation markers. It becomes a PER-PROVIDER
-#     declaration, the same shape as capacidades_por_defecto: off by default, on
+#     declaration, the same shape as default_capabilities: off by default, on
 #     only for chatgpt. ---
 
 def test_chatgpt_declares_canvas_unwrapping():
@@ -229,12 +229,12 @@ def test_kilo_does_not_unwrap_canvas():
 def test_a_provider_without_canvas_unwrapping_in_the_yaml_defaults_to_false(tmp_path):
     yaml_no_canvas = tmp_path / "sin_canvas.yaml"
     yaml_no_canvas.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
-        "    dialecto: openai\n"
+        "    dialect: openai\n"
         "    base_url: https://suelto.test\n"
-        "    modelos_path: /models\n")
+        "    models_path: /models\n")
     p = load(str(yaml_no_canvas), {})[0]
     assert p.unwraps_canvas is False
 
@@ -254,7 +254,7 @@ def test_chatgpt_declares_its_own_timeout_in_the_real_yaml():
     # Task 14: chatgpt has priority:0 (it is tried first on EVERY request) and
     # runs on `blog`, a saturated machine -- without its own timeout_s, a hang
     # there cost up to the full TIMEOUT_S=90s per attempt. 45s (see the comment in
-    # proveedores.yaml for the measurement justifying it) halves that worst case
+    # providers.yaml for the measurement justifying it) halves that worst case
     # without lowering anyone else's timeout.
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s == 45.0
@@ -263,12 +263,12 @@ def test_chatgpt_declares_its_own_timeout_in_the_real_yaml():
 def test_a_provider_can_declare_its_own_timeout(tmp_path):
     yaml_with_timeout = tmp_path / "con_timeout.yaml"
     yaml_with_timeout.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: lento\n"
         "    tier: gratis\n"
-        "    dialecto: openai\n"
+        "    dialect: openai\n"
         "    base_url: https://lento.test\n"
-        "    modelos_path: /models\n"
+        "    models_path: /models\n"
         "    timeout_s: 20\n")
     p = load(str(yaml_with_timeout), {})[0]
     assert p.timeout_s == 20.0
@@ -327,13 +327,13 @@ def test_base_url_env_appends_nothing_when_the_default_has_no_suffix(tmp_path):
     # append anything out of nowhere either.
     yaml_no_suffix = tmp_path / "sin_sufijo.yaml"
     yaml_no_suffix.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: suelto\n"
         "    tier: gratis\n"
-        "    dialecto: openai\n"
+        "    dialect: openai\n"
         "    base_url_env: SUELTO_URL\n"
         "    base_url: https://suelto.test\n"
-        "    modelos_path: /models\n")
+        "    models_path: /models\n")
     p = load(str(yaml_no_suffix), {"SUELTO_URL": "https://otra.test"})[0]
     assert p.base_url == "https://otra.test"
 
@@ -373,18 +373,18 @@ def test_base_url_env_with_the_correct_path_logs_nothing(caplog):
 def test_fixed_routes_uses_the_providers_real_priority_not_a_constant(tmp_path):
     yaml_odd_priority = tmp_path / "prioridad_rara.yaml"
     yaml_odd_priority.write_text(
-        "proveedores:\n"
+        "providers:\n"
         "  - id: pago_futuro\n"
         "    tier: pago\n"
-        "    prioridad: 77\n"
-        "    dialecto: openai\n"
+        "    priority: 77\n"
+        "    dialect: openai\n"
         "    base_url: https://pago-futuro.test\n"
-        "    modelos_fijos:\n"
+        "    fixed_models:\n"
         "      - id: modelo-x\n"
         "        tools: true\n"
         "        vision: false\n"
-        "        contexto: 1000\n"
-        "        max_salida: 100\n")
+        "        context: 1000\n"
+        "        max_output: 100\n")
     p = load(str(yaml_odd_priority), {})[0]
     routes = fixed_routes(p)
     assert len(routes) == 1
@@ -393,7 +393,7 @@ def test_fixed_routes_uses_the_providers_real_priority_not_a_constant(tmp_path):
 
 def test_deepseek_declares_two_routes_with_emulated_tools():
     # deepseek-chat and deepseek-reasoner do not support native tool calling, but
-    # emula_tools:true makes fixed_routes() report tools=True in capabilities:
+    # emulates_tools:true makes fixed_routes() report tools=True in capabilities:
     # prompt-injection emulation (tool_emulator.py) is transparent to the router.
     # deepseek-vision is NOT declared: image input was never verified.
     ds = next(p for p in load(YAML, {}) if p.id == "deepseek")

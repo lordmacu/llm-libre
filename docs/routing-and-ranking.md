@@ -14,7 +14,7 @@ later, so get them straight first:
 |---|---|---|---|
 | **tier** | `gratis` \| `pago` | Does this route cost money? | `Ruta.tier` / `Proveedor.tier` |
 | **perfil** | `rapido` \| `balanceado` \| `potente` | What does *this request* prefer (speed vs. measured quality)? | `Pedido.perfil` (set by the `model` alias you asked for) |
-| **prioridad** | any integer, default `100` | Manual, operator-set ordering: which route gets tried first *before* anyone looks at a score | `Ruta.prioridad` / `Proveedor.prioridad` (from `proveedores.yaml`) |
+| **prioridad** | any integer, default `100` | Manual, operator-set ordering: which route gets tried first *before* anyone looks at a score | `Ruta.prioridad` / `Proveedor.prioridad` (from `providers.yaml`) |
 
 They never override each other. In particular: **a paid route with
 `prioridad: 0` still goes last.** `prioridad` only breaks ties *within* a
@@ -94,7 +94,7 @@ Two real routing decisions, observed against the live deployment:
   **`chatgpt/gpt-5-3-mini`** (`X-Tier: gratis`, `X-Intentos: 1`, ~4.5s).
 - The exact same prompt with `"model": "auto:tools"` fell through to
   **`kilo/cohere/north-mini-code:free`**, because every `chatgpt` route
-  declares `tools: false` in `proveedores.yaml` (the anonymous backend does
+  declares `tools: false` in `providers.yaml` (the anonymous backend does
   not support real function calling -- see the design spec for how that was
   verified) and so gets filtered out by step 1 above.
 

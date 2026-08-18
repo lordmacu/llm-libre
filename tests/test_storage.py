@@ -80,7 +80,7 @@ def test_the_provider_scope_does_not_change_the_default_behaviour(store):
     assert active == {"otro/otra:free"}   # kilo/vieja:free is switched off too, as before
 
 
-# --- Removing a provider from proveedores.yaml (e.g. openrouter) must not
+# --- Removing a provider from providers.yaml (e.g. openrouter) must not
 #     leave its routes at activa=1 forever: sync_catalogue can only remove, via
 #     its scope, what is STILL in the registry -- a provider that disappears
 #     entirely never passes through that loop again. This separate sweep covers
@@ -127,7 +127,7 @@ def test_deactivating_unregistered_providers_is_idempotent(store):
 
 
 def test_deactivating_unregistered_providers_with_an_empty_set_switches_off_nothing(store):
-    # Gate review: a syntactically valid `proveedores.yaml` with
+    # Gate review: a syntactically valid `providers.yaml` with
     # `proveedores: []` (more likely a truncated or badly edited file than a real
     # decision of "no providers") must not switch off the ENTIRE catalogue on the
     # first cycle -- an empty set is treated as "nothing is known yet", not as
@@ -333,7 +333,7 @@ def test_upsert_routes_without_a_declared_priority_persists_the_default(store):
 
 
 def test_resyncing_updates_an_existing_routes_priority(store):
-    # A `prioridad` change in the YAML (e.g. moving a provider up) has to
+    # A `priority` change in the YAML (e.g. moving a provider up) has to
     # propagate on the next sync, not stay stuck to the value the route was first
     # seen with.
     store.upsert_routes([_route("a:free", priority=1)], timestamp=100.0)

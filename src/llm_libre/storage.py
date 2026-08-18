@@ -63,7 +63,7 @@ WINDOW = 50  # how many recent observations weigh in reliability and latency
 
 # How far back POSITIVE EVIDENCE that a route works is searched for, for /health
 # (Task 13, round 6 review, Part 2). Larger than the default health-probe interval
-# (SONDEO_SALUD_HORAS=5h) with enough margin that ONE probing pass failing or
+# (HEALTH_PROBE_HOURS=5h) with enough margin that ONE probing pass failing or
 # running late does not drop the route to "no evidence" -- and generous for a PAID
 # route, which is never probed (design section 8) and can only prove it is alive
 # through real traffic, which may be sporadic (it is the fallback tier, not the
@@ -238,14 +238,14 @@ class Storage:
         that no longer appear) is SCOPED to each call's provider
         (`sync_catalogue` invokes it once per provider, with its own
         `provider=p.id`): a provider REMOVED entirely from the registry
-        (`proveedores.yaml`) is never synced again, so without this separate sweep
+        (`providers.yaml`) is never synced again, so without this separate sweep
         its routes would stay `active=1` forever -- visible in `GET /v1/models`
         and `GET /v1/ranking`, and eligible as routing candidates that would
         always fail (a 401 from a key that no longer exists, for instance),
         with nothing to switch them off.
 
         It is called once per probing cycle, from `probing.sync_catalogue`, with
-        the set of ids the PROCESS has loaded from `proveedores.yaml` at that
+        the set of ids the PROCESS has loaded from `providers.yaml` at that
         moment -- not a fixed list inside this function. Note the precision of
         that sentence (gate review): this does NOT mean a YAML edit takes effect
         on its own, without a restart -- `providers.load()` is called ONCE, at
@@ -260,7 +260,7 @@ class Storage:
         the logs when it actually has an effect).
 
         An empty `known_providers` is a deliberate special case (LOW from a gate
-        review): a syntactically valid `proveedores.yaml` with `proveedores: []`
+        review): a syntactically valid `providers.yaml` with `proveedores: []`
         (a truncated or badly hand-edited file, more likely than a real decision
         of "no providers") does NOT trigger the sweep -- it is treated as "nothing
         is known yet", not as "everything is orphaned", because the latter would

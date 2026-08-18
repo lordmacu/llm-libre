@@ -6,7 +6,7 @@ import pytest
 
 pytestmark = pytest.mark.vivo
 
-YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
+YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 # Ids that must NEVER appear in the discovered catalogue: the legacy aliases
 # chatgpt-proxy adds for compatibility, and "auto", reserved by llm-libre itself
@@ -58,7 +58,7 @@ async def test_chatgpt_proxy_answers_a_real_chat_when_configured():
 
     # The id used for the chat comes from the catalogue JUST DISCOVERED, not from
     # a constant in this file -- the same "no hardcoded ids" principle that
-    # governs all of proveedores.yaml.
+    # governs all of providers.yaml.
     model_id = sorted(ids)[0]
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(chatgpt.base_url.rstrip("/") + "/chat/completions",
@@ -71,7 +71,7 @@ async def test_chatgpt_proxy_answers_a_real_chat_when_configured():
 
 
 async def test_chatgpt_proxy_does_not_really_do_function_calling():
-    # The fact that sustains tools:false in proveedores.yaml: the user reported
+    # The fact that sustains tools:false in providers.yaml: the user reported
     # "we already have tools enabled" and this was verified by running it (not by
     # re-reading) -- the proxy no longer returns HTTP 500 when sent tools, but with
     # tool_choice:"required" it still returns tool_calls:None and prose.
@@ -108,7 +108,7 @@ async def test_chatgpt_proxy_does_not_really_do_function_calling():
         assert not msg.get("tool_calls"), (
             f"chatgpt-proxy returned tool_calls for {route.model_id}: if this happened, the "
             "anonymous backend started genuinely supporting function calling on that model "
-            "and tools:false in proveedores.yaml should be reconsidered")
+            "and tools:false in providers.yaml should be reconsidered")
         assert isinstance(msg.get("content"), str) and msg["content"].strip()
 
 

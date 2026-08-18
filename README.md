@@ -180,15 +180,15 @@ Variables de entorno (ver `.env.example`):
 | Variable | Default | Qué es |
 |---|---|---|
 | `LLM_LIBRE_API_KEYS` | *(sin default — obligatoria)* | Llaves que aceptan los clientes, separadas por coma. El proceso **no arranca** si falta o queda vacía: ver más abajo |
-| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `proveedores.yaml`. Idealmente incluye el `/v1` (sus rutas reales son `/v1/chat/completions` y `/v1/models`); si se pone **solo el host** (sin ninguna ruta), el `/v1` se agrega solo, con un aviso en el log. Si en cambio se pone **una ruta propia** (p.ej. un mount de reverse proxy, `.../v2`), esa ruta se respeta tal cual — no se le pisa nada, solo se avisa si no coincide con `/v1` por si fue sin querer |
+| `CHATGPT_PROXY_URL` | `http://127.0.0.1:8888/v1` (el default del YAML) | URL de `chatgpt-proxy` (servicio propio, se despliega en `blog`). Sin credenciales — solo la dirección, que todavía no está fija, por eso es configurable por entorno en vez de estar cableada en `providers.yaml`. Idealmente incluye el `/v1` (sus rutas reales son `/v1/chat/completions` y `/v1/models`); si se pone **solo el host** (sin ninguna ruta), el `/v1` se agrega solo, con un aviso en el log. Si en cambio se pone **una ruta propia** (p.ej. un mount de reverse proxy, `.../v2`), esa ruta se respeta tal cual — no se le pisa nada, solo se avisa si no coincide con `/v1` por si fue sin querer |
 | `KILO_API_KEY` | *(sin definir)* | Opcional. **Dejar SIN DEFINIR**, no en blanco — ver nota abajo |
 | `MINIMAX_API_KEY` | *(sin definir)* | Llave del proveedor de pago (escalón de fallback) |
-| `SONDEO_SALUD_HORAS` | `5` | Cada cuántas horas se sondea la salud de cada ruta |
-| `SONDEO_CALIDAD_CADA_N_CICLOS` | `5` | Cada cuántos ciclos de sondeo se corre además la batería de calidad |
-| `TOPE_PAGO_DIARIO` | `200` | Tope diario de peticiones al escalón de pago, por llave |
-| `LIMITE_POR_MINUTO` | `60` | Límite de peticiones por minuto, por llave |
+| `HEALTH_PROBE_HOURS` | `5` | Cada cuántas horas se sondea la salud de cada ruta |
+| `QUALITY_PROBE_EVERY_N_CYCLES` | `5` | Cada cuántos ciclos de sondeo se corre además la batería de calidad |
+| `DAILY_PAID_CAP` | `200` | Tope diario de peticiones al escalón de pago, por llave |
+| `PER_MINUTE_LIMIT` | `60` | Límite de peticiones por minuto, por llave |
 | `RUTA_DB` | `/datos/llm-libre.sqlite3` | Ruta del archivo SQLite (catálogo + telemetría) |
-| `PROVEEDORES_YAML` | `proveedores.yaml` | Ruta del registro de proveedores |
+| `PROVIDERS_YAML` | `providers.yaml` | Ruta del registro de proveedores |
 
 **`KILO_API_KEY` debe quedar sin definir**, no vacía-pero-presente: el tier
 anónimo de Kilo depende de que la petición viaje sin ninguna cabecera
@@ -215,7 +215,7 @@ redeploy. Eso **no** significa que el ranking arranque en cero por días
 (corregido, Task 14): `planificador` corre su primer ciclo de sondeo completo
 —catálogo, salud, Y la batería de calidad ENTERA, no solo salud— apenas
 arranca el proceso, antes de su primer `sleep`: el contador de ciclos empieza
-en `0`, y `0 % SONDEO_CALIDAD_CADA_N_CICLOS == 0` para cualquier valor sano de
+en `0`, y `0 % QUALITY_PROBE_EVERY_N_CYCLES == 0` para cualquier valor sano de
 esa variable. Verificado corriendo `sondeo.ciclo(estado, 0)` una vez contra un
 `Almacen` recién creado: deja filas `sondas.tipo='salud'` Y
 `sondas.tipo='calidad'` para cada ruta gratis en esa única pasada. Lo que sí
@@ -253,14 +253,14 @@ sincronización del catálogo.
   desenvuelve (en bloque y en streaming) conservando el texto de adentro —
   a diferencia de `<think>`, ahí ES la respuesta, no algo para descartar.
   **Es una declaración por proveedor** (`desenvuelve_canvas` en
-  `proveedores.yaml`, apagada por defecto), no algo universal:
+  `providers.yaml`, apagada por defecto), no algo universal:
   `:::nota{...}` / `:::tip{...}` es también sintaxis Docusaurus/MDX estándar,
   y aplicar el desenvuelto a ciegas le arrancaría esas marcas a una respuesta
   de documentación legítima de Kilo. Solo `chatgpt` lo declara.
 - **El catálogo de los proveedores gratis se descubre siempre desde su propio
   `/models`, nunca se hardcodea** — Kilo **y también `chatgpt`**:
   así un modelo que cambia de id, desaparece o aparece se detecta solo, sin
-  tocar código ni `proveedores.yaml`. Hay tres patrones en el registro, según
+  tocar código ni `providers.yaml`. Hay tres patrones en el registro, según
   qué trae el `/models` de cada uno (el registro es declarativo y abierto:
   `openrouter`, sacado del registro en producción el 2026-08-17 porque nunca
   tuvo clave configurada y sus 16 rutas 401-eaban siempre, sigue siendo un
@@ -283,8 +283,8 @@ sincronización del catálogo.
     `auto:vision`), reservado por el propio `interpretar_pedido` de
     llm-libre (colisiona con sus alias), se descarta como id reservado.
 - Cada ruta (proveedor + modelo) se sondea por **salud** cada
-  `SONDEO_SALUD_HORAS` (default 5 h) y, de las rutas gratis vivas, por
-  **calidad** cada `SONDEO_CALIDAD_CADA_N_CICLOS` ciclos (default 5, o sea
+  `HEALTH_PROBE_HOURS` (default 5 h) y, de las rutas gratis vivas, por
+  **calidad** cada `QUALITY_PROBE_EVERY_N_CYCLES` ciclos (default 5, o sea
   aproximadamente una vez al día) con una batería de casos verificables por
   código (JSON válido, tool call correcto, formato pedido, aritmética,
   idioma) — sin juez-LLM. Además de este ciclo, el proxy dispara sus
@@ -328,7 +328,7 @@ sincronización del catálogo.
   `ok` mientras quede una ruta viva. Un fallo aislado no castiga (evita
   sacar una ruta sana por un hiccup); al tercer fallo seguido, sí, con el
   mismo backoff exponencial que ya usa el `429`. Un proveedor puede además
-  declarar su propio `timeout_s` en `proveedores.yaml` (default: el
+  declarar su propio `timeout_s` en `providers.yaml` (default: el
   global, 90 s) para acotar el peor caso de uno que se sepa lento, sin
   bajarle el timeout a todos — aplica igual al camino síncrono y al de
   streaming.
@@ -498,7 +498,7 @@ sincronización del catálogo.
   ese tiempo ya "comido" del backoff).
 
   Un cliente ahora controla, indirectamente, cuándo se sondea una ruta —
-  hasta 60/h vía sospecha, contra 1 cada `SONDEO_SALUD_HORAS` del ciclo
+  hasta 60/h vía sospecha, contra 1 cada `HEALTH_PROBE_HOURS` del ciclo
   periódico, ~300× más muestreo posible — lo que sube la chance de agarrar
   un blip transitorio del proveedor justo en una sonda. Por eso `/health`
   exige **dos** sondas fallidas consecutivas (sin éxito de por medio), no
