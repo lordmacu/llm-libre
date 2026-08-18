@@ -8,123 +8,121 @@ pytestmark = pytest.mark.vivo
 
 YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
-# Ids que NUNCA deben aparecer en el catalogo descubierto: los alias legacy
-# que chatgpt-proxy agrega para compatibilidad, y "auto", reservado por
-# llm-libre mismo (colisiona con su propio alias en parse_request).
-_IDS_QUE_NO_DEBERIAN_APARECER = {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo", "auto"}
+# Ids that must NEVER appear in the discovered catalogue: the legacy aliases
+# chatgpt-proxy adds for compatibility, and "auto", reserved by llm-libre itself
+# (it collides with its own alias in parse_request).
+_IDS_THAT_MUST_NOT_APPEAR = {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo", "auto"}
 
 
-def _proveedor_chatgpt(url: str):
-    # `base_url` se resuelve igual que en produccion (proveedores.cargar), no
-    # se reconstruye la URL a mano: asi los tests usan exactamente el mismo
-    # camino (incluida la normalizacion de base_url_env) que el gateway real.
+def _chatgpt_provider(url: str):
+    # `base_url` is resolved exactly as in production (providers.load), the URL is
+    # not rebuilt by hand: this way the tests use exactly the same path (including
+    # base_url_env normalisation) as the real gateway.
     from llm_libre.providers import load
     return next(p for p in load(YAML, {"CHATGPT_PROXY_URL": url}) if p.id == "chatgpt")
 
 
-async def _rutas_chatgpt_descubiertas(chatgpt) -> list:
-    """Descubre el catalogo real de chatgpt-proxy -- NUNCA un id cableado a
-    mano, que es justo la regla que esta Task existe para hacer cumplir.
-    Compartido por los dos tests de abajo para que ninguno tenga que
-    adivinar un modelo: la revision encontro que un id hardcodeado
-    ("gpt-5-3-mini") que un dia deja de existir hace fallar el test con un
-    diagnostico ERRADO ("revento al mandarle tools, ¿volvio el 500 viejo?")
-    en vez de decir lo que de verdad paso (el id ya no existe)."""
+async def _discovered_chatgpt_routes(chatgpt) -> list:
+    """Discover chatgpt-proxy's real catalogue -- NEVER a hand-wired id, which is
+    precisely the rule this Task exists to enforce. Shared by the two tests below
+    so neither has to guess a model: the review found that a hardcoded id
+    ("gpt-5-3-mini") which one day stops existing makes the test fail with the
+    WRONG diagnosis ("it blew up when sent tools, is the old 500 back?") instead
+    of saying what actually happened (the id no longer exists)."""
     from llm_libre.catalog import normalize
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get(chatgpt.base_url.rstrip("/") + chatgpt.models_path)
-    assert r.status_code == 200, "chatgpt-proxy dejo de responder /v1/models"
-    rutas = normalize("chatgpt", r.json(), priority=chatgpt.priority,
-                      default_capabilities=chatgpt.default_capabilities)
-    assert rutas, "el catalogo descubierto de chatgpt-proxy vino vacio"
-    return rutas
+    assert r.status_code == 200, "chatgpt-proxy stopped answering /v1/models"
+    routes = normalize("chatgpt", r.json(), priority=chatgpt.priority,
+                       default_capabilities=chatgpt.default_capabilities)
+    assert routes, "chatgpt-proxy's discovered catalogue came back empty"
+    return routes
 
 
 async def test_chatgpt_proxy_answers_a_real_chat_when_configured():
-    # Se salta limpio si CHATGPT_PROXY_URL no esta seteada: este proxy es un
-    # servicio propio (blog), no siempre esta arriba, y a diferencia de Kilo
-    # /OpenRouter no hay una URL publica fija contra la que pegar siempre.
+    # It skips cleanly if CHATGPT_PROXY_URL is unset: this proxy is an in-house
+    # service (blog), it is not always up, and unlike Kilo/OpenRouter there is no
+    # fixed public URL to hit every time.
     url = os.getenv("CHATGPT_PROXY_URL")
     if not url:
-        pytest.skip("CHATGPT_PROXY_URL no esta configurada")
-    chatgpt = _proveedor_chatgpt(url)
+        pytest.skip("CHATGPT_PROXY_URL is not configured")
+    chatgpt = _chatgpt_provider(url)
 
-    # El catalogo es DESCUBIERTO (ver follow-up de Task 13): confirma contra
-    # el proxy real que sigue trayendo algo utilizable y que los alias/el id
-    # reservado siguen sin colarse.
-    rutas = await _rutas_chatgpt_descubiertas(chatgpt)
-    ids = {x.model_id for x in rutas}
-    assert not ids & _IDS_QUE_NO_DEBERIAN_APARECER
-    assert all(x.capabilities.tools is False for x in rutas)
+    # The catalogue is DISCOVERED (see the Task 13 follow-up): this confirms
+    # against the real proxy that it still returns something usable and that the
+    # aliases and the reserved id still do not slip through.
+    routes = await _discovered_chatgpt_routes(chatgpt)
+    ids = {x.model_id for x in routes}
+    assert not ids & _IDS_THAT_MUST_NOT_APPEAR
+    assert all(x.capabilities.tools is False for x in routes)
 
-    # El id para el chat sale del catalogo QUE ACABA DE DESCUBRIR, no de una
-    # constante en este archivo -- el mismo principio de "nada de ids
-    # cableados" que rige todo proveedores.yaml.
-    modelo_id = sorted(ids)[0]
+    # The id used for the chat comes from the catalogue JUST DISCOVERED, not from
+    # a constant in this file -- the same "no hardcoded ids" principle that
+    # governs all of proveedores.yaml.
+    model_id = sorted(ids)[0]
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post(chatgpt.base_url.rstrip("/") + "/chat/completions",
-                         json={"model": modelo_id,
+                         json={"model": model_id,
                                "messages": [{"role": "user", "content": "di hola"}]})
-    assert r.status_code == 200, f"chatgpt-proxy dejo de responder chat anonimo ({modelo_id})"
-    datos = r.json()
-    contenido = datos["choices"][0]["message"]["content"]
-    assert isinstance(contenido, str) and contenido.strip()
+    assert r.status_code == 200, f"chatgpt-proxy stopped answering anonymous chat ({model_id})"
+    data = r.json()
+    content = data["choices"][0]["message"]["content"]
+    assert isinstance(content, str) and content.strip()
 
 
 async def test_chatgpt_proxy_does_not_really_do_function_calling():
-    # El hecho que sostiene tools:false en proveedores.yaml: el usuario
-    # reporto "ya tenemos los tools habilitados" y esto se verifico
-    # ejecutando (no releyendo) -- el proxy ya NO devuelve HTTP 500 al
-    # mandarle tools, pero con tool_choice:"required" sigue devolviendo
-    # tool_calls:None y prosa.
+    # The fact that sustains tools:false in proveedores.yaml: the user reported
+    # "we already have tools enabled" and this was verified by running it (not by
+    # re-reading) -- the proxy no longer returns HTTP 500 when sent tools, but with
+    # tool_choice:"required" it still returns tool_calls:None and prose.
     #
-    # tools:false es una afirmacion sobre TODAS las rutas descubiertas de
-    # chatgpt, no sobre un modelo puntual (hallazgo de la revision): un
-    # backend que ganara function calling en un modelo distinto del
-    # probado dejaria este test en verde con el YAML ya mintiendo. Se
-    # prueban TODOS los ids que el catalogo real trajo, no uno solo.
+    # tools:false is a claim about ALL of chatgpt's discovered routes, not about
+    # one particular model (a review finding): a backend that gained function
+    # calling on a model other than the one tested would leave this test green
+    # with the YAML already lying. EVERY id the real catalogue returned is
+    # exercised, not just one.
     url = os.getenv("CHATGPT_PROXY_URL")
     if not url:
-        pytest.skip("CHATGPT_PROXY_URL no esta configurada")
+        pytest.skip("CHATGPT_PROXY_URL is not configured")
     from llm_libre.quality_suite import WEATHER_TOOL
 
-    chatgpt = _proveedor_chatgpt(url)
-    rutas = await _rutas_chatgpt_descubiertas(chatgpt)
+    chatgpt = _chatgpt_provider(url)
+    routes = await _discovered_chatgpt_routes(chatgpt)
 
-    for ruta in rutas:
+    for route in routes:
         async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(chatgpt.base_url.rstrip("/") + "/chat/completions",
-                             json={"model": ruta.model_id,
+                             json={"model": route.model_id,
                                    "messages": [{"role": "user",
-                                                "content": "Que clima hace en Bogota?"}],
+                                                 "content": "Que clima hace en Bogota?"}],
                                    "tools": [WEATHER_TOOL], "tool_choice": "required"})
-        # Mandarle tools ya no revienta (eso cambio, y esta bien): lo que se
-        # verifica es que la RESPUESTA sigue sin ser function calling de
-        # verdad. El mensaje distingue las dos formas de fallar -- el status
-        # code real dice si volvio el 500 viejo, si el id dejo de existir
-        # (404), o algo distinto -- en vez de asumir una sola causa.
+        # Sending it tools no longer blows up (that changed, and it is fine): what
+        # is verified is that the RESPONSE is still not real function calling. The
+        # message distinguishes the two ways of failing -- the real status code
+        # says whether the old 500 is back, whether the id stopped existing (404),
+        # or something else -- instead of assuming a single cause.
         assert r.status_code == 200, (
-            f"chatgpt-proxy devolvio HTTP {r.status_code} para {ruta.model_id} al "
-            "mandarle tools (revisar si volvio el 500 viejo o si el id ya no existe)")
+            f"chatgpt-proxy returned HTTP {r.status_code} for {route.model_id} when sent "
+            "tools (check whether the old 500 is back or the id no longer exists)")
         msg = r.json()["choices"][0]["message"]
         assert not msg.get("tool_calls"), (
-            f"chatgpt-proxy devolvio tool_calls para {ruta.model_id}: si esto paso, el "
-            "backend anonimo empezo a soportar function calling de verdad en ese modelo "
-            "y tools:false en proveedores.yaml deberia reconsiderarse")
+            f"chatgpt-proxy returned tool_calls for {route.model_id}: if this happened, the "
+            "anonymous backend started genuinely supporting function calling on that model "
+            "and tools:false in proveedores.yaml should be reconsidered")
         assert isinstance(msg.get("content"), str) and msg["content"].strip()
 
 
-async def test_kilo_sigue_aceptando_peticiones_anonimas():
+async def test_kilo_still_accepts_anonymous_requests():
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.post("https://api.kilo.ai/api/gateway/chat/completions",
                          json={"model": "kilo-auto/free", "max_tokens": 8,
                                "messages": [{"role": "user", "content": "ping"}]})
-    assert r.status_code == 200, "el tier anonimo de Kilo dejo de funcionar"
+    assert r.status_code == 200, "Kilo's anonymous tier stopped working"
 
 
 async def test_the_kilo_catalogue_carries_free_models_with_tools():
     from llm_libre.catalog import normalize
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get("https://api.kilo.ai/api/gateway/models")
-    rutas = normalize("kilo", r.json())
-    assert any(x.capabilities.tools for x in rutas)
+    routes = normalize("kilo", r.json())
+    assert any(x.capabilities.tools for x in routes)

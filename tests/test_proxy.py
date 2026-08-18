@@ -1209,35 +1209,35 @@ async def test_the_global_limit_frees_up_once_the_window_passes():
     assert len(ping_calls) == GLOBAL_PROBE_LIMIT_PER_MINUTE
 
     # The route that ran out of quota keeps its suspicion at the threshold (it is
-    # reset) -- beyond the global window, the next failure
-    # vuelve a intentar y esta vez el cupo esta libre.
-    faltante = routes[-1]
-    await p.complete([faltante], BODY, now=GLOBAL_PROBE_WINDOW_S + 10.0)
+    # reset) -- beyond the global window, the next failure tries again and this
+    # time the quota is free.
+    missing_route = routes[-1]
+    await p.complete([missing_route], BODY, now=GLOBAL_PROBE_WINDOW_S + 10.0)
     await p.wait_for_pending_probes()
     assert len(ping_calls) == GLOBAL_PROBE_LIMIT_PER_MINUTE + 1
 
 
-# --- Round 9, LOW 8 del gate: la sonda bajo demanda corre en un
-#     asyncio.Task en second plano -- una excepcion NO-HTTP (completar()
-#     solo atrapa httpx.HTTPError) quedaba sin recuperar, silenciosa, con
-#     `_sospechas` sin limpiar: la route quedaba trabada. ---
+# --- Round 9, LOW 8 from the gate: the on-demand probe runs in a background
+#     asyncio.Task -- a NON-HTTP exception (complete() only catches
+#     httpx.HTTPError) went unhandled, silently, with `_suspicions` uncleared: the
+#     route was left stuck. ---
 
 async def test_a_non_http_exception_in_the_probe_neither_blows_up_nor_punishes_blindly(caplog):
     p = _proxy(lambda req: httpx.Response(500))
-    # La excepcion tiene que pasar DENTRO del intento de la SONDA (el
-    # (SUSPICION_THRESHOLD+1)-esimo registrar_evento -- los primeros
-    # SUSPICION_THRESHOLD son el traffic real que arma la sospecha), y ANTES
-    # de que completar() llegue a su propia decision de castigo -- para
-    # que el veredicto quede genuinamente sin resolver, no ya tomado.
+    # The exception has to happen INSIDE the PROBE's attempt (the
+    # (SUSPICION_THRESHOLD+1)-th record_event -- the first SUSPICION_THRESHOLD are
+    # the real traffic that builds the suspicion), and BEFORE complete() reaches
+    # its own punishment decision -- so the verdict is left genuinely unresolved,
+    # not already taken.
     original = p.store.record_event
-    contador = {"n": 0}
+    counter = {"n": 0}
 
-    def _registrar_evento_que_a_veces_revienta(*a, **kw):
-        contador["n"] += 1
-        if contador["n"] > SUSPICION_THRESHOLD:
+    def _record_event_that_sometimes_blows_up(*a, **kw):
+        counter["n"] += 1
+        if counter["n"] > SUSPICION_THRESHOLD:
             raise RuntimeError("contencion simulada de sqlite bajo WAL")
         return original(*a, **kw)
-    p.store.record_event = _registrar_evento_que_a_veces_revienta
+    p.store.record_event = _record_event_that_sometimes_blows_up
 
     for i in range(SUSPICION_THRESHOLD):
         await p.complete([_route("a:free")], BODY, now=float(i))
@@ -1248,49 +1248,45 @@ async def test_a_non_http_exception_in_the_probe_neither_blows_up_nor_punishes_b
     assert "kilo/a:free" not in p._suspicions  # no queda trabada esperando para siempre
 
 
-# --- Round 10, fixes chicos del gate. ---
+# --- Round 10, small fixes from the gate. ---
 
 async def test_a_negative_or_non_finite_retry_after_falls_back_to_the_default():
-    # Un `Retry-After` hostil o roto (-5, nan) NO puede volver un cooldown
-    # de 0s -- un provider diciendo explicitamente "parate" (un 429 es tan
-    # inequivoco como una sonda) terminaria martillado de inmediato otra
-    # vez.
+    # A hostile or broken `Retry-After` (-5, nan) must NOT produce a 0s cooldown
+    # -- a provider explicitly saying "stop" (a 429 is as unambiguous as a probe)
+    # would end up hammered again immediately.
     #
-    # Revision post-Task-14 (gate): `_punish_429` estampa
-    # `ahora_del_castigo = now + latencia_real_medida/1000.0`, no `now`
-    # crudo (HIGH 2, round 9, ver el comentario de cabecera en proxy.py) --
-    # asi que una comparacion `==` estricta contra COOLDOWN_429_DEFAULT_S
-    # fallaba cada vez que el round-trip MOCKEADO cruzaba 1ms bajo carga
-    # (0/20 en aislado, 10/10 corriendo la suite completa en paralelo con
-    # otras cosas). `pytest.approx(..., abs=0.5)` es el mismo margen que ya
-    # usa el test del cooldown flat de pago para el mismo problema -- generoso
-    # contra el jitter real (nunca va a acercarse a medio second con un
-    # MockTransport) pero segundos mas chico que cualquier cambio real de
-    # comportamiento (p.ej. volver a escalar exponencial en vez de flat).
-    for valor in ("-5", "nan", "inf", "-inf", "no-es-un-numero"):
-        p = _proxy(lambda req, v=valor: httpx.Response(429, headers={"Retry-After": v}))
+    # Post-Task-14 review (gate): `_punish_429` stamps
+    # `punish_at = now + measured_real_latency/1000.0`, not the raw `now` (HIGH 2,
+    # round 9, see the header comment in proxy.py) -- so a strict `==` comparison
+    # against COOLDOWN_429_DEFAULT_S failed every time the MOCKED round-trip
+    # crossed 1ms under load (0/20 in isolation, 10/10 running the full suite in
+    # parallel with other things). `pytest.approx(..., abs=0.5)` is the same margin
+    # the flat paid-cooldown test already uses for the same problem -- generous
+    # against real jitter (it will never come close to half a second with a
+    # MockTransport) but seconds smaller than any real behaviour change (e.g.
+    # going back to exponential escalation instead of flat).
+    for value in ("-5", "nan", "inf", "-inf", "no-es-un-numero"):
+        p = _proxy(lambda req, v=value: httpx.Response(429, headers={"Retry-After": v}))
         await p.complete([_route("a:free")], BODY, now=0.0)
-        assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_DEFAULT_S, abs=0.5), valor
+        assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_DEFAULT_S, abs=0.5), value
 
 
 async def test_a_429_against_the_probe_is_not_recorded_as_a_failed_health_probe():
-    # Un rate-limit contra la sonda YA tiene su propio castigo proporcional
-    # (_punish_429, adentro de completar()) -- no es evidencia de que la
-    # route este ROTA, es evidencia de que esta rate-limitada AHORA MISMO.
-    # Grabarlo tambien como sonda de salud fallida lo confundiria con una
-    # route genuinamente caida.
+    # A rate limit against the probe ALREADY has its own proportional punishment
+    # (_punish_429, inside complete()) -- it is not evidence that the route is
+    # BROKEN, it is evidence that it is rate-limited RIGHT NOW. Recording it also
+    # as a failed health probe would confuse it with a genuinely downed route.
     p = _proxy(lambda req: httpx.Response(429))
     await p._probe_on_demand(_route("a:free"), now=100.0)
     assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
-    # Pero SI castigo -- el 429 tiene su propio camino, sin pasar por sondas.
+    # But it DID punish -- the 429 has its own path, bypassing probes entirely.
     assert "kilo/a:free" in p.cooldowns
 
 
 async def test_the_probe_row_is_stamped_at_resolution_not_at_scheduling():
-    # Misma clase de bug que HIGH 2 (round 9), un escalon mas arriba: para
-    # una route colgada, la row de `sondas` quedaba fechada hasta
-    # TIMEOUT_S=90s en el pasado, pudiendo des-ordenar el
-    # `ORDER BY momento DESC` que usa tiene_evidencia_de_vida.
+    # The same class of bug as HIGH 2 (round 9), one level up: for a hung route,
+    # the `sondas` row was dated up to TIMEOUT_S=90s in the past, which could
+    # mis-order the `ORDER BY momento DESC` that has_liveness_evidence relies on.
     delay_s = 0.05
 
     async def handler(req):

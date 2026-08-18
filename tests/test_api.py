@@ -1138,7 +1138,7 @@ def test_paid_streaming_counts_usage_and_the_cap_binds():
     # counts usage -- and a second one, with the cap already exhausted, stops
     # offering the paid route (the only provider answering correctly is the paid
     # one; with the cap exhausted the chain is left with no viable candidates and
-    # the stream falls to "sin rutas disponibles" without paying again).
+    # the stream falls to the "no routes available" body without paying again).
     state, client = _free_and_paid_state(
         daily_paid_cap=1,
         make_free_response=lambda: httpx.Response(500, json={"error": "free caida"}),

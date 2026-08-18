@@ -406,27 +406,25 @@ def test_migrating_an_old_database_is_idempotent(tmp_path):
     assert again.active_routes() == []
 
 
-# --- Revision round 6 de Task 13, Parte 2. La clasificacion correcta de
-#     codigos (Parte 1) no alcanza: `403` es GENUINAMENTE ambiguo -- cuenta
-#     suspendida (evidencia de la ruta) o contenido moderado (evidencia del
-#     PEDIDO) -- y el gateway no puede distinguirlos sin parsear el cuerpo
-#     especifico de cada proveedor. Clasificarlo como evidencia de ruta
-#     (correcto para el primer caso) lo deja vulnerable al segundo: 30
-#     pedidos con contenido moderado de UN cliente bastan para tirar
-#     confiabilidad (un PROMEDIO de las ultimas 50 observaciones) por el
-#     piso para TODOS.
+# --- Round 6 review of Task 13, Part 2. Classifying the codes correctly (Part 1)
+#     is not enough: `403` is GENUINELY ambiguous -- a suspended account (route
+#     evidence) or moderated content (evidence about the REQUEST) -- and the
+#     gateway cannot tell them apart without parsing each provider's specific
+#     body. Classifying it as route evidence (correct for the first case) leaves it
+#     vulnerable to the second: 30 requests with moderated content from ONE client
+#     are enough to sink reliability (an AVERAGE of the last 50 observations) for
+#     EVERYONE.
 #
-#     Redisenio: /health deja de usar confiabilidad. Pasa a ser "evidencia
-#     de vida", no "ausencia de muerte" -- UN exito reciente prueba que la
-#     ruta sirve; mil fallos de un mismo cliente no prueban que no puede.
-#     `/v1/ranking` SIGUE usando confiabilidad exactamente como antes (no
-#     se toca): una ruta mal puntuada solo pierde posicion y se
-#     autocorrige, mientras que /health mal informado REINICIA EL
-#     CONTENEDOR (Coolify) -- la asimetria es el punto. ---
+#     Redesign: /health stops using reliability. It becomes "evidence of life", not
+#     "absence of death" -- ONE recent success proves the route serves; a thousand
+#     failures from one client do not prove it cannot. `/v1/ranking` KEEPS using
+#     reliability exactly as before (untouched): a badly scored route merely loses
+#     position and self-corrects, whereas a misinformed /health RESTARTS THE
+#     CONTAINER (Coolify) -- the asymmetry is the point. ---
 
 def test_liveness_evidence_with_no_telemetry_at_all(store):
-    # Ruta recien vista: no nacio muerta, todavia no tuvo su primera
-    # oportunidad ni para bien ni para mal.
+    # A freshly seen route: it was not born dead, it simply has not had its first
+    # chance yet, for better or worse.
     store.upsert_routes([_route()], timestamp=100.0)
     assert store.has_liveness_evidence("kilo/a:free", now=100.0) is True
 
@@ -445,18 +443,17 @@ def test_liveness_evidence_from_a_recent_successful_health_probe(store):
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-# --- Round 10, MEDIUM del gate: el chequeo de respaldo ("nada dentro de la
-#     ventana") miraba CUALQUIER evento real -- exito o FALLO -- para
-#     decidir "hay historia, declarar muerta". Medido: un solo pedido real
-#     fallido (menos que SUSPICION_THRESHOLD, asi que ninguna sonda bajo
-#     demanda llega a dispararse) bastaba para tirar /health a "caido" --
-#     contradice el principio del modulo, "mil fallos de un mismo cliente
-#     no prueban que la ruta este rota". Ahora SOLO una SONDA (nunca un
-#     evento real, exito o fallo) cuenta como "hay historia". ---
+# --- Round 10, MEDIUM from the gate: the fallback check ("nothing within the
+#     window") looked at ANY real event -- success OR FAILURE -- to decide "there
+#     is history, declare it dead". Measured: a single failed real request (fewer
+#     than SUSPICION_THRESHOLD, so no on-demand probe ever fires) was enough to
+#     drop /health to "caido" -- contradicting the module's principle, "a thousand
+#     failures from one client do not prove the route is broken". Now ONLY a PROBE
+#     (never a real event, success or failure) counts as "there is history". ---
 
 def test_real_failures_alone_without_any_probe_do_not_declare_it_dead(store):
-    # El camino que el trafico real SOLO puede activar (sin ninguna sonda
-    # de por medio) ya no alcanza -- ni con 30 fallos.
+    # The path real traffic can trigger ON ITS OWN (with no probe in between) is
+    # no longer enough -- not even with 30 failures.
     store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
         store.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
@@ -464,9 +461,9 @@ def test_real_failures_alone_without_any_probe_do_not_declare_it_dead(store):
 
 
 def test_real_failures_with_two_failed_probes_confirming_do_declare_it_dead(store):
-    # El camino REAL para llegar a "muerta": trafico real dispara sospecha
-    # (round 8), sospecha dispara sondas, y son DOS sondas fallidas
-    # consecutivas (round 9) las que confirman -- nunca el trafico solo.
+    # The REAL path to "dead": real traffic triggers suspicion (round 8),
+    # suspicion fires probes, and it is TWO consecutive failed probes (round 9)
+    # that confirm it -- never the traffic alone.
     store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
         store.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
@@ -476,9 +473,9 @@ def test_real_failures_with_two_failed_probes_confirming_do_declare_it_dead(stor
 
 
 def test_liveness_evidence_holds_when_every_failure_is_a_client_error(store):
-    # Una ruta que SOLO recibio pedidos malformados (400/413/422, Parte 1)
-    # todavia no tuvo su primera oportunidad de verdad -- se trata igual
-    # que "sin telemetria", no como "muerta".
+    # A route that ONLY received malformed requests (400/413/422, Part 1) has not
+    # had its first real chance yet -- it is treated the same as "no telemetry",
+    # not as "dead".
     store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
         store.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
@@ -506,14 +503,13 @@ def test_a_success_outside_the_window_with_two_recent_failed_probes_is_dead(stor
     assert store.has_liveness_evidence("kilo/a:free", now=now) is False
 
 
-# --- Round 9, hallazgo del gate ("el camino indirecto de /health"): desde
-#     que el trafico real puede disparar sondas BAJO DEMANDA (hasta 60/h por
-#     ruta, ~300x mas seguido que el ciclo periodico de 5h), un cliente
-#     controla CUANDO se muestrea una ruta -- mas muestras, mas chances de
-#     agarrar por azar un problema transitorio del proveedor en UNA sola
-#     sonda, y que /health lo trate como veredicto definitivo (sobrevive un
-#     reinicio de contenedor). Decision: UNA sonda fallida sola YA NO
-#     alcanza -- hacen falta DOS consecutivas, sin exito de por medio. ---
+# --- Round 9, a gate finding ("/health's indirect path"): since real traffic can
+#     fire ON-DEMAND probes (up to 60/h per route, ~300x more often than the
+#     periodic 5h cycle), a client controls WHEN a route is sampled -- more
+#     samples, more chances of catching, by pure luck, a transient provider problem
+#     in ONE probe, and having /health treat it as a definitive verdict (it
+#     survives a container restart). Decision: ONE failed probe alone is NO LONGER
+#     enough -- TWO consecutive ones are required, with no success in between. ---
 
 def test_a_single_failed_probe_is_no_longer_enough_to_declare_it_dead(store):
     store.upsert_routes([_route()], timestamp=100.0)
@@ -529,27 +525,26 @@ def test_two_consecutive_failed_probes_do_declare_it_dead(store):
 
 
 def test_a_failed_probe_right_after_a_success_is_not_enough(store):
-    # Un solo fallo precedido por un exito NO es "dos consecutivos": la
-    # señal mas vieja de las dos ultimas es un exito, no otro fallo.
+    # A single failure preceded by a success is NOT "two consecutive": the older
+    # of the last two signals is a success, not another failure.
     store.upsert_routes([_route()], timestamp=100.0)
     store.record_event("kilo/a:free", True, 50, 200, 140.0)
     store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-# --- Round 7, MEDIUM del gate: `tiene_evidencia_de_vida` solo miraba sondas
-#     EXITOSAS -- una sonda con `ok=0` era invisible para la funcion.
-#     Reproducido: las cinco rutas muertas, el ultimo exito real hace 20h
-#     (adentro de la ventana de 24h), pero CUATRO sondas de salud fallidas
-#     desde entonces (una cada 5h, el default de sondeo) -- la funcion
-#     encontraba el exito viejo, se quedaba con el, y jamas miraba lo que
-#     paso DESPUES. El argumento que ya justifica confiar en una sonda
-#     EXITOSA (el gateway controla su propio payload, asi que no hay
-#     ambiguedad posible de "esto es sobre el pedido") vale IGUAL para una
-#     sonda FALLIDA: es evidencia inequivoca de que la ruta esta rota, no
-#     solo de que esta viva. La ventana de 24h es defendible para una ruta
-#     de PAGO que nunca se sondea; no lo es para una ruta gratis sondeada
-#     cada 5h cuyos ultimos cuatro resultados son CONOCIDOS y se descartaban. ---
+# --- Round 7, MEDIUM from the gate: `has_liveness_evidence` only looked at
+#     SUCCESSFUL probes -- a probe with `ok=0` was invisible to the function.
+#     Reproduced: all five routes dead, the last real success 20h ago (inside the
+#     24h window), but FOUR failed health probes since then (one every 5h, the
+#     probing default) -- the function found the old success, settled on it, and
+#     never looked at what happened AFTERWARDS. The argument that already justifies
+#     trusting a SUCCESSFUL probe (the gateway controls its own payload, so there
+#     is no possible "this is about the request" ambiguity) applies EQUALLY to a
+#     FAILED probe: it is unambiguous evidence that the route is broken, not only
+#     that it is alive. The 24h window is defensible for a PAID route that is never
+#     probed; it is not for a free route probed every 5h whose last four results
+#     are KNOWN and were being discarded. ---
 
 def test_a_failed_probe_newer_than_an_old_success_declares_the_route_dead(store):
     store.upsert_routes([_route()], timestamp=0.0)
@@ -557,8 +552,8 @@ def test_a_failed_probe_newer_than_an_old_success_declares_the_route_dead(store)
     twenty_hours = 20 * 3600.0
     five_hours = 5 * 3600.0
     store.record_event("kilo/a:free", True, 50, 200, now - twenty_hours)
-    # Cuatro sondas de salud FALLIDAS desde entonces, una cada 5h -- todas
-    # mas recientes que el exito de arriba, la ULTIMA hace apenas 1h.
+    # Four FAILED health probes since then, one every 5h -- all of them newer than
+    # the success above, the LAST one barely 1h ago.
     for i in range(1, 5):
         store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
                                 now - twenty_hours + i * five_hours)
@@ -566,10 +561,10 @@ def test_a_failed_probe_newer_than_an_old_success_declares_the_route_dead(store)
 
 
 def test_a_real_success_newer_than_a_failed_probe_declares_the_route_alive(store):
-    # Simetrico al de arriba: si DESPUES de una sonda fallida hay un exito
-    # real (un cliente de verdad recibio respuesta), esa es la senal mas
-    # nueva y gana -- la ruta esta viva AHORA, sin importar el tropiezo
-    # anterior de la sonda.
+    # Symmetric to the one above: if AFTER a failed probe there is a real success
+    # (an actual client received a response), that is the newest signal and it
+    # wins -- the route is alive NOW, regardless of the probe stumbling
+    # earlier.
     store.upsert_routes([_route()], timestamp=0.0)
     store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
     store.record_event("kilo/a:free", True, 50, 200, 150.0)
