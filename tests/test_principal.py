@@ -36,7 +36,7 @@ def test_crear_estado_con_llaves_vacias_o_solo_comas_tambien_falla(monkeypatch):
 def test_crear_estado_con_llaves_configuradas_funciona(monkeypatch):
     monkeypatch.setenv("LLM_LIBRE_API_KEYS", "una-llave, otra-llave")
     estado = principal.crear_estado()
-    assert estado.llaves == {"una-llave", "otra-llave"}
-    assert estado.proveedores  # cargo el YAML real del repo
-    assert estado.almacen is not None
+    assert estado.api_keys == {"una-llave", "otra-llave"}
+    assert estado.providers  # cargo el YAML real del repo
+    assert estado.store is not None
     assert estado.proxy is not None

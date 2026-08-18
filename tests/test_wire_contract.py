@@ -25,7 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from llm_libre.storage import Storage
-from llm_libre.api import Estado, crear_app, interpretar_pedido
+from llm_libre.api import State, create_app, parse_request
 from llm_libre.models import GATEWAY_EXTENSIONS, Capabilities, Route
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
@@ -43,9 +43,9 @@ def cliente():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=200)
-    return TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=200)
+    return TestClient(create_app(estado))
 
 
 AUTH = {"Authorization": "Bearer buena"}
@@ -129,15 +129,15 @@ def test_gateway_extension_names():
 
 
 def test_model_aliases_and_profiles():
-    assert interpretar_pedido({"model": "auto"}).profile == "balanceado"
-    assert interpretar_pedido({"model": "auto:rapido"}).profile == "rapido"
-    assert interpretar_pedido({"model": "auto:potente"}).profile == "potente"
-    assert interpretar_pedido({"model": "auto:tools"}).needs_tools is True
-    assert interpretar_pedido({"model": "auto:vision"}).needs_vision is True
+    assert parse_request({"model": "auto"}).profile == "balanceado"
+    assert parse_request({"model": "auto:rapido"}).profile == "rapido"
+    assert parse_request({"model": "auto:potente"}).profile == "potente"
+    assert parse_request({"model": "auto:tools"}).needs_tools is True
+    assert parse_request({"model": "auto:vision"}).needs_vision is True
 
 
 def test_requiere_values_are_capability_names():
-    p = interpretar_pedido({"model": "auto", "x_requiere": ["tools", "vision"]})
+    p = parse_request({"model": "auto", "x_requiere": ["tools", "vision"]})
     assert p.needs_tools and p.needs_vision
 
 

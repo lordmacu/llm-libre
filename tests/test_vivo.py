@@ -10,7 +10,7 @@ YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
 # Ids que NUNCA deben aparecer en el catalogo descubierto: los alias legacy
 # que chatgpt-proxy agrega para compatibilidad, y "auto", reservado por
-# llm-libre mismo (colisiona con su propio alias en interpretar_pedido).
+# llm-libre mismo (colisiona con su propio alias en parse_request).
 _IDS_QUE_NO_DEBERIAN_APARECER = {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo", "auto"}
 
 

@@ -52,14 +52,14 @@ _META_ROUTER = (
 _DISCARD = re.compile("|".join(_SPECIALITY + _META_ROUTER), re.IGNORECASE)
 
 # Ids reserved by llm-libre ITSELF, not by any provider: "auto" collides with
-# interpretar_pedido's own alias (api.py). Asking for the model "auto" always
+# parse_request's own alias (api.py). Asking for the model "auto" always
 # resolves to the alias, never to a real route -- so a route with that literal
 # modelo_id would be unreachable forever. It is filtered here, at discovery time,
 # so that NO provider (present or future) can accidentally sneak in an invalid
 # route by name collision.
 #
 # INFO from the round 6 review: the literal "auto" is not enough. `ALIAS` in
-# api.py (and `interpretar_pedido`) also treats as a reserved alias ANY id of the
+# api.py (and `parse_request`) also treats as a reserved alias ANY id of the
 # form "auto:<suffix>" -- "auto:rapido", "auto:potente", "auto:tools",
 # "auto:vision" -- resolving it ALWAYS before comparing against `pedido.model`.
 # A provider publishing a real model under one of those ids (or any other
@@ -71,7 +71,7 @@ RESERVED_IDS = frozenset({"auto"})
 
 def is_reserved_id(id_: str) -> bool:
     """True if `id_` collides with "auto" or with any compound alias
-    "auto:<suffix>" that interpretar_pedido (api.py) resolves before comparing
+    "auto:<suffix>" that parse_request (api.py) resolves before comparing
     against a literal id -- see the comment above RESERVED_IDS."""
     return id_ in RESERVED_IDS or id_.startswith("auto:")
 

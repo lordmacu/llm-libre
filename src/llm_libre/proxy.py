@@ -320,10 +320,10 @@ class ProxyResponse:
 
 
 class Proxy:
-    def __init__(self, proveedores: dict, almacen, cliente_http: httpx.AsyncClient):
-        self.proveedores = proveedores
-        self.almacen = almacen
-        self.http = cliente_http
+    def __init__(self, proveedores: dict, almacen, http_client: httpx.AsyncClient):
+        self.providers = proveedores
+        self.store = almacen
+        self.http = http_client
         self.cooldowns: dict[str, float] = {}
         self._punishments: dict[str, int] = {}
         # Round 9: how many generations of cooldown/punishment this key has had
@@ -386,7 +386,7 @@ class Proxy:
         ultimo_codigo = 0
         claves_del_pedido = {ruta.key for ruta in rutas}
         for ruta in rutas:
-            proveedor = self.proveedores[ruta.provider]
+            proveedor = self.providers[ruta.provider]
             url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.model_id)
             intentos += 1
             t0 = time.monotonic()
@@ -454,7 +454,7 @@ class Proxy:
                     ultimo_error = "200 sin contenido ni tool_calls"
 
             exito = codigo == 200 and datos is not None
-            self.almacen.record_event(ruta.key, exito, 0, codigo, ahora,
+            self.store.record_event(ruta.key, exito, 0, codigo, ahora,
                                           latency_ms=latencia,
                                           is_client_error=_is_client_error(codigo))
 
@@ -529,7 +529,7 @@ class Proxy:
         complete() uses, so the two branches cannot drift apart again (that was
         precisely round 8's vector)."""
         for ruta in rutas:
-            proveedor = self.proveedores[ruta.provider]
+            proveedor = self.providers[ruta.provider]
             url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.model_id)
             payload["stream"] = True
             t0 = time.monotonic()
@@ -558,7 +558,7 @@ class Proxy:
                 if not evento_registrado:
                     ttft = (ttft_medido_ms if ttft_medido_ms is not None
                             else int((time.monotonic() - t0) * 1000))
-                    self.almacen.record_event(ruta.key, True, ttft, 200, ahora)
+                    self.store.record_event(ruta.key, True, ttft, 200, ahora)
                     evento_registrado = True
                     self._clear_punishment(ruta.key)
                     self._suspicions.pop(ruta.key, None)
@@ -576,7 +576,7 @@ class Proxy:
                         elif not _is_client_error(resp.status_code):
                             self._react_to_non_429_failure(
                                 ruta, ahora, ahora_del_castigo, is_probe=False)
-                        self.almacen.record_event(
+                        self.store.record_event(
                             ruta.key, False, 0, resp.status_code, ahora,
                             is_client_error=_is_client_error(resp.status_code))
                         continue
@@ -664,7 +664,7 @@ class Proxy:
                         # normal path -- a FAILED attempt and failover to the next
                         # route. Nothing was emitted, so it stays clean.
                         if not evento_registrado:
-                            self.almacen.record_event(ruta.key, False, 0, 200, ahora)
+                            self.store.record_event(ruta.key, False, 0, 200, ahora)
                             evento_registrado = True
                             self._react_to_non_429_failure(
                                 ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
@@ -769,7 +769,7 @@ class Proxy:
                         # left with no answer -- it is recorded as a FAILED
                         # attempt and falls through to the next route.
                         if not evento_registrado:
-                            self.almacen.record_event(ruta.key, False, 0, 200, ahora)
+                            self.store.record_event(ruta.key, False, 0, 200, ahora)
                             evento_registrado = True
                             self._react_to_non_429_failure(
                                 ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
@@ -800,7 +800,7 @@ class Proxy:
                     return
             except httpx.HTTPError:
                 if not evento_registrado:
-                    self.almacen.record_event(ruta.key, False, 0, 0, ahora)
+                    self.store.record_event(ruta.key, False, 0, 0, ahora)
                     self._react_to_non_429_failure(
                         ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
                 if emitido:
@@ -1040,7 +1040,7 @@ class Proxy:
                 # the probe would be enough for `has_liveness_evidence` (round 9)
                 # to declare it dead -- a momentary capacity signal is not
                 # evidence of death.
-                self.almacen.record_probe(ruta.key, "salud", r.status == 200, ms, 0,
+                self.store.record_probe(ruta.key, "salud", r.status == 200, ms, 0,
                                              r.upstream_code, 0, 0, ahora_resuelto)
             if r.status == 200 and self._cooldown_generation.get(ruta.key, 0) == generacion_antes:
                 self._clear_punishment(ruta.key)

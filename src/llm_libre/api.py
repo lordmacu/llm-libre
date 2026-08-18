@@ -14,11 +14,11 @@ from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPCION, HEALTH_DOCS,
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
 
-PERFILES = {"rapido", "balanceado", "potente"}
-ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
+PROFILES = {"rapido", "balanceado", "potente"}
+ALIASES = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
 
 
-def _leer_campo(campo: str, valor_bruto, mensaje: str, calcular):
+def _read_field(campo: str, valor_bruto, mensaje: str, calcular):
     """Corre `calcular` (una funcion de cero argumentos que interpreta
     `valor_bruto` -- un valor que vino TAL CUAL del cuerpo JSON del
     cliente, nunca algo que el gateway arma) y convierte cualquier
@@ -48,7 +48,7 @@ def _leer_campo(campo: str, valor_bruto, mensaje: str, calcular):
             "message": mensaje, "campo": campo, "valor_recibido": valor_bruto})
 
 
-def _hay_imagen(cuerpo: dict) -> bool:
+def _has_image(cuerpo: dict) -> bool:
     """True si algun mensaje trae una imagen.
 
     En el formato OpenAI, `content` es un string (solo texto) o una LISTA de
@@ -83,21 +83,21 @@ def _hay_imagen(cuerpo: dict) -> bool:
     return False
 
 
-def interpretar_pedido(cuerpo: dict) -> RouteRequest:
+def parse_request(cuerpo: dict) -> RouteRequest:
     # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
     # colarse como si fuera un id explicito (quedaria vacio tras el strip y
     # produciria un 404 confuso sobre el modelo '').
     modelo_bruto = cuerpo.get("model")
-    modelo_pedido = _leer_campo(
+    modelo_pedido = _read_field(
         "model", modelo_bruto, "model debe ser un string",
         lambda: (modelo_bruto or "").strip()) or "auto"
     modelo, perfil = None, "balanceado"
     requiere_tools = bool(cuerpo.get("tools"))
-    requiere_vision = _hay_imagen(cuerpo)
+    requiere_vision = _has_image(cuerpo)
 
     if modelo_pedido == "auto" or modelo_pedido.startswith("auto:"):
         sufijo = modelo_pedido[5:] if ":" in modelo_pedido else ""
-        if sufijo in PERFILES:
+        if sufijo in PROFILES:
             perfil = sufijo
         elif sufijo == "tools":
             requiere_tools = True
@@ -113,12 +113,12 @@ def interpretar_pedido(cuerpo: dict) -> RouteRequest:
             # agente que espera una tool_call) eso es peligroso en silencio:
             # recibe una respuesta "balanceada" comun, no el 400 que le
             # habria dicho que escribio mal el alias. "auto" sin ":" (sufijo
-            # == "") sigue siendo valido y NO entra aca -- ver PERFILES,
+            # == "") sigue siendo valido y NO entra aca -- ver PROFILES,
             # que ya incluye "balanceado" (asi que "auto:balanceado"
             # tambien resuelve normal, sin pasar por esta rama).
             raise HTTPException(400, {
                 "message": f"alias de modelo desconocido: '{modelo_pedido}'",
-                "sugerencias": ALIAS,
+                "sugerencias": ALIASES,
             })
     else:
         modelo = modelo_pedido
@@ -129,7 +129,7 @@ def interpretar_pedido(cuerpo: dict) -> RouteRequest:
         # comun. Cualquier otra cosa que no sea un string ni una lista (o
         # una lista con un elemento no-hasheable, como `[["tools"]]`)
         # revienta ADENTRO de este `set(...)` con TypeError -- eso es lo
-        # que `_leer_campo` atrapa y convierte en 400. `set("tools")`
+        # que `_read_field` atrapa y convierte en 400. `set("tools")`
         # (sin el envoltorio de arriba) iteraria caracter por caracter
         # -- {'t','o','l','s'} -- y la exigencia se ignoraria en
         # silencio; por eso el string se envuelve en una lista ANTES del
@@ -138,13 +138,13 @@ def interpretar_pedido(cuerpo: dict) -> RouteRequest:
         if isinstance(valor, str):
             valor = [valor]
         return set(valor)
-    exigidas = _leer_campo(
+    exigidas = _read_field(
         "x_requiere", cuerpo.get("x_requiere"),
         "x_requiere debe ser un string o una lista de strings",
         _normalizar_exigidas)
 
     x_min_contexto_bruto = cuerpo.get("x_min_contexto")
-    min_contexto = _leer_campo(
+    min_contexto = _read_field(
         "x_min_contexto", x_min_contexto_bruto,
         "x_min_contexto debe ser un numero entero",
         lambda: int(x_min_contexto_bruto) if x_min_contexto_bruto else 0)
@@ -160,22 +160,22 @@ def interpretar_pedido(cuerpo: dict) -> RouteRequest:
 
 
 @dataclass
-class Estado:
-    almacen: object
+class State:
+    store: object
     proxy: object
-    llaves: set
-    tope_pago_diario: int
-    limitador: PerKeyRateLimiter = field(default_factory=lambda: PerKeyRateLimiter(60))
-    proveedores: list = field(default_factory=list)   # lo usa el planificador
+    api_keys: set
+    daily_paid_cap: int
+    rate_limiter: PerKeyRateLimiter = field(default_factory=lambda: PerKeyRateLimiter(60))
+    providers: list = field(default_factory=list)   # lo usa el planificador
     http: object = None                                # cliente httpx compartido
     # Generador para el sorteo entre rutas empatadas (ver router.shuffle_ties).
     # None = sin sorteo, orden estrictamente determinista. Se inyecta desde
     # principal.crear_estado() segun ROTAR_EMPATES para que los tests puedan
-    # armar un Estado determinista sin pasar por variables de entorno.
-    aleatorio: object = None
+    # armar un State determinista sin pasar por variables de entorno.
+    rng: object = None
 
 
-def _resolver_llave(x_api_key: str | None, authorization: str | None) -> str | None:
+def _resolve_api_key(x_api_key: str | None, authorization: str | None) -> str | None:
     """Acepta la llave por `X-API-Key` (convencion que ya usa `arkiv-api`,
     el gateway hermano) o por `Authorization: Bearer <llave>` (lo que manda
     sin configuracion extra CUALQUIER SDK de OpenAI via su parametro
@@ -197,51 +197,51 @@ def _resolver_llave(x_api_key: str | None, authorization: str | None) -> str | N
     return partes[1].strip() or None
 
 
-def crear_app(estado: Estado) -> FastAPI:
+def create_app(estado: State) -> FastAPI:
     # title/version/summary/description y personalizar_openapi (Task 14) solo
     # enriquecen lo que sirve /docs y /openapi.json -- ver llm_libre.openapi.
-    # No tocan ninguna ruta ni su logica: exigir_llave, interpretar_pedido y
+    # No tocan ninguna ruta ni su logica: require_api_key, parse_request y
     # el passthrough de completions siguen exactamente igual.
     app = FastAPI(title=TITULO, version=VERSION, summary=RESUMEN, description=DESCRIPCION)
     personalizar_openapi(app)
 
-    def exigir_llave(x_api_key: str | None, authorization: str | None = None) -> str:
-        llave = _resolver_llave(x_api_key, authorization)
-        if not llave or llave not in estado.llaves:
+    def require_api_key(x_api_key: str | None, authorization: str | None = None) -> str:
+        llave = _resolve_api_key(x_api_key, authorization)
+        if not llave or llave not in estado.api_keys:
             raise HTTPException(401, "llave invalida")
-        if not estado.limitador.allow(llave, time.time()):
+        if not estado.rate_limiter.allow(llave, time.time()):
             raise HTTPException(429, "demasiadas peticiones para esta llave")
         return llave
 
-    def _rutas_para(cuerpo: dict, llave: str) -> tuple[list, object]:
-        pedido = interpretar_pedido(cuerpo)
-        activas = estado.almacen.active_routes()
+    def _routes_for(cuerpo: dict, llave: str) -> tuple[list, object]:
+        pedido = parse_request(cuerpo)
+        activas = estado.store.active_routes()
         # Un id explicito que ya no existe merece un 404 con pistas, no un 400 generico:
         # es exactamente el fallo que este proyecto existe para evitar.
         if pedido.model is not None and not any(r.model_id == pedido.model for r in activas):
             raise HTTPException(404, {
                 "message": f"el modelo '{pedido.model}' ya no existe",
-                "sugerencias": _parecidos(pedido.model, activas),
+                "sugerencias": _similar_ids(pedido.model, activas),
             })
         tope_alcanzado = False
         if pedido.allow_paid:
             dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            if estado.almacen.paid_usage(llave, dia) >= estado.tope_pago_diario:
+            if estado.store.paid_usage(llave, dia) >= estado.daily_paid_cap:
                 pedido = replace(pedido, allow_paid=False)
                 tope_alcanzado = True
         ahora = time.time()
-        metricas = _metricas(estado, ahora)
-        rutas = order_routes(activas, metricas, pedido, ahora, estado.aleatorio)
+        metricas = _metrics(estado, ahora)
+        rutas = order_routes(activas, metricas, pedido, ahora, estado.rng)
         if not rutas:
-            _sin_rutas(activas, pedido, metricas, ahora, tope_alcanzado)   # siempre levanta
+            _no_routes(activas, pedido, metricas, ahora, tope_alcanzado)   # siempre levanta
         return rutas, pedido
 
     @app.post("/v1/chat/completions", **CHAT_COMPLETIONS_DOCS)
     async def completions(request: Request, x_api_key: str | None = Header(None),
                           authorization: str | None = Header(None)):
-        llave = exigir_llave(x_api_key, authorization)
+        llave = require_api_key(x_api_key, authorization)
         cuerpo = await request.json()
-        rutas, pedido = _rutas_para(cuerpo, llave)
+        rutas, pedido = _routes_for(cuerpo, llave)
         ahora = time.time()
         crudo = bool(cuerpo.get("x_crudo"))
 
@@ -256,7 +256,7 @@ def crear_app(estado: Estado) -> FastAPI:
             # aparecia ni en /v1/uso ni contra TOPE_PAGO_DIARIO -- medido,
             # 40/40 llamadas facturables con `pago_hoy: 0`. Ver proxy.py
             # (`on_billable_attempt`) para donde se decide "facturable".
-            estado.almacen.add_paid_usage(
+            estado.store.add_paid_usage(
                 llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
         if cuerpo.get("stream"):
@@ -270,7 +270,7 @@ def crear_app(estado: Estado) -> FastAPI:
         if r.status == 503 and r.upstream_code == 404 and pedido.model is not None:
             # ALSO de la revision round 6 -- literalmente la razon de ser
             # del proyecto: `pedido.model` SIGUE en nuestro catalogo (paso
-            # el check 404 de `_rutas_para`, mas arriba) pero el proveedor
+            # el check 404 de `_routes_for`, mas arriba) pero el proveedor
             # real ya no lo tiene: un 404 genuino, en vivo. La ruta ya se
             # llevo el golpe de confiabilidad (404 es evidencia de la ruta
             # por default, ver proxy._is_client_error), pero sin este
@@ -290,7 +290,7 @@ def crear_app(estado: Estado) -> FastAPI:
             # ruta sirvio, asi que no hay margen HTTP para cambiarlo a 404.
             raise HTTPException(404, {
                 "message": f"el modelo '{pedido.model}' ya no existe",
-                "sugerencias": _parecidos(pedido.model, estado.almacen.active_routes()),
+                "sugerencias": _similar_ids(pedido.model, estado.store.active_routes()),
             })
         cabeceras = {"X-Intentos": str(r.attempts)}
         if r.route is not None:
@@ -316,17 +316,17 @@ def crear_app(estado: Estado) -> FastAPI:
 
     @app.get("/v1/models", **MODELOS_DOCS)
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
-        exigir_llave(x_api_key, authorization)
+        require_api_key(x_api_key, authorization)
         datos = [{"id": r.model_id, "object": "model", "owned_by": r.provider}
-                 for r in estado.almacen.active_routes()]
-        datos += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIAS]
+                 for r in estado.store.active_routes()]
+        datos += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIASES]
         return {"object": "list", "data": datos}
 
     @app.get("/v1/ranking", **RANKING_DOCS)
     def ranking(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
-        exigir_llave(x_api_key, authorization)
+        require_api_key(x_api_key, authorization)
         ahora = time.time()
-        metricas = _metricas(estado, ahora)
+        metricas = _metrics(estado, ahora)
         # Ordenado con la MISMA clave que usa router.order_routes (perfil
         # "balanceado", el que tambien usa el puntaje de cada fila) -- no un
         # sort propio por puntaje: este endpoint es para auditar POR QUE el
@@ -336,7 +336,7 @@ def crear_app(estado: Estado) -> FastAPI:
         # (que el router jamas elegiria ahora mismo) podia encabezar la
         # tabla. `en_cooldown_hasta` sigue expuesto por fila para
         # diagnostico; lo que cambia es el ORDEN.
-        activas = sorted(estado.almacen.active_routes(),
+        activas = sorted(estado.store.active_routes(),
                          key=lambda r: sort_key(r, metricas[r.key], "balanceado", ahora))
         filas = []
         for r in activas:
@@ -369,10 +369,10 @@ def crear_app(estado: Estado) -> FastAPI:
 
     @app.get("/v1/uso", **USO_DOCS)
     def uso(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
-        llave = exigir_llave(x_api_key, authorization)
+        llave = require_api_key(x_api_key, authorization)
         dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return {"dia": dia, "pago_hoy": estado.almacen.paid_usage(llave, dia),
-                "tope": estado.tope_pago_diario}
+        return {"dia": dia, "pago_hoy": estado.store.paid_usage(llave, dia),
+                "tope": estado.daily_paid_cap}
 
     @app.get("/health", **HEALTH_DOCS)
     def health():
@@ -410,13 +410,13 @@ def crear_app(estado: Estado) -> FastAPI:
         # contenedor. El ranking puede darse el lujo de ser sensible: la
         # salud no.
         ahora = time.time()
-        activas = estado.almacen.active_routes()
-        metricas = _metricas(estado, ahora)
+        activas = estado.store.active_routes()
+        metricas = _metrics(estado, ahora)
 
         def _viva(r) -> bool:
             m = metricas.get(r.key, NEUTRAL_METRICS)
             return (m.cooldown_until <= ahora
-                    and estado.almacen.has_liveness_evidence(r.key, ahora))
+                    and estado.store.has_liveness_evidence(r.key, ahora))
 
         libres = [r for r in activas if _viva(r)]
         gratis = [r for r in libres if r.tier == "gratis"]
@@ -434,7 +434,7 @@ def crear_app(estado: Estado) -> FastAPI:
     return app
 
 
-def _sin_rutas(activas: list, pedido, metricas: dict, ahora: float,
+def _no_routes(activas: list, pedido, metricas: dict, ahora: float,
                tope_alcanzado: bool) -> None:
     """Levanta el error correcto cuando la cadena de intentos sale vacia.
 
@@ -477,7 +477,7 @@ def _sin_rutas(activas: list, pedido, metricas: dict, ahora: float,
     })
 
 
-def _parecidos(pedido: str, activas: list) -> list[str]:
+def _similar_ids(pedido: str, activas: list) -> list[str]:
     # Round 7, LOW del gate: el llamador del 404-en-vivo (mas arriba) pasa
     # `activas` SIN filtrar -- ese id de `pedido` TODAVIA esta en el
     # catalogo local (esa es la premisa entera de ese caso: sigue en el
@@ -497,8 +497,8 @@ def _iso(momento: float | None) -> str | None:
     return datetime.fromtimestamp(momento, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _metricas(estado: Estado, ahora: float) -> dict:
-    base = estado.almacen.metrics()
+def _metrics(estado: State, ahora: float) -> dict:
+    base = estado.store.metrics()
     for clave, hasta in estado.proxy.cooldowns.items():
         if clave in base:
             # `replace` y no `type(m)(...)` posicional: reconstruir a mano deja

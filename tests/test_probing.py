@@ -4,7 +4,7 @@ import logging
 import httpx
 
 from llm_libre.storage import Storage
-from llm_libre.api import Estado
+from llm_libre.api import State
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
 from llm_libre.proxy import Proxy
@@ -364,7 +364,7 @@ async def test_sincronizar_no_desactiva_rutas_de_proveedores_que_siguen_registra
 
 
 async def test_sincronizar_con_registro_vacio_no_apaga_el_catalogo_entero():
-    # Revision de gate: `proveedores=[]` (un `proveedores.yaml` sintacticamente
+    # Revision de gate: `providers=[]` (un `proveedores.yaml` sintacticamente
     # valido pero truncado/mal editado, mas probable que "sin proveedores" a
     # proposito) no debe disparar el barrido de huerfanos -- ver el guard en
     # Storage.desactivar_proveedores_no_registrados.
@@ -405,16 +405,16 @@ async def test_sync_catalogue_no_deja_escapar_la_excepcion_de_un_proveedor_roto(
 async def test_la_sonda_de_salud_registra_exito():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "ok"}}]}))
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_health(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT tipo, ok FROM sondas WHERE clave='kilo/x:free'").fetchone()
     assert fila == ("salud", 1)
 
 
 async def test_la_sonda_de_salud_registra_el_fallo_de_un_modelo_que_ya_no_existe():
     p = _proxy(lambda req: httpx.Response(404, json={"error": "model_not_found"}))
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_health(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT ok FROM sondas WHERE tipo='salud'").fetchone()
     assert fila[0] == 0
 
@@ -430,19 +430,19 @@ async def test_la_sonda_de_salud_registra_el_fallo_de_un_modelo_que_ya_no_existe
 
 async def test_la_sonda_de_salud_castiga_de_inmediato_con_un_solo_fallo():
     p = _proxy(lambda req: httpx.Response(500))
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
+    await probe_health(p, p.store, [_ruta()], now=100.0)
     assert p.cooldowns["kilo/x:free"] > 0.0
     # Y sin pasar por sospecha -- no hay ninguna marca acumulada esperando
     # un segundo o tercer fallo.
-    assert p.almacen._con.execute(
+    assert p.store._con.execute(
         "SELECT COUNT(*) FROM sondas WHERE tipo='salud' AND ok=0").fetchone()[0] == 1
 
 
 async def test_la_sonda_de_calidad_guarda_casos_pasados_sobre_totales():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "12"}}]}))
-    await probe_quality(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_quality(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT casos_pasados, casos_totales FROM sondas WHERE tipo='calidad'").fetchone()
     assert fila[1] == 5
     assert 1 <= fila[0] < 5   # pasa aritmetica y formato, falla json y tools
@@ -457,19 +457,19 @@ async def test_la_sonda_de_calidad_guarda_casos_pasados_sobre_totales():
 
 async def test_la_sonda_de_calidad_castiga_directo_sin_pasar_por_sospecha():
     p = _proxy(lambda req: httpx.Response(500))
-    await probe_quality(p, p.almacen, [_ruta()], now=100.0)
+    await probe_quality(p, p.store, [_ruta()], now=100.0)
     assert p.cooldowns["kilo/x:free"] > 0.0
     # Directo -- nunca via sospecha (que necesitaria SUSPICION_THRESHOLD
     # fallos, y ademas dispararia una sonda de tipo 'salud' aparte).
-    assert p.almacen._con.execute(
+    assert p.store._con.execute(
         "SELECT COUNT(*) FROM sondas WHERE tipo='salud'").fetchone()[0] == 0
 
 
 async def test_la_calidad_no_sondea_rutas_de_pago():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "12"}}]}))
-    await probe_quality(p, p.almacen, [_ruta(tier="pago")], now=100.0)
-    assert p.almacen._con.execute(
+    await probe_quality(p, p.store, [_ruta(tier="pago")], now=100.0)
+    assert p.store._con.execute(
         "SELECT COUNT(*) FROM sondas WHERE tipo='calidad'").fetchone()[0] == 0
 
 
@@ -484,8 +484,8 @@ async def test_la_calidad_omite_el_caso_de_tools_sin_contarlo_como_fallo():
         return httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]})
 
     p = _proxy(handler)
-    await probe_quality(p, p.almacen, [_ruta(tools=False)], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_quality(p, p.store, [_ruta(tools=False)], now=100.0)
+    fila = p.store._con.execute(
         "SELECT casos_pasados, casos_totales FROM sondas WHERE tipo='calidad'").fetchone()
     assert fila[1] == 4          # 5 casos menos el de tools, que se omitio
     assert len(llamadas) == 4    # y no se le gasto cuota pidiendoselo
@@ -497,8 +497,8 @@ async def test_ciclo_sincroniza_sondea_salud_y_sondea_calidad_en_el_ciclo_cero()
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, almacen, http)
-    estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
-                    proveedores=prov, http=http)
+    estado = State(store=almacen, proxy=proxy, api_keys=set(), daily_paid_cap=0,
+                    providers=prov, http=http)
     await cycle(estado, counter=0)
     assert [r.key for r in almacen.active_routes()] == ["kilo/x:free"]
     tipos = {t for (t,) in almacen._con.execute("SELECT tipo FROM sondas").fetchall()}
@@ -511,8 +511,8 @@ async def test_ciclo_no_sondea_calidad_fuera_del_intervalo():
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, almacen, http)
-    estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
-                    proveedores=prov, http=http)
+    estado = State(store=almacen, proxy=proxy, api_keys=set(), daily_paid_cap=0,
+                    providers=prov, http=http)
     await cycle(estado, counter=1)
     tipos = {t for (t,) in almacen._con.execute("SELECT tipo FROM sondas").fetchall()}
     assert tipos == {"salud"}
@@ -532,9 +532,9 @@ async def test_la_sonda_de_salud_no_gasta_plata_en_las_rutas_de_pago():
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     p = _proxy(handler)
-    await probe_health(p, p.almacen, [_ruta(tier="pago")], now=100.0)
+    await probe_health(p, p.store, [_ruta(tier="pago")], now=100.0)
     assert llamadas == []
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 async def test_la_sonda_de_salud_sigue_sondeando_las_gratis_de_la_misma_lista():
@@ -545,10 +545,10 @@ async def test_la_sonda_de_salud_sigue_sondeando_las_gratis_de_la_misma_lista():
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     p = _proxy(handler)
-    await probe_health(p, p.almacen, [_ruta("g:free"), _ruta("P", tier="pago")],
+    await probe_health(p, p.store, [_ruta("g:free"), _ruta("P", tier="pago")],
                         now=100.0)
     assert len(llamadas) == 1
-    claves = [c for (c,) in p.almacen._con.execute("SELECT clave FROM sondas")]
+    claves = [c for (c,) in p.store._con.execute("SELECT clave FROM sondas")]
     assert claves == ["kilo/g:free"]
 
 
@@ -572,8 +572,8 @@ async def test_el_ciclo_completo_no_sondea_la_ruta_de_pago():
                     "contexto": 128000, "max_salida": 32768}]),
     ]
     proxy = Proxy({p.id: p for p in prov}, almacen, http)
-    estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
-                    proveedores=prov, http=http)
+    estado = State(store=almacen, proxy=proxy, api_keys=set(), daily_paid_cap=0,
+                    providers=prov, http=http)
     await cycle(estado, counter=1)   # contador 1: salud si, calidad no
     assert {r.key for r in almacen.active_routes()} == {"kilo/x:free", "minimax/MiniMax-M3"}
     assert not any("m.test" in u for u in llamadas), "se le pego a la ruta de pago"
@@ -640,8 +640,8 @@ async def test_la_sonda_de_salud_no_escribe_un_ttft_que_no_midio():
     # el p50 de ttft la ignora.
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "ok"}}]}))
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_health(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT latencia_ms, ttft_ms FROM sondas WHERE tipo='salud'").fetchone()
     assert fila[0] >= 0
     assert fila[1] == 0
@@ -672,8 +672,8 @@ def _modelo_que_razona(tope_minimo=512, respuesta="pong"):
 
 async def test_la_sonda_de_salud_no_mata_a_un_modelo_por_no_dejarlo_pensar():
     p = _proxy(_modelo_que_razona())
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_health(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT ok FROM sondas WHERE tipo='salud'").fetchone()
     assert fila[0] == 1, ("el ping fabrico el fallo que dice medir: no le dio "
                           "presupuesto suficiente al modelo")
@@ -693,15 +693,15 @@ async def test_la_sonda_de_salud_guarda_el_codigo_del_proveedor_no_el_del_gatewa
     p = _proxy(lambda req: httpx.Response(200, json={"choices": [
         {"message": {"role": "assistant", "content": None},
          "finish_reason": "length"}]}))
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_health(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT ok, codigo_http FROM sondas WHERE tipo='salud'").fetchone()
     assert fila == (0, 200)
 
 
 async def test_la_sonda_de_salud_guarda_el_404_real_de_un_modelo_que_ya_no_existe():
     p = _proxy(lambda req: httpx.Response(404, json={"error": "model_not_found"}))
-    await probe_health(p, p.almacen, [_ruta()], now=100.0)
-    fila = p.almacen._con.execute(
+    await probe_health(p, p.store, [_ruta()], now=100.0)
+    fila = p.store._con.execute(
         "SELECT ok, codigo_http FROM sondas WHERE tipo='salud'").fetchone()
     assert fila == (0, 404)

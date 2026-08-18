@@ -147,7 +147,7 @@ async def test_termina_siempre_con_done():
     assert lineas[-1].strip() == "data: [DONE]"
 
 
-async def test_sin_rutas_emite_un_error_y_cierra():
+async def test_no_routes_emite_un_error_y_cierra():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("x")))
     lineas = [l async for l in p.complete_stream([], CUERPO, 0.0)]
     assert any("error" in l for l in lineas)
@@ -215,7 +215,7 @@ async def test_no_hace_failover_si_la_conexion_se_corta_despues_de_emitir():
     assert lineas[-1].strip() == "data: [DONE]"
     # Y la falla posterior a la emision no debe sumar un segundo evento encima
     # del que ya se registro cuando salio el primer chunk util.
-    filas = p.almacen._con.execute("SELECT ok FROM eventos WHERE clave = ?",
+    filas = p.store._con.execute("SELECT ok FROM eventos WHERE clave = ?",
                                    ("kilo/a:free",)).fetchall()
     assert filas == [(1,)]
 
@@ -246,7 +246,7 @@ async def test_stream_de_puro_razonamiento_registra_un_evento_fallido():
         200, content=_sse("<think>solo razonamiento</think>")))
     texto = await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0))
     assert texto == ""
-    filas = p.almacen._con.execute("SELECT ok FROM eventos").fetchall()
+    filas = p.store._con.execute("SELECT ok FROM eventos").fetchall()
     assert filas == [(0,)]
 
 
@@ -282,7 +282,7 @@ async def test_un_stream_sin_contenido_util_registra_fallo_en_esa_ruta():
 
     p = _proxy(handler)
     await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
-    filas = p.almacen._con.execute(
+    filas = p.store._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
     assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
@@ -304,7 +304,7 @@ async def test_un_stream_de_solo_tool_calls_sigue_contando_como_exito():
                                                   CUERPO, 0.0)]
     assert len(llamadas) == 1          # no hubo failover
     assert any("buscar" in l for l in lineas)
-    filas = p.almacen._con.execute("SELECT ok FROM eventos").fetchall()
+    filas = p.store._con.execute("SELECT ok FROM eventos").fetchall()
     assert filas == [(1,)]
 
 
@@ -313,7 +313,7 @@ async def test_un_stream_crudo_de_puro_razonamiento_sigue_siendo_exito():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>")))
     texto = await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0, raw=True))
     assert texto == "<think>mmm</think>"
-    filas = p.almacen._con.execute("SELECT ok FROM eventos").fetchall()
+    filas = p.store._con.execute("SELECT ok FROM eventos").fetchall()
     assert filas == [(1,)]
 
 
@@ -328,7 +328,7 @@ async def test_falla_antes_de_emitir_registra_el_evento_una_sola_vez():
 
     p = _proxy(handler)
     await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
-    filas = p.almacen._con.execute(
+    filas = p.store._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
     assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
@@ -347,7 +347,7 @@ async def test_ttft_mide_el_primer_token_no_el_fin_del_stream():
     assert any("hola" in l for l in lineas)
     assert lineas[-1].strip() == "data: [DONE]"
 
-    filas = p.almacen._con.execute("SELECT ok, ttft_ms FROM eventos").fetchall()
+    filas = p.store._con.execute("SELECT ok, ttft_ms FROM eventos").fetchall()
     assert filas == [(1, filas[0][1])]  # exactamente un evento
     ttft_ms = filas[0][1]
 
@@ -364,7 +364,7 @@ async def test_el_camino_streaming_si_escribe_ttft():
     # que escribe esa columna.
     p = _proxy(lambda req: httpx.Response(200, content=_sse("hola")))
     await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0))
-    fila = p.almacen._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
+    fila = p.store._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
     assert fila[0] >= 0 and fila[1] is None
 
 
@@ -451,7 +451,7 @@ async def test_el_sobre_repetido_no_convierte_en_util_a_un_chunk_de_razonamiento
                                              CUERPO, 0.0))
     assert texto == "bien"
     assert len(llamadas) == 2
-    filas = p.almacen._con.execute(
+    filas = p.store._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
     assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
@@ -564,7 +564,7 @@ async def test_un_400_en_streaming_se_registra_marcado_como_error_del_cliente():
     # Round 4: el mismo agujero de confiabilidad/health del lado streaming.
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
     [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, 0.0)]
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
     assert fila == (0, 1)
 

@@ -9,7 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from llm_libre.storage import Storage
-from llm_libre.api import Estado, crear_app, interpretar_pedido
+from llm_libre.api import State, create_app, parse_request
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
@@ -28,33 +28,33 @@ def _sse(*trozos: str) -> bytes:
 
 
 def test_auto_es_balanceado():
-    p = interpretar_pedido({"model": "auto"})
+    p = parse_request({"model": "auto"})
     assert p.model is None and p.profile == "balanceado"
 
 
 def test_los_alias_de_perfil():
-    assert interpretar_pedido({"model": "auto:rapido"}).profile == "rapido"
-    assert interpretar_pedido({"model": "auto:potente"}).profile == "potente"
+    assert parse_request({"model": "auto:rapido"}).profile == "rapido"
+    assert parse_request({"model": "auto:potente"}).profile == "potente"
 
 
 def test_los_alias_de_capacidad_se_traducen_a_requisitos():
-    p = interpretar_pedido({"model": "auto:tools"})
+    p = parse_request({"model": "auto:tools"})
     assert p.needs_tools is True and p.profile == "balanceado"
-    assert interpretar_pedido({"model": "auto:vision"}).needs_vision is True
+    assert parse_request({"model": "auto:vision"}).needs_vision is True
 
 
 def test_un_modelo_real_se_conserva():
-    p = interpretar_pedido({"model": "poolside/laguna-s-2.1:free"})
+    p = parse_request({"model": "poolside/laguna-s-2.1:free"})
     assert p.model == "poolside/laguna-s-2.1:free"
 
 
 def test_mandar_tools_exige_soporte_de_tools_aunque_no_se_pida():
-    p = interpretar_pedido({"model": "auto", "tools": [{"type": "function"}]})
+    p = parse_request({"model": "auto", "tools": [{"type": "function"}]})
     assert p.needs_tools is True
 
 
 def test_las_extensiones_x_se_respetan():
-    p = interpretar_pedido({"model": "auto", "x_requiere": ["tools", "vision"],
+    p = parse_request({"model": "auto", "x_requiere": ["tools", "vision"],
                             "x_min_contexto": 200000, "x_permitir_pago": False})
     assert p.needs_tools and p.needs_vision
     assert p.min_context == 200000
@@ -65,12 +65,12 @@ def test_model_de_solo_espacios_se_trata_como_ausente():
     # Fix round 1, hallazgo 3 (Minor): "   " es truthy, asi que se colaba antes
     # del "or auto" y quedaba vacio tras el strip -- un 404 confuso sobre el
     # modelo ''. Debe tratarse igual que "" / None / ausente: cae a "auto".
-    p = interpretar_pedido({"model": "   "})
+    p = parse_request({"model": "   "})
     assert p.model is None and p.profile == "balanceado"
 
 
 # --- Revision post-Task-14 (gate): tres defectos reales que el reviewer
-#     encontro leyendo interpretar_pedido, no ejecutando -- los tres eran
+#     encontro leyendo parse_request, no ejecutando -- los tres eran
 #     entradas malformadas del CLIENTE cayendo en un hueco silencioso
 #     (una degradacion sin aviso, o directamente un 500). ---
 
@@ -80,7 +80,7 @@ def test_auto_con_sufijo_desconocido_da_400():
     # Peligroso para un cliente que de verdad queria exigir una capacidad:
     # se queda sin ella, sin ningun aviso.
     with pytest.raises(HTTPException) as exc:
-        interpretar_pedido({"model": "auto:turbo"})
+        parse_request({"model": "auto:turbo"})
     assert exc.value.status_code == 400
     assert "auto:turbo" in exc.value.detail["message"]
 
@@ -88,14 +88,14 @@ def test_auto_con_sufijo_desconocido_da_400():
 def test_auto_liso_sigue_funcionando_tras_el_fix_de_sufijo_desconocido():
     # Regresion directa del fix de arriba: sufijo == "" (o sea "auto" sin
     # ":") NO debe entrar en la rama de rechazo.
-    p = interpretar_pedido({"model": "auto"})
+    p = parse_request({"model": "auto"})
     assert p.model is None and p.profile == "balanceado"
 
 
 def test_auto_balanceado_sigue_siendo_un_alias_valido():
-    # "balanceado" ESTA en PERFILES -- "auto:balanceado" es redundante con
+    # "balanceado" ESTA en PROFILES -- "auto:balanceado" es redundante con
     # "auto" liso, pero valido, y no debe caer en la rama de rechazo.
-    p = interpretar_pedido({"model": "auto:balanceado"})
+    p = parse_request({"model": "auto:balanceado"})
     assert p.profile == "balanceado"
 
 
@@ -103,20 +103,20 @@ def test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor():
     # `set("tools")` itera CARACTERES ({'t','o','l','s'}), asi que
     # "tools" in exigidas daba False y la exigencia se ignoraba entera, sin
     # error. Un string suelto (en vez de una lista de uno) se acepta igual.
-    p = interpretar_pedido({"model": "auto", "x_requiere": "tools"})
+    p = parse_request({"model": "auto", "x_requiere": "tools"})
     assert p.needs_tools is True
     assert p.needs_vision is False
 
 
 def test_x_requiere_como_lista_sigue_funcionando_igual_que_antes():
-    p = interpretar_pedido({"model": "auto", "x_requiere": ["vision"]})
+    p = parse_request({"model": "auto", "x_requiere": ["vision"]})
     assert p.needs_vision is True
     assert p.needs_tools is False
 
 
 def test_x_min_contexto_no_numerico_da_400_nombrando_el_campo():
     with pytest.raises(HTTPException) as exc:
-        interpretar_pedido({"model": "auto", "x_min_contexto": "cien mil"})
+        parse_request({"model": "auto", "x_min_contexto": "cien mil"})
     assert exc.value.status_code == 400
     assert exc.value.detail["campo"] == "x_min_contexto"
     assert exc.value.detail["valor_recibido"] == "cien mil"
@@ -125,7 +125,7 @@ def test_x_min_contexto_no_numerico_da_400_nombrando_el_campo():
 def test_x_min_contexto_numerico_como_string_sigue_funcionando():
     # int("100000") es valido -- el fix no debe volverse mas estricto de lo
     # que ya era para el caso que SI funcionaba.
-    p = interpretar_pedido({"model": "auto", "x_min_contexto": "100000"})
+    p = parse_request({"model": "auto", "x_min_contexto": "100000"})
     assert p.min_context == 100000
 
 
@@ -135,7 +135,7 @@ def test_x_min_contexto_numerico_como_string_sigue_funcionando():
 #     veces mas -- x_requiere con un valor ni string ni lista (set() sobre
 #     un int/bool/float/lista-de-listas) y model con cualquier cosa que no
 #     sea un string (.strip() sobre un numero, una lista, un dict). El fix
-#     generaliza con _leer_campo en vez de parchear el tercer sitio a
+#     generaliza con _read_field en vez de parchear el tercer sitio a
 #     mano -- estos tests cubren los dos nuevos y confirman la MISMA forma
 #     de error (message/campo/valor_recibido) que ya establecio
 #     x_min_contexto. ---
@@ -143,7 +143,7 @@ def test_x_min_contexto_numerico_como_string_sigue_funcionando():
 @pytest.mark.parametrize("valor", [5, True, 3.5, [["tools"]]])
 def test_x_requiere_no_string_ni_lista_da_400_nombrando_el_campo(valor):
     with pytest.raises(HTTPException) as exc:
-        interpretar_pedido({"model": "auto", "x_requiere": valor})
+        parse_request({"model": "auto", "x_requiere": valor})
     assert exc.value.status_code == 400
     assert exc.value.detail["campo"] == "x_requiere"
     assert exc.value.detail["valor_recibido"] == valor
@@ -152,7 +152,7 @@ def test_x_requiere_no_string_ni_lista_da_400_nombrando_el_campo(valor):
 @pytest.mark.parametrize("valor", [5, True, 3.5, ["a"], {"a": 1}])
 def test_model_no_string_da_400_nombrando_el_campo(valor):
     with pytest.raises(HTTPException) as exc:
-        interpretar_pedido({"model": valor})
+        parse_request({"model": valor})
     assert exc.value.status_code == 400
     assert exc.value.detail["campo"] == "model"
     assert exc.value.detail["valor_recibido"] == valor
@@ -161,8 +161,8 @@ def test_model_no_string_da_400_nombrando_el_campo(valor):
 def test_model_ausente_o_nulo_sigue_cayendo_a_auto_sin_dar_400():
     # Regresion directa del fix de arriba: None (ausente) sigue siendo
     # valido -- solo un valor PRESENTE con el tipo equivocado debe dar 400.
-    assert interpretar_pedido({}).model is None
-    assert interpretar_pedido({"model": None}).model is None
+    assert parse_request({}).model is None
+    assert parse_request({"model": None}).model is None
 
 
 @pytest.fixture
@@ -175,14 +175,14 @@ def cliente():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=200)
-    return TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=200)
+    return TestClient(create_app(estado))
 
 
 @pytest.fixture
 def estado_cliente():
-    """Como `cliente`, pero exponiendo tambien el `Estado`: los tests de
+    """Como `cliente`, pero exponiendo tambien el `State`: los tests de
     /health necesitan sembrar eventos/cooldowns directamente en el almacen y
     el proxy, cosa que la fixture `cliente` no permite tocar desde afuera."""
     almacen = Storage(":memory:")
@@ -193,9 +193,9 @@ def estado_cliente():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=200)
-    return estado, TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=200)
+    return estado, TestClient(create_app(estado))
 
 
 def test_sin_llave_da_401(cliente):
@@ -220,7 +220,7 @@ def test_completions_responde_y_marca_la_ruta_usada(cliente):
 
 # --- Revision post-Task-14 (gate): los mismos tres defectos de arriba
 #     (test_auto_con_sufijo_desconocido_da_400 y compania), pero probados a
-#     traves del cliente HTTP completo -- para confirmar que interpretar_pedido
+#     traves del cliente HTTP completo -- para confirmar que parse_request
 #     de verdad esta conectado al camino real de /v1/chat/completions, no
 #     solo probado de forma aislada. ---
 
@@ -254,7 +254,7 @@ def test_completions_con_x_requiere_como_string_aplica_la_exigencia(cliente):
 
 # --- Revision post-Task-14 (tercer gate): mismos dos defectos que arriba
 #     (x_requiere no-string-ni-lista, model no-string), a traves del
-#     cliente HTTP completo -- confirma que interpretar_pedido esta
+#     cliente HTTP completo -- confirma que parse_request esta
 #     conectado al camino real, no solo probado aislado. ---
 
 def test_completions_con_x_requiere_de_tipo_invalido_da_400_no_500(cliente):
@@ -297,9 +297,9 @@ def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=200)
-    c = TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=200)
+    c = TestClient(create_app(estado))
 
     r = c.post("/v1/chat/completions", headers={"X-API-Key": "buena"}, json={
         "model": "auto",
@@ -371,7 +371,7 @@ def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente)
     assert "sugerencias" in str(r.json())
 
 
-# --- Round 7, LOW del gate: `_parecidos` corria contra `rutas_activas()`,
+# --- Round 7, LOW del gate: `_similar_ids` corria contra `rutas_activas()`,
 #     que TODAVIA trae el id que se acaba de declarar muerto -- el cliente
 #     leia `"el modelo 'a:free' ya no existe"` con `sugerencias: ['a:free',
 #     ...]`. Se excluye el propio `pedido.model` de la lista antes de
@@ -379,7 +379,7 @@ def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente)
 
 def test_la_sugerencia_del_404_en_vivo_no_incluye_el_modelo_recien_declarado_muerto(estado_cliente):
     estado, cliente = estado_cliente
-    estado.almacen.upsert_routes(
+    estado.store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096)),
          Route("kilo", "a:freebie", "gratis", Capabilities(True, False, 100000, 4096))],
         1.0)
@@ -430,12 +430,12 @@ def test_health_no_es_ok_si_la_gratis_falla_de_verdad(estado_cliente):
     # proxy.cooldowns queda vacio -- la version vieja de /health diria "ok"
     # igual si solo mirara cooldowns.
     for _ in range(10):
-        estado.almacen.record_event("kilo/a:free", False, 0, 500, ahora)
+        estado.store.record_event("kilo/a:free", False, 0, 500, ahora)
     # Round 9: una sola sonda fallida ya no alcanza para /health (ver
     # Storage.tiene_evidencia_de_vida) -- dos consecutivas, sin exito de
     # por medio, si.
-    estado.almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    estado.almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
+    estado.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
+    estado.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     assert estado.proxy.cooldowns == {}  # confirma que no es por cooldown
 
     r = cliente.get("/health")
@@ -447,7 +447,7 @@ def test_health_ok_si_la_gratis_no_tiene_telemetria_aun(estado_cliente):
     # Una ruta recien sincronizada, sin ningun evento todavia, carga la
     # confiabilidad NEUTRA (no cero) y debe seguir contando como viva.
     estado, cliente = estado_cliente
-    filas = estado.almacen._con.execute("SELECT COUNT(*) FROM eventos").fetchone()
+    filas = estado.store._con.execute("SELECT COUNT(*) FROM eventos").fetchone()
     assert filas[0] == 0
     assert cliente.get("/health").json()["estado"] == "ok"
 
@@ -456,9 +456,9 @@ def test_health_ok_si_la_gratis_esta_sana(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
     for _ in range(9):
-        estado.almacen.record_event("kilo/a:free", True, 200, 200, ahora)
+        estado.store.record_event("kilo/a:free", True, 200, 200, ahora)
     for _ in range(1):
-        estado.almacen.record_event("kilo/a:free", False, 0, 500, ahora)
+        estado.store.record_event("kilo/a:free", False, 0, 500, ahora)
     assert cliente.get("/health").json()["estado"] == "ok"
 
 
@@ -468,7 +468,7 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
     estado, cliente = estado_cliente
 
     async def _forzar_429():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
         await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, time.time())
@@ -496,10 +496,10 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
 def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
-    estado.almacen.record_event("kilo/a:free", True, 50, 200, ahora)
+    estado.store.record_event("kilo/a:free", True, 50, 200, ahora)
 
     async def _forzar_429():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
         await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
@@ -508,7 +508,7 @@ def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_client
     assert estado.proxy.cooldowns  # confirma que quedo en cooldown
 
     # Aislado: sin el cooldown, esta ruta SI cuenta como viva por si sola.
-    assert estado.almacen.has_liveness_evidence("kilo/a:free", ahora) is True
+    assert estado.store.has_liveness_evidence("kilo/a:free", ahora) is True
 
     r = cliente.get("/health")
     assert r.status_code != 200
@@ -528,9 +528,9 @@ def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_client
 def test_health_sigue_ok_con_30_403_pero_un_exito_reciente(estado_cliente):
     estado, cliente = estado_cliente
     ahora = time.time()
-    estado.almacen.record_event("kilo/a:free", True, 50, 200, ahora)
+    estado.store.record_event("kilo/a:free", True, 50, 200, ahora)
     for _ in range(30):
-        estado.almacen.record_event("kilo/a:free", False, 0, 403, ahora)
+        estado.store.record_event("kilo/a:free", False, 0, 403, ahora)
     assert cliente.get("/health").json()["estado"] == "ok"
 
 
@@ -552,8 +552,8 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
-    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
-    cliente1 = TestClient(crear_app(estado1))
+    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
     almacen2 = Storage(ruta_db)
@@ -562,8 +562,8 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
-    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     assert cliente2.get("/health").json()["estado"] == "ok"
 
 
@@ -587,8 +587,8 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))
-    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
-    cliente1 = TestClient(crear_app(estado1))
+    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
@@ -603,8 +603,8 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
     assert r2.json()["estado"] != "ok"
@@ -620,16 +620,16 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria(tmp_path):
     almacen1.create_schema()
     almacen1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    estado1 = Estado(almacen=almacen1, proxy=Proxy({}, almacen1, httpx.AsyncClient()),
-                     llaves={"buena"}, tope_pago_diario=200)
-    cliente1 = TestClient(crear_app(estado1))
+    estado1 = State(store=almacen1, proxy=Proxy({}, almacen1, httpx.AsyncClient()),
+                     api_keys={"buena"}, daily_paid_cap=200)
+    cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
     almacen2 = Storage(ruta_db)
     almacen2.create_schema()
-    estado2 = Estado(almacen=almacen2, proxy=Proxy({}, almacen2, httpx.AsyncClient()),
-                     llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=Proxy({}, almacen2, httpx.AsyncClient()),
+                     api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     assert cliente2.get("/health").json()["estado"] == "ok"
 
 
@@ -653,7 +653,7 @@ def test_health_sigue_ok_tras_30_400_seguidos(estado_cliente):
     ahora = time.time()
 
     async def _mandar_400_treinta_veces():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"})))
         for _ in range(30):
@@ -672,7 +672,7 @@ def test_health_cae_con_30_500_seguidos_igual_que_antes(estado_cliente):
     ahora = time.time()
 
     async def _mandar_500_treinta_veces():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for _ in range(30):
@@ -686,7 +686,7 @@ def test_health_cae_con_30_500_seguidos_igual_que_antes(estado_cliente):
 
 def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     # El caso del loop de reinicios: `eventos` vive en un archivo real (el
-    # volumen /datos), no en memoria de proceso. Un Almacen/Proxy/Estado
+    # volumen /datos), no en memoria de proceso. Un Almacen/Proxy/State
     # SEGUNDO, contra la MISMA base, tiene que leer el mismo resultado que
     # el primero -- si el fix dependiera de algun estado en memoria del
     # proceso viejo, este test lo detectaria y el de arriba no.
@@ -700,7 +700,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"}))))
-    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _mandar_400_treinta_veces():
         rutas = almacen1.active_routes()
@@ -708,7 +708,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
             await proxy1.complete(rutas, {"model": "a:free", "messages": []}, time.time())
 
     asyncio.run(_mandar_400_treinta_veces())
-    cliente1 = TestClient(crear_app(estado1))
+    cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
     # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base.
@@ -719,8 +719,8 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     r = cliente2.get("/health")
     assert r.status_code == 200
     assert r.json()["estado"] == "ok"
@@ -732,7 +732,7 @@ def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
     antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
 
     async def _mandar(codigo, veces):
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"} if codigo < 500 else None)))
         for _ in range(veces):
@@ -770,7 +770,7 @@ def test_health_cae_con_30_seguidos_de_un_codigo_de_ruta(estado_cliente, codigo)
     ahora = time.time()
 
     async def _mandar_treinta_veces():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"})))
         for _ in range(30):
@@ -799,7 +799,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"}))))
-    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _mandar_401_treinta_veces():
         rutas = almacen1.active_routes()
@@ -815,7 +815,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     # esta cubierto en test_proxy.py; este test es sobre PERSISTENCIA tras
     # un reinicio, no sobre el rate-limit real de 60s entre sondas.
     almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
-    cliente1 = TestClient(crear_app(estado1))
+    cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
@@ -831,8 +831,8 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
     assert r2.json()["estado"] != "ok"
@@ -867,7 +867,7 @@ def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
         return httpx.Response(403, json={"error": "contenido flageado"})
 
     async def _quince_pedidos_identicos():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         for i in range(15):
             await estado.proxy.complete(rutas, {"model": "a:free", "messages": []},
@@ -895,7 +895,7 @@ def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_c
         return httpx.Response(200, content=payload_sin_contenido)
 
     async def _quince_streams_identicos():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         cuerpo = {"model": "auto", "stream": True,
                  "messages": [{"role": "user", "content": "piensa mucho"}]}
@@ -914,7 +914,7 @@ def test_health_cae_rapido_con_una_ruta_rota_de_verdad_via_sonda_bajo_demanda(es
     ahora = time.time()
 
     async def _umbral_pedidos():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for i in range(SUSPICION_THRESHOLD):
@@ -946,7 +946,7 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _quince_pedidos():
         rutas = almacen1.active_routes()
@@ -955,7 +955,7 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
         await proxy1.wait_for_pending_probes()
 
     asyncio.run(_quince_pedidos())
-    cliente1 = TestClient(crear_app(estado1))
+    cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
     # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
@@ -965,8 +965,8 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     assert cliente2.get("/health").json()["estado"] == "ok"
 
 
@@ -984,7 +984,7 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))   # rota para CUALQUIER payload, incluida la sonda
-    estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
+    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _dos_rachas_de_umbral_pedidos():
         rutas = almacen1.active_routes()
@@ -1001,7 +1001,7 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
         await proxy1.wait_for_pending_probes()
 
     asyncio.run(_dos_rachas_de_umbral_pedidos())
-    cliente1 = TestClient(crear_app(estado1))
+    cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
@@ -1021,8 +1021,8 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
-    cliente2 = TestClient(crear_app(estado2))
+    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
     assert r2.json()["estado"] != "ok"
@@ -1034,7 +1034,7 @@ def test_ranking_cae_con_401_seguidos_igual_que_con_500(estado_cliente):
     antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
 
     async def _mandar_401_treinta_veces():
-        rutas = estado.almacen.active_routes()
+        rutas = estado.store.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"})))
         for _ in range(30):
@@ -1062,16 +1062,16 @@ def test_ranking_desglosa_los_componentes(cliente):
 
 def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
     estado, cliente = estado_cliente
-    estado.almacen.upsert_routes([
+    estado.store.upsert_routes([
         Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
              priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: prioridad maxima (0) pero puntaje MALO.
-    estado.almacen.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
-    estado.almacen.record_event("chatgpt/gpt-5:free", False, 0, 500, 20.0)
+    estado.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
+    estado.store.record_event("chatgpt/gpt-5:free", False, 0, 500, 20.0)
     # kilo/a:free (prioridad 100, el default de la fixture): puntaje MEJOR.
-    estado.almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
-    estado.almacen.record_event("kilo/a:free", True, 50, 200, 20.0)
+    estado.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    estado.store.record_event("kilo/a:free", True, 50, 200, 20.0)
 
     filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
     claves = [f["clave"] for f in filas]
@@ -1092,13 +1092,13 @@ def test_ranking_manda_al_final_una_ruta_en_cooldown_aunque_puntue_mejor(estado_
     # router: una ruta en cooldown va al final, sin importar prioridad ni
     # puntaje.
     estado, cliente = estado_cliente
-    estado.almacen.upsert_routes([
+    estado.store.upsert_routes([
         Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
              priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: la mejor prioridad Y el mejor puntaje -- pero esta castigada.
-    estado.almacen.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
-    estado.almacen.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
+    estado.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    estado.store.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
     estado.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
 
     filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
@@ -1110,7 +1110,7 @@ def test_ranking_manda_al_final_una_ruta_en_cooldown_aunque_puntue_mejor(estado_
 # --- Fix round 1, hallazgo 2 (Critical): el tope de pago diario tambien debe
 #     atar en la rama de streaming, no solo en la sincronica. ---
 
-def _estado_libre_y_pago(tope_pago_diario, hacer_resp_free, hacer_resp_paid):
+def _estado_libre_y_pago(daily_paid_cap, hacer_resp_free, hacer_resp_paid):
     """Dos rutas -- una gratis, una de pago. `hacer_resp_free`/`hacer_resp_paid`
     son callables SIN argumentos que fabrican una `httpx.Response` NUEVA en
     cada llamada (no un objeto compartido): las respuestas viajan por
@@ -1131,9 +1131,9 @@ def _estado_libre_y_pago(tope_pago_diario, hacer_resp_free, hacer_resp_paid):
         return hacer_resp_free() if "f.test" in str(req.url) else hacer_resp_paid()
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(responder))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=tope_pago_diario)
-    return estado, TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=daily_paid_cap)
+    return estado, TestClient(create_app(estado))
 
 
 def test_streaming_pago_cuenta_uso_y_el_tope_ata():
@@ -1143,21 +1143,21 @@ def test_streaming_pago_cuenta_uso_y_el_tope_ata():
     # pago; con tope agotado la cadena queda vacia de candidatas viables y el
     # stream cae a "sin rutas disponibles" sin volver a pagar).
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=1,
+        daily_paid_cap=1,
         hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
         hacer_resp_paid=lambda: httpx.Response(200, content=_sse("de", " pago")))
     dia = _hoy()
-    assert estado.almacen.paid_usage("buena", dia) == 0
+    assert estado.store.paid_usage("buena", dia) == 0
 
     r1 = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                       json={"model": "auto", "messages": [], "stream": True})
     assert r1.status_code == 200
     assert "de" in r1.text and "pago" in r1.text
-    assert estado.almacen.paid_usage("buena", dia) == 1  # (a) conto exactamente 1
+    assert estado.store.paid_usage("buena", dia) == 1  # (a) conto exactamente 1
 
     r2 = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                       json={"model": "auto", "messages": [], "stream": True})
-    assert estado.almacen.paid_usage("buena", dia) == 1  # el tope realmente ato
+    assert estado.store.paid_usage("buena", dia) == 1  # el tope realmente ato
     assert "error" in r2.text  # ninguna ruta viable: free sigue caida, pago se excluyo
 
 
@@ -1172,14 +1172,14 @@ def test_streaming_pago_cuenta_uso_y_el_tope_ata():
 def test_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
     vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=5,
+        daily_paid_cap=5,
         hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
         hacer_resp_paid=lambda: httpx.Response(200, content=vacio))
     dia = _hoy()
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
-    assert estado.almacen.paid_usage("buena", dia) == 1  # facturable, aunque no sirvio
+    assert estado.store.paid_usage("buena", dia) == 1  # facturable, aunque no sirvio
 
 
 def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
@@ -1201,21 +1201,21 @@ def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
         return httpx.Response(200, json=vacio)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(responder))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=5)
-    cliente = TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=5)
+    cliente = TestClient(create_app(estado))
     dia = _hoy()
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 503  # nada sirvio de verdad al cliente
-    assert estado.almacen.paid_usage("buena", dia) == 1  # pero SI se factura
+    assert estado.store.paid_usage("buena", dia) == 1  # pero SI se factura
 
 
 def test_streaming_servido_por_gratis_no_cuenta_uso_de_pago():
     # (b) si la ganadora es la ruta GRATIS, no debe contarse como uso de pago
     # aunque haya una ruta de pago disponible en la cadena.
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=5,
+        daily_paid_cap=5,
         hacer_resp_free=lambda: httpx.Response(200, content=_sse("gra", "tis")),
         hacer_resp_paid=lambda: httpx.Response(200, content=_sse("de", " pago")))
     dia = _hoy()
@@ -1224,13 +1224,13 @@ def test_streaming_servido_por_gratis_no_cuenta_uso_de_pago():
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
     assert "gra" in r.text and "tis" in r.text
-    assert estado.almacen.paid_usage("buena", dia) == 0
+    assert estado.store.paid_usage("buena", dia) == 0
 
 
 def test_streaming_sin_ninguna_ruta_viva_no_cuenta_uso_de_pago():
     # (c) si TODAS las rutas fallan, tampoco debe contarse uso de pago.
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=5,
+        daily_paid_cap=5,
         hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
         hacer_resp_paid=lambda: httpx.Response(500, json={"error": "pago caido"}))
     dia = _hoy()
@@ -1239,14 +1239,14 @@ def test_streaming_sin_ninguna_ruta_viva_no_cuenta_uso_de_pago():
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200  # los headers ya salieron; el error va en el cuerpo SSE
     assert "error" in r.text
-    assert estado.almacen.paid_usage("buena", dia) == 0
+    assert estado.store.paid_usage("buena", dia) == 0
 
 
 def test_streaming_pago_cuenta_una_sola_vez_no_por_chunk():
     # (d) un stream de pago con VARIOS chunks debe incrementar uso_pago
     # exactamente 1, no una vez por chunk.
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=5,
+        daily_paid_cap=5,
         hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
         hacer_resp_paid=lambda: httpx.Response(
             200, content=_sse("u", "n", "o", "dos", "tres", "cuatro")))
@@ -1255,10 +1255,10 @@ def test_streaming_pago_cuenta_una_sola_vez_no_por_chunk():
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
-    assert estado.almacen.paid_usage("buena", dia) == 1
+    assert estado.store.paid_usage("buena", dia) == 1
 
 
-# --- Fix round 2 (final), cambio 1: `exigir_llave` acepta la llave tambien
+# --- Fix round 2 (final), cambio 1: `require_api_key` acepta la llave tambien
 #     por `Authorization: Bearer <llave>`, no solo por `X-API-Key`. Es lo que
 #     permite que `OpenAI(base_url=..., api_key="<llave>")` autentique sin
 #     configuracion extra -- la promesa central del contrato ("cambia solo
@@ -1311,10 +1311,10 @@ def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=200,
-                    limitador=PerKeyRateLimiter(2))
-    cliente = TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=200,
+                    rate_limiter=PerKeyRateLimiter(2))
+    cliente = TestClient(create_app(estado))
 
     r1 = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
     r2 = cliente.get("/v1/models", headers={"Authorization": "Bearer buena"})
@@ -1342,9 +1342,9 @@ def test_ranking_marca_como_no_medida_una_ruta_sin_sonda_de_calidad(cliente):
 def test_ranking_trae_la_fecha_de_la_ultima_sonda(estado_cliente):
     estado, cliente = estado_cliente
     # 2026-08-17T12:00:00Z y 2026-08-17T18:00:00Z
-    estado.almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
+    estado.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
                                    1786968000.0)
-    estado.almacen.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
+    estado.store.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
                                    1786989600.0)
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert fila["calidad_medida"] is True
@@ -1359,7 +1359,7 @@ def test_una_ruta_en_cooldown_no_pierde_su_marca_de_calidad_medida(estado_client
     # cooldown, y asi perdia los campos nuevos: una ruta castigada aparecia
     # como "nunca medida" y el router la mandaba al fondo por partida doble.
     estado, cliente = estado_cliente
-    estado.almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
+    estado.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
                                    1786968000.0)
     estado.proxy.cooldowns["kilo/a:free"] = time.time() + 600
     fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
@@ -1408,12 +1408,12 @@ def test_el_tope_de_pago_diario_da_503_no_400():
     # vacia -- pero la ruta de pago EXISTE y podria servir: es indisponibilidad,
     # no una peticion mal formada.
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=1,
+        daily_paid_cap=1,
         hacer_resp_free=lambda: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": "hola"}}]}),
         hacer_resp_paid=lambda: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": "pago"}}]}))
-    estado.almacen.add_paid_usage("buena", _hoy())          # tope agotado
+    estado.store.add_paid_usage("buena", _hoy())          # tope agotado
     estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
 
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
@@ -1426,10 +1426,10 @@ def test_el_503_por_indisponibilidad_no_reporta_liberacion_si_no_hay_cooldown():
     # Solo hay ruta de pago, el cliente la prohibio: no hay nada que esperar,
     # asi que proxima_liberacion es null en vez de un numero inventado.
     estado, cliente = _estado_libre_y_pago(
-        tope_pago_diario=9,
+        daily_paid_cap=9,
         hacer_resp_free=lambda: httpx.Response(500),
         hacer_resp_paid=lambda: httpx.Response(500))
-    estado.almacen.upsert_routes([], 1.0, deactivate_missing=False)
+    estado.store.upsert_routes([], 1.0, deactivate_missing=False)
     estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
     r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "x_permitir_pago": False})
@@ -1452,9 +1452,9 @@ def _cliente_que_piensa(contenido):
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": contenido}}]})))
-    estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
-                    llaves={"buena"}, tope_pago_diario=200)
-    return TestClient(crear_app(estado))
+    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+                    api_keys={"buena"}, daily_paid_cap=200)
+    return TestClient(create_app(estado))
 
 
 def test_devuelve_el_razonamiento_recortado_en_x_razonamiento():

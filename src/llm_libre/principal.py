@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 
 from llm_libre.storage import Storage
-from llm_libre.api import Estado, crear_app
+from llm_libre.api import State, create_app
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.providers import load
 from llm_libre.proxy import Proxy
@@ -24,8 +24,8 @@ HORAS_SALUD = float(os.getenv("SONDEO_SALUD_HORAS", "5"))
 ROTAR = os.getenv("ROTAR_EMPATES", "true").strip().lower() not in ("false", "0", "no")
 
 
-def crear_estado() -> Estado:
-    """Arma el Estado real del proceso: carga los proveedores desde el YAML +
+def crear_estado() -> State:
+    """Arma el State real del proceso: carga los proveedores desde el YAML +
     entorno, abre la DB SQLite (creando el esquema si falta) y comparte UN
     solo cliente httpx entre el proxy y el planificador de sondeo.
 
@@ -55,16 +55,16 @@ def crear_estado() -> Estado:
     almacen.create_schema()
     http = httpx.AsyncClient()
     proxy = Proxy({p.id: p for p in proveedores}, almacen, http)
-    estado = Estado(almacen=almacen, proxy=proxy, llaves=llaves,
-                    tope_pago_diario=int(os.getenv("TOPE_PAGO_DIARIO", "200")),
-                    limitador=PerKeyRateLimiter(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
-    estado.proveedores = proveedores
+    estado = State(store=almacen, proxy=proxy, api_keys=llaves,
+                    daily_paid_cap=int(os.getenv("TOPE_PAGO_DIARIO", "200")),
+                    rate_limiter=PerKeyRateLimiter(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
+    estado.providers = proveedores
     estado.http = http
-    estado.aleatorio = random.Random() if ROTAR else None
+    estado.rng = random.Random() if ROTAR else None
     return estado
 
 
-async def planificador(estado: Estado) -> None:
+async def planificador(estado: State) -> None:
     """Loop de fondo que corre `probing.cycle` sin parar, cada HORAS_SALUD.
 
     Desviacion respecto del brief original (Task 12): el brief traia el
@@ -99,14 +99,14 @@ async def planificador(estado: Estado) -> None:
 
 
 estado = crear_estado()
-app = crear_app(estado)
+app = create_app(estado)
 
 
 @asynccontextmanager
 async def _ciclo_de_vida(_app):
     """Reemplaza el `@app.on_event("startup"/"shutdown")` del brief -- deprecado
     en la version de FastAPI/Starlette que trae este proyecto (ya emite
-    warning en la suite) -- por el `lifespan` recomendado. `crear_app` (Task
+    warning en la suite) -- por el `lifespan` recomendado. `create_app` (Task
     9) no expone un parametro para pasarlo en el constructor, asi que se
     engancha reasignando `app.router.lifespan_context` despues de crear la
     app: Starlette solo lee ese atributo cuando llega el mensaje ASGI de

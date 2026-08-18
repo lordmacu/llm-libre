@@ -5,7 +5,7 @@ quedan en espanol; solo el texto que termina sirviendose en `/docs` y
 `/openapi.json` (el entregable de Task 14) esta en ingles aca.
 
 Este modulo NO cambia comportamiento de runtime: solo arma texto,
-ejemplos y fragmentos de JSON Schema que `api.crear_app` conecta via los
+ejemplos y fragmentos de JSON Schema que `api.create_app` conecta via los
 parametros nativos de FastAPI (`summary`, `description`, `responses`,
 `openapi_extra`) y via `personalizar_openapi`, que reemplaza `app.openapi`
 -- una funcion que solo corre cuando alguien pide `/docs` u
@@ -72,7 +72,7 @@ Each key is limited to a fixed number of requests per minute (see the
 
 # --- Security schemes: puramente documental, ver personalizar_openapi() mas
 #     abajo. No hay ningun fastapi.Security() nuevo en el codigo: la
-#     autenticacion real sigue siendo el `exigir_llave` manual que api.py ya
+#     autenticacion real sigue siendo el `require_api_key` manual que api.py ya
 #     tenia, sin tocar. Esto solo hace que /docs muestre el candado y deje
 #     probar la API desde ahi. --------------------------------------------
 
@@ -93,7 +93,7 @@ _ESQUEMAS_SEGURIDAD = {
 }
 _SEGURIDAD_OPERACION = [{"ApiKeyHeader": []}, {"BearerAuth": []}]
 
-# Endpoints que NO exigen llave (ver api.exigir_llave -- /health es el unico).
+# Endpoints que NO exigen llave (ver api.require_api_key -- /health es el unico).
 _SIN_AUTENTICACION = {"/health"}
 
 
@@ -101,7 +101,7 @@ def personalizar_openapi(app) -> None:
     """Reemplaza `app.openapi` por una version que agrega los esquemas de
     seguridad y el requisito `security` por operacion -- lo unico que
     FastAPI no puede inferir solo, porque la autenticacion real de este
-    proyecto es un chequeo manual de cabeceras (`exigir_llave`), no un
+    proyecto es un chequeo manual de cabeceras (`require_api_key`), no un
     `fastapi.Security(...)` declarado en la firma de cada endpoint.
 
     Corre PEREZOSO (solo la primera vez que alguien pide `/docs` u

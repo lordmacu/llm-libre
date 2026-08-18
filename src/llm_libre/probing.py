@@ -205,13 +205,13 @@ async def cycle(state, counter: int) -> None:
     cycle failed.
 
     `state` is any object with `.http`, `.proveedores`, `.almacen` and `.proxy`
-    (e.g. `llm_libre.api.Estado`); that type is not imported here so as not to
+    (e.g. `llm_libre.api.State`); that type is not imported here so as not to
     create a dependency from probing to api.
     """
     now = time.time()
-    await sync_catalogue(state.http, state.proveedores, state.almacen, now)
-    routes = state.almacen.active_routes()
-    await probe_health(state.proxy, state.almacen, routes, now)
+    await sync_catalogue(state.http, state.providers, state.store, now)
+    routes = state.store.active_routes()
+    await probe_health(state.proxy, state.store, routes, now)
     if counter % QUALITY_EVERY_N_CYCLES == 0:
-        await probe_quality(state.proxy, state.almacen, routes, now)
-    state.almacen.prune(now - RETENTION_DAYS * 86400)
+        await probe_quality(state.proxy, state.store, routes, now)
+    state.store.prune(now - RETENTION_DAYS * 86400)

@@ -32,11 +32,11 @@ def _ok(contenido="hola"):
     return {"choices": [{"message": {"role": "assistant", "content": contenido}}]}
 
 
-def _proxy(handler, proveedores=("kilo",), canvas=frozenset()):
+def _proxy(handler, providers=("kilo",), canvas=frozenset()):
     almacen = Storage(":memory:")
     almacen.create_schema()
     cliente = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return Proxy({p: _prov(p, unwraps_canvas=p in canvas) for p in proveedores},
+    return Proxy({p: _prov(p, unwraps_canvas=p in canvas) for p in providers},
                  almacen, cliente)
 
 
@@ -101,7 +101,7 @@ async def test_429_sin_retry_after_castiga_sin_ninguna_sonda():
     p = _proxy(lambda req: httpx.Response(429))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
     await p.wait_for_pending_probes()
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 async def test_un_exito_limpia_el_castigo_acumulado():
@@ -125,7 +125,7 @@ async def test_agotadas_todas_las_rutas_devuelve_503():
     assert r.attempts == 2
 
 
-async def test_sin_rutas_devuelve_503_sin_intentar():
+async def test_no_routes_devuelve_503_sin_intentar():
     p = _proxy(lambda req: httpx.Response(200, json=_ok()))
     r = await p.complete([], CUERPO, ahora=0.0)
     assert r.status == 503
@@ -144,7 +144,7 @@ async def test_desenvuelve_la_cerca_de_canvas_en_el_camino_no_streaming():
     # la desenvuelve -- ver el hallazgo 1 de la revision, mas abajo.
     cerca = (':::writing{title="x"}\nhola\n:::')
     p = _proxy(lambda req: httpx.Response(200, json=_ok(cerca)),
-              proveedores=("chatgpt",), canvas={"chatgpt"})
+              providers=("chatgpt",), canvas={"chatgpt"})
     r = await p.complete([_ruta("a:free", provider="chatgpt")], CUERPO, ahora=0.0)
     assert r.json["choices"][0]["message"]["content"] == "hola\n"
 
@@ -186,7 +186,7 @@ async def test_manda_el_id_real_del_modelo_no_el_alias():
 async def test_registra_un_evento_por_intento():
     p = _proxy(lambda req: httpx.Response(200, json=_ok()))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
-    filas = p.almacen._con.execute("SELECT clave, ok FROM eventos").fetchall()
+    filas = p.store._con.execute("SELECT clave, ok FROM eventos").fetchall()
     assert filas == [("kilo/a:free", 1)]
 
 
@@ -259,7 +259,7 @@ async def test_un_200_sin_contenido_se_registra_como_evento_fallido():
     # devuelve vacio SUBE su confiabilidad cada vez que falla.
     p = _proxy(lambda req: httpx.Response(200, json=_vacia()))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
-    filas = p.almacen._con.execute("SELECT clave, ok FROM eventos").fetchall()
+    filas = p.store._con.execute("SELECT clave, ok FROM eventos").fetchall()
     assert filas == [("kilo/a:free", 0)]
 
 
@@ -340,7 +340,7 @@ async def test_proxima_liberacion_reporta_la_mas_cercana_de_esta_cadena():
 async def test_el_camino_no_streaming_guarda_latencia_no_ttft():
     p = _proxy(lambda req: httpx.Response(200, json=_ok()))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
     assert fila[0] == 0                # no se inventa un ttft
     assert fila[1] is not None         # pero la latencia real si queda registrada
@@ -406,7 +406,7 @@ async def test_menos_del_umbral_de_sospecha_no_dispara_sonda_ni_castiga():
         await p.complete([_ruta("a:free")], CUERPO, ahora=float(i))
     await p.wait_for_pending_probes()
     assert "kilo/a:free" not in p.cooldowns
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 async def test_al_cruzar_el_umbral_se_dispara_una_sonda_que_castiga_si_la_ruta_esta_rota():
@@ -417,7 +417,7 @@ async def test_al_cruzar_el_umbral_se_dispara_una_sonda_que_castiga_si_la_ruta_e
     assert p.cooldowns["kilo/a:free"] > 0.0
     # La sonda dejo su propia constancia en `sondas` -- la misma evidencia
     # que lee Storage.tiene_evidencia_de_vida para /health.
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
     assert fila == ("salud", 0)
 
@@ -453,7 +453,7 @@ async def test_un_exito_limpia_la_sospecha_acumulada():
     await p.complete([_ruta("a:free")], CUERPO, ahora=float(SUSPICION_THRESHOLD))
     await p.wait_for_pending_probes()
     assert "kilo/a:free" not in p.cooldowns
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
     # Y hacen falta SUSPICION_THRESHOLD fallos NUEVOS para volver a acumular --
     # no alcanza con uno solo, que es justo lo que probaria que la sospecha
@@ -475,7 +475,7 @@ async def test_codigo_429_castiga_en_el_primer_golpe_sin_pasar_por_sospecha():
     p = _proxy(lambda req: httpx.Response(429))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
     assert "kilo/a:free" in p.cooldowns
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 async def test_usa_el_timeout_global_si_el_proveedor_no_declara_el_suyo():
@@ -561,7 +561,7 @@ async def test_tres_400_seguidos_no_disparan_sospecha_ni_castigan():
     assert "kilo/a:free" not in p.cooldowns
     # Ni siquiera se disparo una sonda a confirmar -- el 400 nunca cuenta
     # como sospecha, no es que la sonda haya dado "sana".
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 async def test_tras_400_seguidos_un_pedido_valido_de_otra_llave_sigue_sirviendose():
@@ -635,7 +635,7 @@ async def test_mezcla_de_4xx_y_5xx_solo_cuenta_los_5xx():
 async def test_un_400_se_registra_pero_marcado_como_error_del_cliente():
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
     assert fila == (0, 1)
 
@@ -643,7 +643,7 @@ async def test_un_400_se_registra_pero_marcado_como_error_del_cliente():
 async def test_un_500_se_registra_sin_marca_de_error_del_cliente():
     p = _proxy(lambda req: httpx.Response(500))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
     assert fila == (0, 0)
 
@@ -716,7 +716,7 @@ async def test_tres_405_seguidos_castigan_via_sonda():
 async def test_405_se_registra_sin_marca_de_error_del_cliente():
     p = _proxy(lambda req: httpx.Response(405))
     await p.complete([_ruta("a:free")], CUERPO, ahora=0.0)
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
     assert fila == (0, 0)
 
@@ -852,7 +852,7 @@ async def test_el_evento_se_sigue_registrando_aunque_la_sospecha_no_castigue():
     rutas = _multi("m0:free", "m1:free")
     p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
     await p.complete(rutas, CUERPO, ahora=0.0)
-    filas = p.almacen._con.execute(
+    filas = p.store._con.execute(
         "SELECT clave, ok, es_error_cliente FROM eventos ORDER BY clave").fetchall()
     assert filas == [("kilo/m0:free", 0, 0), ("kilo/m1:free", 0, 0)]
 
@@ -909,7 +909,7 @@ async def test_429_en_una_cadena_que_falla_entera_sigue_castigando_de_inmediato(
     assert "kilo/m0:free" in p.cooldowns
     assert "kilo/m1:free" in p.cooldowns
     assert "kilo/m2:free" in p.cooldowns
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 # --- Los tres requisitos restantes que el gate pidio explicitamente:
@@ -998,14 +998,14 @@ async def test_un_exito_reinicia_el_contador_de_sospecha_no_el_reloj():
 #     escalon de la cadena. ---
 
 async def test_las_rutas_de_pago_castigan_directo_sin_ninguna_sonda():
-    p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
+    p = _proxy(lambda req: httpx.Response(500), providers=("minimax",))
     ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     for i in range(SUSPICION_THRESHOLD):
         await p.complete([ruta_pago], CUERPO, ahora=float(i))
     await p.wait_for_pending_probes()
     assert p.cooldowns["minimax/m1"] > 0.0
     # Directo: nunca se disparo (ni se gasto) ninguna sonda para llegar ahi.
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
 
 
 # --- Round 10, MEDIUM del gate: el castigo directo de pago reutilizaba el
@@ -1022,7 +1022,7 @@ async def test_el_castigo_directo_de_pago_es_flat_no_escala_con_golpes_repetidos
     # maquina. Da igual para lo que este test prueba: si el castigo
     # escalara (round 9's _castigar), la segunda ronda saldria a 120s, muy
     # por fuera de una tolerancia de medio segundo.
-    p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
+    p = _proxy(lambda req: httpx.Response(500), providers=("minimax",))
     ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     ahora = 0.0
     for i in range(SUSPICION_THRESHOLD):
@@ -1038,7 +1038,7 @@ async def test_el_castigo_directo_de_pago_es_flat_no_escala_con_golpes_repetidos
 
 
 async def test_menos_del_umbral_no_castiga_una_ruta_de_pago():
-    p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
+    p = _proxy(lambda req: httpx.Response(500), providers=("minimax",))
     ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     for i in range(SUSPICION_THRESHOLD - 1):
         await p.complete([ruta_pago], CUERPO, ahora=float(i))
@@ -1055,7 +1055,7 @@ async def test_un_exito_de_pago_limpia_el_contador_de_fallos_de_pago():
             return httpx.Response(500)
         return httpx.Response(200, json=_ok())
 
-    p = _proxy(handler, proveedores=("minimax",))
+    p = _proxy(handler, providers=("minimax",))
     ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     for i in range(SUSPICION_THRESHOLD - 1):
         await p.complete([ruta_pago], CUERPO, ahora=float(i))
@@ -1244,7 +1244,7 @@ async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas
     # SUSPICION_THRESHOLD son el trafico real que arma la sospecha), y ANTES
     # de que completar() llegue a su propia decision de castigo -- para
     # que el veredicto quede genuinamente sin resolver, no ya tomado.
-    original = p.almacen.record_event
+    original = p.store.record_event
     contador = {"n": 0}
 
     def _registrar_evento_que_a_veces_revienta(*a, **kw):
@@ -1252,7 +1252,7 @@ async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas
         if contador["n"] > SUSPICION_THRESHOLD:
             raise RuntimeError("contencion simulada de sqlite bajo WAL")
         return original(*a, **kw)
-    p.almacen.record_event = _registrar_evento_que_a_veces_revienta
+    p.store.record_event = _registrar_evento_que_a_veces_revienta
 
     for i in range(SUSPICION_THRESHOLD):
         await p.complete([_ruta("a:free")], CUERPO, ahora=float(i))
@@ -1296,7 +1296,7 @@ async def test_un_429_contra_la_sonda_no_se_registra_como_sonda_de_salud_fallida
     # ruta genuinamente caida.
     p = _proxy(lambda req: httpx.Response(429))
     await p._probe_on_demand(_ruta("a:free"), ahora=100.0)
-    assert p.almacen._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
     # Pero SI castigo -- el 429 tiene su propio camino, sin pasar por sondas.
     assert "kilo/a:free" in p.cooldowns
 
@@ -1315,6 +1315,6 @@ async def test_la_fila_de_sonda_se_estampa_con_la_resolucion_no_la_programacion(
     p = _proxy(handler)
     ahora = 1000.0
     await p._probe_on_demand(_ruta("a:free"), ahora=ahora)
-    fila = p.almacen._con.execute(
+    fila = p.store._con.execute(
         "SELECT momento FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
     assert fila[0] >= ahora + demora_s

@@ -238,11 +238,11 @@ def test_chatgpt_discards_auto_because_it_is_a_reserved_id():
 # --- INFO from the round 6 review: RESERVED_IDS only excluded the LITERAL id
 #     "auto", not the compound aliases api.py ALSO treats as reserved
 #     ("auto:rapido", "auto:potente", "auto:tools", "auto:vision" -- see ALIAS
-#     in api.py and interpretar_pedido, which resolves ANY id starting with
+#     in api.py and parse_request, which resolves ANY id starting with
 #     "auto:" as an alias, never as a literal id). A provider publishing a real
 #     model called, say, "auto:rapido" created a PERMANENTLY unreachable route:
 #     no request with `model: "auto:rapido"` ever reaches
-#     `pedido.model == "auto:rapido"`, because interpretar_pedido resolves it
+#     `pedido.model == "auto:rapido"`, because parse_request resolves it
 #     first as profile "rapido" with modelo=None. ---
 
 def test_the_compound_auto_aliases_are_discarded_too():
