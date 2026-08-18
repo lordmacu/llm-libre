@@ -17,43 +17,43 @@ from llm_libre.proxy import (ON_DEMAND_PROBE_LIMIT_S, PENDING_CAP,
                              SUSPICION_THRESHOLD, Proxy)
 
 
-def _hoy() -> str:
+def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _sse(*trozos: str) -> bytes:
-    lineas = [f'data: {{"choices":[{{"delta":{{"content":"{t}"}}}}]}}\n\n' for t in trozos]
-    lineas.append("data: [DONE]\n\n")
-    return "".join(lineas).encode()
+def _sse(*chunks: str) -> bytes:
+    lines = [f'data: {{"choices":[{{"delta":{{"content":"{t}"}}}}]}}\n\n' for t in chunks]
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
 
 
-def test_auto_es_balanceado():
+def test_auto_is_balanced():
     p = parse_request({"model": "auto"})
     assert p.model is None and p.profile == "balanceado"
 
 
-def test_los_alias_de_perfil():
+def test_the_profile_aliases():
     assert parse_request({"model": "auto:rapido"}).profile == "rapido"
     assert parse_request({"model": "auto:potente"}).profile == "potente"
 
 
-def test_los_alias_de_capacidad_se_traducen_a_requisitos():
+def test_the_capability_aliases_translate_into_requirements():
     p = parse_request({"model": "auto:tools"})
     assert p.needs_tools is True and p.profile == "balanceado"
     assert parse_request({"model": "auto:vision"}).needs_vision is True
 
 
-def test_un_modelo_real_se_conserva():
+def test_a_real_model_is_preserved():
     p = parse_request({"model": "poolside/laguna-s-2.1:free"})
     assert p.model == "poolside/laguna-s-2.1:free"
 
 
-def test_mandar_tools_exige_soporte_de_tools_aunque_no_se_pida():
+def test_sending_tools_requires_tool_support_even_without_asking():
     p = parse_request({"model": "auto", "tools": [{"type": "function"}]})
     assert p.needs_tools is True
 
 
-def test_las_extensiones_x_se_respetan():
+def test_the_x_extensions_are_honoured():
     p = parse_request({"model": "auto", "x_requiere": ["tools", "vision"],
                             "x_min_contexto": 200000, "x_permitir_pago": False})
     assert p.needs_tools and p.needs_vision
@@ -61,60 +61,61 @@ def test_las_extensiones_x_se_respetan():
     assert p.allow_paid is False
 
 
-def test_model_de_solo_espacios_se_trata_como_ausente():
-    # Fix round 1, hallazgo 3 (Minor): "   " es truthy, asi que se colaba antes
-    # del "or auto" y quedaba vacio tras el strip -- un 404 confuso sobre el
-    # modelo ''. Debe tratarse igual que "" / None / ausente: cae a "auto".
+def test_a_whitespace_only_model_is_treated_as_absent():
+    # Fix round 1, finding 3 (Minor): "   " is truthy, so it slipped past the
+    # "or auto" and came out empty after the strip -- a confusing 404 about the
+    # model ''. It must be treated like "" / None / absent: it falls back to "auto".
     p = parse_request({"model": "   "})
     assert p.model is None and p.profile == "balanceado"
 
 
-# --- Revision post-Task-14 (gate): tres defectos reales que el reviewer
-#     encontro leyendo parse_request, no ejecutando -- los tres eran
-#     entradas malformadas del CLIENTE cayendo en un hueco silencioso
-#     (una degradacion sin aviso, o directamente un 500). ---
+# --- Post-Task-14 review (gate): three real defects the reviewer found by
+#     reading parse_request, not by running it -- all three were malformed CLIENT
+#     input falling into a silent hole (a degradation with no warning, or an
+#     outright 500). ---
 
-def test_auto_con_sufijo_desconocido_da_400():
-    # "auto:turbo" (typo tipico de "auto:tools") caia por las tres ramas de
-    # sufijo sin tocar nada -- silenciosamente identico a pedir "auto" liso.
-    # Peligroso para un cliente que de verdad queria exigir una capacidad:
-    # se queda sin ella, sin ningun aviso.
+def test_auto_with_an_unknown_suffix_returns_400():
+    # "auto:turbo" (a typical typo for "auto:tools") fell through all three suffix
+    # branches without touching anything -- silently identical to asking for plain
+    # "auto". Dangerous for a client that genuinely wanted to require a capability:
+    # ends up without it, with no warning at all.
     with pytest.raises(HTTPException) as exc:
         parse_request({"model": "auto:turbo"})
     assert exc.value.status_code == 400
     assert "auto:turbo" in exc.value.detail["message"]
 
 
-def test_auto_liso_sigue_funcionando_tras_el_fix_de_sufijo_desconocido():
-    # Regresion directa del fix de arriba: sufijo == "" (o sea "auto" sin
-    # ":") NO debe entrar en la rama de rechazo.
+def test_plain_auto_still_works_after_the_unknown_suffix_fix():
+    # A direct regression of the fix above: suffix == "" (that is, "auto" with no
+    # ":") must NOT enter the rejection branch.
     p = parse_request({"model": "auto"})
     assert p.model is None and p.profile == "balanceado"
 
 
-def test_auto_balanceado_sigue_siendo_un_alias_valido():
-    # "balanceado" ESTA en PROFILES -- "auto:balanceado" es redundante con
-    # "auto" liso, pero valido, y no debe caer en la rama de rechazo.
+def test_auto_balanceado_is_still_a_valid_alias():
+    # "balanceado" IS in PROFILES -- "auto:balanceado" is redundant with plain
+    # "auto", but valid, and must not fall into the rejection branch.
     p = parse_request({"model": "auto:balanceado"})
     assert p.profile == "balanceado"
 
 
-def test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor():
-    # `set("tools")` itera CARACTERES ({'t','o','l','s'}), asi que
-    # "tools" in exigidas daba False y la exigencia se ignoraba entera, sin
-    # error. Un string suelto (en vez de una lista de uno) se acepta igual.
+def test_x_requiere_as_a_bare_string_is_accepted_as_a_single_value():
+    # `set("tools")` iterates CHARACTERS ({'t','o','l','s'}), so
+    # "tools" in exigidas was False and the requirement was ignored entirely,
+    # without an error. A bare string (instead of a one-element list) is accepted
+    # just the same.
     p = parse_request({"model": "auto", "x_requiere": "tools"})
     assert p.needs_tools is True
     assert p.needs_vision is False
 
 
-def test_x_requiere_como_lista_sigue_funcionando_igual_que_antes():
+def test_x_requiere_as_a_list_still_works_as_before():
     p = parse_request({"model": "auto", "x_requiere": ["vision"]})
     assert p.needs_vision is True
     assert p.needs_tools is False
 
 
-def test_x_min_contexto_no_numerico_da_400_nombrando_el_campo():
+def test_a_non_numeric_x_min_contexto_returns_400_naming_the_field():
     with pytest.raises(HTTPException) as exc:
         parse_request({"model": "auto", "x_min_contexto": "cien mil"})
     assert exc.value.status_code == 400
@@ -122,26 +123,25 @@ def test_x_min_contexto_no_numerico_da_400_nombrando_el_campo():
     assert exc.value.detail["valor_recibido"] == "cien mil"
 
 
-def test_x_min_contexto_numerico_como_string_sigue_funcionando():
-    # int("100000") es valido -- el fix no debe volverse mas estricto de lo
-    # que ya era para el caso que SI funcionaba.
+def test_a_numeric_x_min_contexto_as_a_string_still_works():
+    # int("100000") is valid -- the fix must not become stricter than it already
+    # was for the case that DID work.
     p = parse_request({"model": "auto", "x_min_contexto": "100000"})
     assert p.min_context == 100000
 
 
-# --- Revision post-Task-14 (tercer gate): la MISMA familia de bug que
-#     x_min_contexto (un cast sin atrapar sobre un campo del cliente
-#     revienta con TypeError/AttributeError, escapa como 500) penetro dos
-#     veces mas -- x_requiere con un valor ni string ni lista (set() sobre
-#     un int/bool/float/lista-de-listas) y model con cualquier cosa que no
-#     sea un string (.strip() sobre un numero, una lista, un dict). El fix
-#     generaliza con _read_field en vez de parchear el tercer sitio a
-#     mano -- estos tests cubren los dos nuevos y confirman la MISMA forma
-#     de error (message/campo/valor_recibido) que ya establecio
-#     x_min_contexto. ---
+# --- Post-Task-14 review (third gate): the SAME family of bug as x_min_contexto
+#     (an uncaught cast over a client field blows up with
+#     TypeError/AttributeError and escapes as a 500) got through twice more --
+#     x_requiere with a value that is neither a string nor a list (set() over an
+#     int/bool/float/list-of-lists) and model with anything that is not a string
+#     (.strip() over a number, a list, a dict). The fix generalises with
+#     _read_field instead of patching the third site by hand -- these tests cover
+#     the two new ones and confirm the SAME error shape
+#     (message/campo/valor_recibido) x_min_contexto already established. ---
 
 @pytest.mark.parametrize("valor", [5, True, 3.5, [["tools"]]])
-def test_x_requiere_no_string_ni_lista_da_400_nombrando_el_campo(valor):
+def test_x_requiere_that_is_neither_string_nor_list_returns_400_naming_the_field(valor):
     with pytest.raises(HTTPException) as exc:
         parse_request({"model": "auto", "x_requiere": valor})
     assert exc.value.status_code == 400
@@ -150,7 +150,7 @@ def test_x_requiere_no_string_ni_lista_da_400_nombrando_el_campo(valor):
 
 
 @pytest.mark.parametrize("valor", [5, True, 3.5, ["a"], {"a": 1}])
-def test_model_no_string_da_400_nombrando_el_campo(valor):
+def test_a_non_string_model_returns_400_naming_the_field(valor):
     with pytest.raises(HTTPException) as exc:
         parse_request({"model": valor})
     assert exc.value.status_code == 400
@@ -158,59 +158,59 @@ def test_model_no_string_da_400_nombrando_el_campo(valor):
     assert exc.value.detail["valor_recibido"] == valor
 
 
-def test_model_ausente_o_nulo_sigue_cayendo_a_auto_sin_dar_400():
-    # Regresion directa del fix de arriba: None (ausente) sigue siendo
-    # valido -- solo un valor PRESENTE con el tipo equivocado debe dar 400.
+def test_an_absent_or_null_model_still_falls_back_to_auto_without_a_400():
+    # A direct regression of the fix above: None (absent) is still valid -- only a
+    # PRESENT value of the wrong type should return a 400.
     assert parse_request({}).model is None
     assert parse_request({"model": None}).model is None
 
 
 @pytest.fixture
-def cliente():
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes(
+def client():
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200)
-    return TestClient(create_app(estado))
+    return TestClient(create_app(state))
 
 
 @pytest.fixture
-def estado_cliente():
-    """Como `cliente`, pero exponiendo tambien el `State`: los tests de
-    /health necesitan sembrar eventos/cooldowns directamente en el almacen y
-    el proxy, cosa que la fixture `cliente` no permite tocar desde afuera."""
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes(
+def state_client():
+    """Like `client`, but also exposing the `State`: the tests for
+    /health need to seed events/cooldowns directly into the store and
+    the proxy, which the `client` fixture does not allow touching from outside."""
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200)
-    return estado, TestClient(create_app(estado))
+    return state, TestClient(create_app(state))
 
 
-def test_sin_llave_da_401(cliente):
-    r = cliente.post("/v1/chat/completions", json={"model": "auto", "messages": []})
+def test_without_a_key_it_returns_401(client):
+    r = client.post("/v1/chat/completions", json={"model": "auto", "messages": []})
     assert r.status_code == 401
 
 
-def test_con_llave_mala_da_401(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "mala"},
+def test_with_a_bad_key_it_returns_401(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "mala"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 401
 
 
-def test_completions_responde_y_marca_la_ruta_usada(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_completions_answers_and_marks_the_route_used(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
     assert r.headers["X-Ruta-Usada"] == "kilo/a:free"
@@ -218,647 +218,644 @@ def test_completions_responde_y_marca_la_ruta_usada(cliente):
     assert r.json()["choices"][0]["message"]["content"] == "hola"
 
 
-# --- Revision post-Task-14 (gate): los mismos tres defectos de arriba
-#     (test_auto_con_sufijo_desconocido_da_400 y compania), pero probados a
-#     traves del cliente HTTP completo -- para confirmar que parse_request
-#     de verdad esta conectado al camino real de /v1/chat/completions, no
-#     solo probado de forma aislada. ---
+# --- Post-Task-14 review (gate): the same three defects as above
+#     (test_auto_with_an_unknown_suffix_returns_400 and company), but exercised
+#     through the full HTTP client -- to confirm parse_request is genuinely wired
+#     into the real /v1/chat/completions path, not merely tested in isolation. ---
 
-def test_completions_con_alias_desconocido_da_400_no_500(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_completions_with_an_unknown_alias_returns_400_not_500(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto:turbo", "messages": []})
     assert r.status_code == 400
     assert "auto:turbo" in r.json()["detail"]["message"]
 
 
-def test_completions_con_x_min_contexto_no_numerico_da_400_no_500(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_completions_with_a_non_numeric_x_min_contexto_returns_400_not_500(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "x_min_contexto": "cien mil", "messages": []})
     assert r.status_code == 400
     assert r.json()["detail"]["campo"] == "x_min_contexto"
 
 
-def test_completions_con_x_requiere_como_string_aplica_la_exigencia(cliente):
-    # kilo/a:free (la unica ruta del fixture `cliente`) declara tools=True,
-    # asi que "x_requiere": "tools" (string suelto) tiene que seguir
-    # sirviendo -- si el bug (set() sobre un string) volviera, esto
-    # devolveria 200 igual porque kilo SI tiene tools, asi que la prueba
-    # real de que la exigencia se aplico vive en el test unitario de arriba
-    # (test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor);
-    # este solo confirma que el pedido llega entero hasta el proxy sin
-    # reventar en el camino.
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_completions_with_x_requiere_as_a_string_applies_the_requirement(client):
+    # kilo/a:free (the only route in the `client` fixture) declares tools=True, so
+    # "x_requiere": "tools" (a bare string) has to keep working -- if the bug
+    # (set() over a string) came back, this would still return 200 because kilo
+    # DOES have tools, so the real proof that the requirement was applied lives in
+    # the unit test above
+    # (test_x_requiere_as_a_bare_string_is_accepted_as_a_single_value); this one
+    # only confirms the request reaches the proxy intact without blowing up on the
+    # way.
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "x_requiere": "tools", "messages": []})
     assert r.status_code == 200
 
 
-# --- Revision post-Task-14 (tercer gate): mismos dos defectos que arriba
-#     (x_requiere no-string-ni-lista, model no-string), a traves del
-#     cliente HTTP completo -- confirma que parse_request esta
-#     conectado al camino real, no solo probado aislado. ---
+# --- Post-Task-14 review (third gate): the same two defects as above (x_requiere
+#     that is neither string nor list, a non-string model), through the full HTTP
+#     client -- it confirms parse_request is wired into the real path, not merely
+#     tested in isolation. ---
 
-def test_completions_con_x_requiere_de_tipo_invalido_da_400_no_500(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_completions_with_an_invalid_x_requiere_type_returns_400_not_500(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "x_requiere": 5, "messages": []})
     assert r.status_code == 400
     assert r.json()["detail"]["campo"] == "x_requiere"
 
 
-def test_completions_con_model_de_tipo_invalido_da_400_no_500(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_completions_with_an_invalid_model_type_returns_400_not_500(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": 5, "messages": []})
     assert r.status_code == 400
     assert r.json()["detail"]["campo"] == "model"
 
 
-# --- Task 14 (documentacion): la regla que manda es que ENRIQUECER
-#     /openapi.json no puede tocar el comportamiento real del endpoint --
-#     completions() sigue leyendo `await request.json()` a mano, SIN un
-#     modelo Pydantic que ligue el cuerpo (eso haria que FastAPI descarte
-#     cualquier campo que no declare, rompiendo el contrato passthrough que
-#     este proyecto existe para dar). `test_cliente.py` ya prueba esto al
-#     nivel de `build_request` (la copia somera que le saca las extensiones
-#     x_* al cuerpo); este test lo extiende al nivel HTTP completo -- cliente
-#     -> FastAPI -> proxy -> proveedor -- para que quede pineado que un campo
-#     que ni el gateway ni ningun SDK de OpenAI conocen sigue llegando al
-#     proveedor TAL CUAL, con el valor exacto que mando el cliente. ---
+# --- Task 14 (documentation): the governing rule is that ENRICHING
+#     /openapi.json cannot touch the endpoint's real behaviour -- completions()
+#     still reads `await request.json()` by hand, WITHOUT a Pydantic model binding
+#     the body (that would make FastAPI drop any field it does not declare,
+#     breaking the passthrough contract this project exists to provide).
+#     `test_client.py` already tests this at the level of `build_request` (the
+#     shallow copy that strips the x_* extensions from the body); this test extends
+#     it to the full HTTP level -- client -> FastAPI -> proxy -> provider -- so it
+#     stays pinned that a field neither the gateway nor any OpenAI SDK knows about
+#     still reaches the provider VERBATIM, with the exact value the client
+#     sent. ---
 
-def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
-    recibido = {}
+def test_an_unknown_field_reaches_the_provider_verbatim():
+    received = {}
 
     def handler(req):
-        recibido.update(json.loads(req.content))
+        received.update(json.loads(req.content))
         return httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})
 
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes(
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200)
-    c = TestClient(create_app(estado))
+    c = TestClient(create_app(state))
 
     r = c.post("/v1/chat/completions", headers={"X-API-Key": "buena"}, json={
         "model": "auto",
         "messages": [{"role": "user", "content": "hi"}],
-        # Ni un campo estandar de OpenAI que el gateway no lista en su
-        # documentacion (reasoning) ni uno inventado por el proveedor de
-        # turno (safety_identifier) son EXTENSIONES DEL GATEWAY (x_*, ver
-        # GATEWAY_EXTENSIONS) -- el contrato es "pasa todo lo que no
-        # reconozcas", no una lista blanca.
+        # Neither a standard OpenAI field the gateway does not list in its
+        # documentation (reasoning) nor one invented by whichever provider
+        # (safety_identifier) is a GATEWAY EXTENSION (x_*, see
+        # GATEWAY_EXTENSIONS) -- the contract is "pass through anything you do
+        # not recognise", not an allow-list.
         "reasoning": {"enabled": False},
         "safety_identifier": "algo-que-el-gateway-jamas-va-a-conocer",
     })
 
     assert r.status_code == 200
-    assert recibido["reasoning"] == {"enabled": False}
-    assert recibido["safety_identifier"] == "algo-que-el-gateway-jamas-va-a-conocer"
-    # Y las extensiones DEL GATEWAY, si vinieran en el mismo pedido, seguirian
-    # sin viajar -- ver test_no_reenvia_las_extensiones_del_gateway_al_proveedor
-    # en test_cliente.py para esa mitad del contrato.
-    assert "x_crudo" not in recibido
+    assert received["reasoning"] == {"enabled": False}
+    assert received["safety_identifier"] == "algo-que-el-gateway-jamas-va-a-conocer"
+    # And the GATEWAY's own extensions, if they came in the same request, still
+    # would not travel -- see
+    # test_it_does_not_forward_the_gateway_extensions_to_the_provider in
+    # test_client.py for that half of the contract.
+    assert "x_crudo" not in received
 
 
-def test_models_lista_el_catalogo_y_los_alias(cliente):
-    r = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
+def test_models_lists_the_catalogue_and_the_aliases(client):
+    r = client.get("/v1/models", headers={"X-API-Key": "buena"})
     ids = [m["id"] for m in r.json()["data"]]
     assert "a:free" in ids
     assert "auto" in ids and "auto:rapido" in ids
 
 
-def test_pedir_capacidades_imposibles_da_400(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_asking_for_impossible_capabilities_returns_400(client):
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "x_min_contexto": 99999999})
     assert r.status_code == 400
 
 
-def test_un_modelo_explicito_que_ya_no_existe_da_404_con_sugerencias(cliente):
-    # Es el bug que este proyecto existe para evitar: un id cableado que se murio.
+def test_an_explicit_model_that_no_longer_exists_returns_404_with_suggestions(client):
+    # It is the bug this project exists to prevent: a hardcoded id that died.
     #
-    # DESVIACION respecto al brief: el brief afirma `"a:free" in str(r.json())`,
-    # pero eso depende de que difflib.get_close_matches (cutoff=0.3) considere
-    # "a:free" suficientemente parecido a "poolside/laguna-m.1:free" — un detalle
-    # de la metrica de similitud, no del contrato que este test quiere proteger.
-    # Se afirma el contrato real: que la respuesta trae la clave "sugerencias".
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    # DEVIATION from the brief: the brief asserts `"a:free" in str(r.json())`, but
+    # that depends on difflib.get_close_matches (cutoff=0.3) considering "a:free"
+    # similar enough to "poolside/laguna-m.1:free" -- a detail of the similarity
+    # metric, not of the contract this test wants to protect. What is asserted is
+    # the real contract: that the response carries the "sugerencias" key.
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "poolside/laguna-m.1:free", "messages": []})
     assert r.status_code == 404
     assert "sugerencias" in str(r.json())
 
 
-# --- ALSO de la revision round 6: el caso de arriba cubre un id que YA NO
-#     esta en el catalogo. Este otro es distinto y es, textualmente, "la
-#     razon de ser del proyecto" -- un id que SIGUE en el catalogo pero que
-#     el proveedor real ya no sirve (404 genuino, en vivo). La ruta ya se
-#     lleva el golpe de confiabilidad (404 es evidencia de la ruta por
-#     default, Parte 1), pero hasta este fix el cliente solo veia un 503
-#     generico ("detalle": "HTTP 404") -- indistinguible de cualquier otra
-#     indisponibilidad transitoria, durante la ventana de hasta 5h antes del
-#     proximo sync de catalogo (nunca para rutas de pago, que no se
-#     sondean). ---
+# --- ALSO from the round 6 review: the case above covers an id that is NO LONGER
+#     in the catalogue. This one is different and is, literally, "the project's
+#     reason to exist" -- an id that IS STILL in the catalogue but which the real
+#     provider no longer serves (a genuine 404, live). The route already takes the
+#     reliability hit (a 404 is route evidence by default, Part 1), but until this
+#     fix the client only saw a generic 503 ("detalle": "HTTP 404") --
+#     indistinguishable from any other transient unavailability, throughout the
+#     window of up to 5h before the next catalogue sync (never for paid routes,
+#     which are not probed). ---
 
-def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente):
-    estado, cliente = estado_cliente
-    estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+def test_an_explicit_model_gone_upstream_returns_404_not_503(state_client):
+    state, client = state_client
+    state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "a:free", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 404
     assert "a:free" in str(r.json())
     assert "sugerencias" in str(r.json())
 
 
-# --- Round 7, LOW del gate: `_similar_ids` corria contra `rutas_activas()`,
-#     que TODAVIA trae el id que se acaba de declarar muerto -- el cliente
-#     leia `"el modelo 'a:free' ya no existe"` con `sugerencias: ['a:free',
-#     ...]`. Se excluye el propio `pedido.model` de la lista antes de
+# --- Round 7, LOW from the gate: `_similar_ids` ran against `active_routes()`,
+#     which STILL carries the id just declared dead -- the client read
+#     `"el modelo 'a:free' ya no existe"` with `sugerencias: ['a:free',
+#     ...]`. The request's own `model` is excluded from the list before
 #     buscar parecidos. ---
 
-def test_la_sugerencia_del_404_en_vivo_no_incluye_el_modelo_recien_declarado_muerto(estado_cliente):
-    estado, cliente = estado_cliente
-    estado.store.upsert_routes(
+def test_the_live_404_suggestions_exclude_the_model_just_declared_dead(state_client):
+    state, client = state_client
+    state.store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096)),
          Route("kilo", "a:freebie", "gratis", Capabilities(True, False, 100000, 4096))],
         1.0)
-    estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+    state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "a:free", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 404
-    sugerencias = r.json()["detail"]["sugerencias"]
-    assert "a:free" not in sugerencias
-    assert "a:freebie" in sugerencias
+    suggestions = r.json()["detail"]["sugerencias"]
+    assert "a:free" not in suggestions
+    assert "a:freebie" in suggestions
 
 
-def test_modelo_auto_con_404_upstream_sigue_siendo_503(estado_cliente):
-    # En modo "auto" no hay un id EXPLICITO que nombrar -- pedido.model es
-    # None -- asi que este caso se queda con el 503 generico de siempre, no
-    # con el 404 nuevo (que exige un modelo puntual sobre el cual sugerir).
-    estado, cliente = estado_cliente
-    estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+def test_the_auto_model_with_an_upstream_404_is_still_503(state_client):
+    # In "auto" mode there is no EXPLICIT id to name -- request.model is None --
+    # so this case keeps the usual generic 503, not the new 404 (which requires a
+    # specific model to make suggestions about).
+    state, client = state_client
+    state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 503
 
 
-def test_health_dice_ok_si_hay_ruta_viva(cliente):
-    assert cliente.get("/health").json()["estado"] == "ok"
+def test_health_says_ok_when_a_live_route_exists(client):
+    assert client.get("/health").json()["estado"] == "ok"
 
 
 # --- Fix round 1, hallazgo 1 (Critical): /health tambien debe fallar cuando
-#     la ruta gratis esta genuinamente rota (500 en cada intento), no solo
-#     cuando esta en cooldown por un 429.
+#     the free route is genuinely broken (a 500 on every attempt), not only when
+#     it is in cooldown from a 429.
 #
-#     Reescrito en round 6, Parte 2: la version anterior sembraba 8 fallos +
-#     2 exitos y esperaba "caido" -- bajo el redisenio de "evidencia de
-#     vida" ese caso pasa a "ok" CORRECTAMENTE (hay un exito reciente real,
-#     ver test_health_sigue_ok_con_30_403_pero_un_exito_reciente mas abajo
-#     para el caso que este reemplaza). Este test ahora prueba lo que el
-#     coordinador pidio explicitamente: un proveedor GENUINAMENTE muerto --
-#     cero exitos, y la sonda de salud (la senal mas confiable que existe,
-#     porque el gateway controla su propio payload) tambien falla. ---
+#     Rewritten in round 6, Part 2: the previous version seeded 8 failures + 2
+#     successes and expected "caido" -- under the "evidence of life" redesign that
+#     case CORRECTLY becomes "ok" (there is a real recent success; see
+#     test_health_stays_ok_with_30_403s_but_one_recent_success below for the case
+#     this replaces). This test now checks what the coordinator asked for
+#     explicitly: a GENUINELY dead provider -- zero successes, and the health probe
+#     (the most reliable signal there is, because the gateway controls its own
+#     payload) failing too. ---
 
-def test_health_no_es_ok_si_la_gratis_falla_de_verdad(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
-    # Trafico real, siempre fallido, y la sonda de salud tambien falla. Esto
-    # NUNCA pasa por Proxy._castigar (eso solo lo dispara un 429), asi que
-    # proxy.cooldowns queda vacio -- la version vieja de /health diria "ok"
-    # igual si solo mirara cooldowns.
+def test_health_is_not_ok_when_the_free_route_genuinely_fails(state_client):
+    state, client = state_client
+    now = time.time()
+    # Real traffic, always failing, and the health probe fails too. This NEVER
+    # goes through Proxy._punish (only a 429 triggers that), so proxy.cooldowns
+    # stays empty -- the old version of /health would say "ok" anyway if it only
+    # looked at cooldowns.
     for _ in range(10):
-        estado.store.record_event("kilo/a:free", False, 0, 500, ahora)
-    # Round 9: una sola sonda fallida ya no alcanza para /health (ver
-    # Storage.tiene_evidencia_de_vida) -- dos consecutivas, sin exito de
-    # por medio, si.
-    estado.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    estado.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
-    assert estado.proxy.cooldowns == {}  # confirma que no es por cooldown
+        state.store.record_event("kilo/a:free", False, 0, 500, now)
+    # Round 9: a single failed probe is no longer enough for /health (see
+    # Storage.has_liveness_evidence) -- two consecutive ones, with no success in
+    # between, are.
+    state.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now - 1)
+    state.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now)
+    assert state.proxy.cooldowns == {}  # confirms it is not because of a cooldown
 
-    r = cliente.get("/health")
+    r = client.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
 
 
-def test_health_ok_si_la_gratis_no_tiene_telemetria_aun(estado_cliente):
-    # Una ruta recien sincronizada, sin ningun evento todavia, carga la
-    # confiabilidad NEUTRA (no cero) y debe seguir contando como viva.
-    estado, cliente = estado_cliente
-    filas = estado.store._con.execute("SELECT COUNT(*) FROM eventos").fetchone()
-    assert filas[0] == 0
-    assert cliente.get("/health").json()["estado"] == "ok"
+def test_health_is_ok_when_the_free_route_has_no_telemetry_yet(state_client):
+    # A freshly synced route, with no events yet, carries the NEUTRAL reliability
+    # (not zero) and must keep counting as alive.
+    state, client = state_client
+    rows = state.store._con.execute("SELECT COUNT(*) FROM eventos").fetchone()
+    assert rows[0] == 0
+    assert client.get("/health").json()["estado"] == "ok"
 
 
-def test_health_ok_si_la_gratis_esta_sana(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
+def test_health_is_ok_when_the_free_route_is_healthy(state_client):
+    state, client = state_client
+    now = time.time()
     for _ in range(9):
-        estado.store.record_event("kilo/a:free", True, 200, 200, ahora)
+        state.store.record_event("kilo/a:free", True, 200, 200, now)
     for _ in range(1):
-        estado.store.record_event("kilo/a:free", False, 0, 500, ahora)
-    assert cliente.get("/health").json()["estado"] == "ok"
+        state.store.record_event("kilo/a:free", False, 0, 500, now)
+    assert client.get("/health").json()["estado"] == "ok"
 
 
-def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
-    # La exclusion por cooldown (la que ya existia) no debe haberse roto al
-    # agregar la de confiabilidad.
-    estado, cliente = estado_cliente
+def test_health_still_excludes_on_a_429_cooldown(state_client):
+    # The cooldown exclusion (the one that already existed) must not have broken
+    # when the reliability one was added.
+    state, client = state_client
 
-    async def _forzar_429():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+    async def _force_429():
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
-        await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, time.time())
+        await state.proxy.complete(routes, {"model": "a:free", "messages": []}, time.time())
 
-    asyncio.run(_forzar_429())
-    assert estado.proxy.cooldowns  # confirma que esta vez SI quedo en cooldown
+    asyncio.run(_force_429())
+    assert state.proxy.cooldowns  # confirms it DID end up in cooldown this time
 
-    r = cliente.get("/health")
+    r = client.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
 
 
-# --- Round 7, MEDIUM (calidad de test) del gate: el test de arriba no pinea
-#     el leg de cooldown de `_viva()` en api.py -- borrar del todo la
-#     condicion `m.cooldown_until <= ahora` deja la suite completa en
-#     verde, porque la ruta de ese test NO tiene evidencia de vida propia
-#     (nunca hubo un exito real): `tiene_evidencia_de_vida()` la tira sola,
-#     sin que el cooldown tenga que intervenir. Con el redisenio de round 6
-#     ("evidencia de vida, no ausencia de fallos"), esa condicion es
-#     precisamente la que una limpieza futura borraria sin que nada lo
-#     note. Este test aisla el cooldown de la otra pata: la ruta SI tiene
-#     evidencia de vida (un exito reciente), y aun asi /health tiene que
-#     seguir diciendo no-ok mientras el cooldown siga activo. ---
+# --- Round 7, MEDIUM (test quality) from the gate: the test above does not pin
+#     the cooldown leg of `_viva()` in api.py -- deleting the
+#     `m.cooldown_until <= now` condition outright leaves the whole suite green,
+#     because that test's route has no liveness evidence of its own (there was
+#     never a real success): `has_liveness_evidence()` drops it on its own, without
+#     the cooldown having to intervene. Under round 6's redesign ("evidence of
+#     life, not absence of failures"), that condition is precisely the one a future
+#     cleanup would delete with nothing noticing. This test isolates the cooldown
+#     from the other leg: the route DOES have liveness evidence (a recent success),
+#     and /health still has to say not-ok while the cooldown is active. ---
 
-def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
-    estado.store.record_event("kilo/a:free", True, 50, 200, ahora)
+def test_health_excludes_on_cooldown_even_with_liveness_evidence(state_client):
+    state, client = state_client
+    now = time.time()
+    state.store.record_event("kilo/a:free", True, 50, 200, now)
 
-    async def _forzar_429():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+    async def _force_429():
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
-        await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
+        await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
-    asyncio.run(_forzar_429())
-    assert estado.proxy.cooldowns  # confirma que quedo en cooldown
+    asyncio.run(_force_429())
+    assert state.proxy.cooldowns  # confirma que quedo en cooldown
 
-    # Aislado: sin el cooldown, esta ruta SI cuenta como viva por si sola.
-    assert estado.store.has_liveness_evidence("kilo/a:free", ahora) is True
+    # Isolated: without the cooldown, this route DOES count as alive on its own.
+    assert state.store.has_liveness_evidence("kilo/a:free", now) is True
 
-    r = cliente.get("/health")
+    r = client.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
 
 
-# --- Round 6 de Task 13, Parte 2. `403` es GENUINAMENTE ambiguo: cuenta
-#     suspendida (evidencia de la ruta, correcto contarlo -- Parte 1) vs.
-#     contenido moderado del lado del proveedor (evidencia del PEDIDO de UN
-#     cliente puntual). El gateway no puede distinguirlos sin parsear el
-#     cuerpo especifico de cada proveedor, asi que clasificarlo bien (Parte
-#     1) no alcanza: 30 pedidos con contenido flageado de una sola llave no
-#     deben poder apagar /health para TODAS las llaves si la ruta ya
-#     demostro, con un pedido valido, que sirve. Esto es lo que "evidencia
-#     de vida" compra que "confiabilidad promedio" no podia. ---
+# --- Round 6 of Task 13, Part 2. `403` is GENUINELY ambiguous: a suspended
+#     account (route evidence, correctly counted -- Part 1) versus content
+#     moderated on the provider's side (evidence about ONE particular client's
+#     REQUEST). The gateway cannot tell them apart without parsing each provider's
+#     specific body, so classifying it correctly (Part 1) is not enough: 30
+#     requests with flagged content from a single key must not be able to switch
+#     /health off for EVERY key if the route has already proven, with a valid
+#     request, that it serves. This is what "evidence of life" buys that "average
+#     reliability" could not. ---
 
-def test_health_sigue_ok_con_30_403_pero_un_exito_reciente(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
-    estado.store.record_event("kilo/a:free", True, 50, 200, ahora)
+def test_health_stays_ok_with_30_403s_but_one_recent_success(state_client):
+    state, client = state_client
+    now = time.time()
+    state.store.record_event("kilo/a:free", True, 50, 200, now)
     for _ in range(30):
-        estado.store.record_event("kilo/a:free", False, 0, 403, ahora)
-    assert cliente.get("/health").json()["estado"] == "ok"
+        state.store.record_event("kilo/a:free", False, 0, 403, now)
+    assert client.get("/health").json()["estado"] == "ok"
 
 
-def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
-    # Restart del caso de arriba: el exito y los 403 quedan en el archivo de
-    # /datos: un proceso nuevo contra la MISMA base tiene que leer "ok"
-    # igual, sin volver a generar trafico.
-    ruta_db = str(tmp_path / "salud_403.sqlite3")
-    ahora = time.time()
+def test_health_after_a_process_restart_stays_ok_with_403s_and_one_success(tmp_path):
+    # A restart of the case above: the success and the 403s live in the /datos
+    # file, so a fresh process against the SAME database has to read "ok" just the
+    # same, without generating traffic again.
+    db_path = str(tmp_path / "salud_403.sqlite3")
+    now = time.time()
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    almacen1.record_event("kilo/a:free", True, 50, 200, ahora)
+    store1.record_event("kilo/a:free", True, 50, 200, now)
     for _ in range(30):
-        almacen1.record_event("kilo/a:free", False, 0, 403, ahora)
+        store1.record_event("kilo/a:free", False, 0, 403, now)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+        store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
-    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
     cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
+    store2 = Storage(db_path)
+    store2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+        store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
-    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     assert cliente2.get("/health").json()["estado"] == "ok"
 
 
-def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_path):
-    # Restart del "genuinamente muerto": cero exitos y la sonda de salud
-    # tambien fallo, persistido en /datos -- un proceso nuevo tiene que
-    # seguir leyendo "caido", no "ok por falta de evidencia en contra".
-    ruta_db = str(tmp_path / "salud_muerta.sqlite3")
-    ahora = time.time()
+def test_health_after_a_process_restart_stays_down_with_no_successes_or_probe(tmp_path):
+    # A restart of the "genuinely dead" case: zero successes and the health probe
+    # failed too, persisted in /datos -- a fresh process has to keep reading
+    # "caido", not "ok for lack of evidence to the contrary".
+    db_path = str(tmp_path / "salud_muerta.sqlite3")
+    now = time.time()
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     for _ in range(10):
-        almacen1.record_event("kilo/a:free", False, 0, 500, ahora)
-    # Round 9: hacen falta DOS sondas fallidas consecutivas, no una.
-    almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
+        store1.record_event("kilo/a:free", False, 0, 500, now)
+    # Round 9: TWO consecutive failed probes are required, not one.
+    store1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now - 1)
+    store1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+        store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))
-    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
     cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
 
-    # Segundo proceso con un transport SANO, para probar que "caido" viene
-    # de la TELEMETRIA ya persistida, no de trafico nuevo que este proceso
+    # A second process with a HEALTHY transport, to prove that "caido" comes from
+    # the ALREADY PERSISTED telemetry, not from new traffic this process
     # genere.
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
+    store2 = Storage(db_path)
+    store2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+        store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
     assert r2.json()["estado"] != "ok"
 
 
-def test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria(tmp_path):
-    # Restart de "instalacion nueva": cero eventos, cero sondas -- una ruta
-    # sin evidencia todavia no nace muerta, ni en el primer proceso ni tras
-    # un reinicio contra la misma base vacia.
-    ruta_db = str(tmp_path / "salud_fresca.sqlite3")
+def test_health_after_a_process_restart_stays_ok_with_no_telemetry(tmp_path):
+    # A restart of the "fresh install" case: zero events, zero probes -- a route
+    # with no evidence yet is not born dead, neither in the first process nor after
+    # a restart against the same empty database.
+    db_path = str(tmp_path / "salud_fresca.sqlite3")
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    estado1 = State(store=almacen1, proxy=Proxy({}, almacen1, httpx.AsyncClient()),
+    estado1 = State(store=store1, proxy=Proxy({}, store1, httpx.AsyncClient()),
                      api_keys={"buena"}, daily_paid_cap=200)
     cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
-    estado2 = State(store=almacen2, proxy=Proxy({}, almacen2, httpx.AsyncClient()),
+    store2 = Storage(db_path)
+    store2.create_schema()
+    estado2 = State(store=store2, proxy=Proxy({}, store2, httpx.AsyncClient()),
                      api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     assert cliente2.get("/health").json()["estado"] == "ok"
 
 
-# --- Round 4 de Task 13, hallazgo HIGH. El fix de la ronda 3 saco el 4xx del
-#     CONTADOR de cooldown, pero seguia escribiendose como evento fallido
-#     comun -- y eso alimenta confiabilidad, que _viva() usa para el piso de
+# --- Round 4 of Task 13, a HIGH finding. Round 3's fix took the 4xx out of the
+#     cooldown COUNTER, but it was still being written as an ordinary failed event
+#     -- and that feeds reliability, which _viva() uses for the floor of
 #     /health. Reproducido: 26 pedidos malformados SEGUIDOS de UNA llave
-#     (un cliente reintentando el mismo error, algo que los SDK de OpenAI
-#     hacen solos) bastan para tirar la confiabilidad de TODAS las rutas por
-#     el piso, con /health en "caido"/503 mientras una llave DISTINTA con un
-#     pedido VALIDO sigue recibiendo 200 todo el tiempo. Peor que el 503 de
-#     la ronda anterior: Coolify usa /health como health check y REINICIA el
-#     contenedor cuando falla -- pero `eventos` vive en el volumen
-#     persistente de /datos, asi que un proceso nuevo contra la MISMA base
-#     sigue viendo los mismos 26 fallos y sigue reportando "caido". Loop de
-#     reinicios que reiniciar no puede cortar, contra un servicio que
+#     (a client retrying the same error, something OpenAI's SDKs do on their own)
+#     are enough to sink EVERY route's reliability, with /health at "caido"/503
+#     while a DIFFERENT key with a
+#     VALID request keeps receiving 200s the whole time. Worse than the previous
+#     round's 503: Coolify uses /health as its health check and RESTARTS the
+#     container when it fails -- but `eventos` lives on the
+#     persistent /datos volume, so a fresh process against the SAME database keeps
+#     seeing the same 26 failures and keeps reporting "caido". A restart loop that
+#     restarting cannot break, against a service that
 #     responde bien. ---
 
-def test_health_sigue_ok_tras_30_400_seguidos(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
+def test_health_stays_ok_after_30_consecutive_400s(state_client):
+    state, client = state_client
+    now = time.time()
 
     async def _mandar_400_treinta_veces():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"})))
         for _ in range(30):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar_400_treinta_veces())
-    r = cliente.get("/health")
+    r = client.get("/health")
     assert r.status_code == 200
     assert r.json()["estado"] == "ok"
 
 
-def test_health_cae_con_30_500_seguidos_igual_que_antes(estado_cliente):
-    # Contraste directo: un fallo que SI es evidencia sobre la ruta sigue
-    # tirando /health, exactamente como antes de este fix.
-    estado, cliente = estado_cliente
-    ahora = time.time()
+def test_health_falls_with_30_consecutive_500s_as_before(state_client):
+    # A direct contrast: a failure that IS evidence about the route still brings
+    # /health down, exactly as before this fix.
+    state, client = state_client
+    now = time.time()
 
     async def _mandar_500_treinta_veces():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for _ in range(30):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar_500_treinta_veces())
-    r = cliente.get("/health")
+    r = client.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
 
 
-def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
-    # El caso del loop de reinicios: `eventos` vive en un archivo real (el
-    # volumen /datos), no en memoria de proceso. Un Almacen/Proxy/State
-    # SEGUNDO, contra la MISMA base, tiene que leer el mismo resultado que
-    # el primero -- si el fix dependiera de algun estado en memoria del
-    # proceso viejo, este test lo detectaria y el de arriba no.
-    ruta_db = str(tmp_path / "salud.sqlite3")
+def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path):
+    # The restart-loop case: `eventos` lives in a real file (the
+    # /datos volume), not in process memory. A fresh Storage/Proxy/State
+    # SECOND one, against the SAME database, has to read the same result as the
+    # first -- if the fix depended on some in-memory state of the old process,
+    # this test would catch it and the one above would not.
+    db_path = str(tmp_path / "salud.sqlite3")
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+        store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"}))))
-    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _mandar_400_treinta_veces():
-        rutas = almacen1.active_routes()
+        routes = store1.active_routes()
         for _ in range(30):
-            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, time.time())
+            await proxy1.complete(routes, {"model": "a:free", "messages": []}, time.time())
 
     asyncio.run(_mandar_400_treinta_veces())
     cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
-    # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base.
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
+    # "Container restart": a fresh process, a fresh Storage, the SAME database.
+    store2 = Storage(db_path)
+    store2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+        store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     r = cliente2.get("/health")
     assert r.status_code == 200
     assert r.json()["estado"] == "ok"
 
 
-def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
-    antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+def test_the_ranking_does_not_move_on_consecutive_400s_but_does_on_500s(state_client):
+    state, client = state_client
+    now = time.time()
+    antes = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
 
     async def _mandar(codigo, veces):
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"} if codigo < 500 else None)))
         for _ in range(veces):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar(400, 30))
-    despues_400 = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    despues_400 = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert despues_400["confiabilidad"] == antes["confiabilidad"]
     assert despues_400["puntaje"] == antes["puntaje"]
 
     asyncio.run(_mandar(500, 30))
-    despues_500 = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    despues_500 = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert despues_500["confiabilidad"] < antes["confiabilidad"]
     assert despues_500["puntaje"] < antes["puntaje"]
 
 
-# --- Round 5 de Task 13, hallazgo HIGH. La clasificacion de la ronda 4
-#     ("es reintentable?" decide) archivaba 401/402/403/404 del lado del
-#     cliente -- pero no son evidencia del PEDIDO, son evidencia de la
-#     RUTA: la clave vencio (401), la cuenta se quedo sin credito (402,
-#     "insufficient credits" de OpenRouter), la cuenta esta suspendida o
-#     hay moderacion del lado del proveedor (403), o el modelo ya no existe
-#     (404 -- literalmente el problema central que este proyecto existe
-#     para detectar). Medido: las 5 rutas devolviendo 401 dejaba al cliente
-#     con 503 en el 100% de los pedidos mientras /health seguia en "ok" --
-#     el apagon con luz verde que /health existe para prevenir, y sin
-#     ningun backstop para las rutas de pago (nunca sondeadas). Redibujado
-#     sobre ATRIBUCION (ver proxy._is_client_error /
-#     _CODIGOS_EVIDENCIA_DE_RUTA): estos cuatro ahora cuentan igual que un
+# --- Round 5 of Task 13, a HIGH finding. Round 4's classification
+#     ("is it retryable?" decides) filed 401/402/403/404 on the client's side --
+#     but they are not evidence about the REQUEST, they are evidence about the
+#     ROUTE: the key expired (401), the account ran out of credit (402,
+#     OpenRouter's "insufficient credits"), the account is suspended or there is
+#     moderation on the provider's side (403), or the model no longer exists (404
+#     -- literally the central problem this project exists to detect). Measured:
+#     all 5 routes returning 401 left the client with a 503 on 100% of requests
+#     while /health stayed "ok" -- the green-light blackout /health exists to
+#     prevent, and with no backstop for paid routes (never probed). Redrawn around
+#     ATTRIBUTION (see proxy._is_client_error / _REQUEST_EVIDENCE_CODES): these
+#     four now count the same as a
 #     500, en /health y en /v1/ranking. ---
 
 @pytest.mark.parametrize("codigo", [401, 402, 403, 404])
-def test_health_cae_con_30_seguidos_de_un_codigo_de_ruta(estado_cliente, codigo):
-    estado, cliente = estado_cliente
-    ahora = time.time()
+def test_health_falls_with_30_consecutive_route_evidence_codes(state_client, codigo):
+    state, client = state_client
+    now = time.time()
 
     async def _mandar_treinta_veces():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"})))
         for _ in range(30):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar_treinta_veces())
-    r = cliente.get("/health")
+    r = client.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
 
 
-def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path):
-    # La contracara del test de restart-loop de la ronda 4: un codigo que SI
-    # es evidencia de la ruta (401, clave vencida) tiene que seguir
-    # reportando "caido" incluso en un proceso NUEVO contra la MISMA base --
-    # este es el test que habria detectado el bug original (401 mal
-    # archivado como error del cliente dejaba a /health diciendo "ok" con
-    # las 5 rutas realmente caidas, incluso despues de un reinicio).
-    ruta_db = str(tmp_path / "salud_401.sqlite3")
+def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_path):
+    # The flip side of round 4's restart-loop test: a code that IS route evidence
+    # (401, an expired key) has to keep
+    # reporting "caido" even in a FRESH process against the SAME database --
+    # this is the test that would have caught the original bug (a 401 wrongly
+    # filed as a client error left /health saying "ok" with all 5 routes genuinely
+    # down, even after a restart).
+    db_path = str(tmp_path / "salud_401.sqlite3")
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+        store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"}))))
-    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _mandar_401_treinta_veces():
-        rutas = almacen1.active_routes()
+        routes = store1.active_routes()
         for _ in range(30):
-            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, time.time())
+            await proxy1.complete(routes, {"model": "a:free", "messages": []}, time.time())
         await proxy1.wait_for_pending_probes()
 
     asyncio.run(_mandar_401_treinta_veces())
-    # Round 9: la sospecha (30x401 reales) dispara UNA sonda bajo demanda
-    # -- pero /health ahora exige DOS fallidas consecutivas (ver
-    # Storage.tiene_evidencia_de_vida). Se agrega la confirmatoria
-    # directamente: el mecanismo que la PRIMERA sonda se dispara sola ya
-    # esta cubierto en test_proxy.py; este test es sobre PERSISTENCIA tras
-    # un reinicio, no sobre el rate-limit real de 60s entre sondas.
-    almacen1.record_probe("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
+    # Round 9: the suspicion (30 real 401s) fires ONE on-demand probe
+    # -- but /health now requires TWO consecutive failures (see
+    # Storage.has_liveness_evidence). The confirming one is added
+    # directly: the mechanism by which the FIRST probe fires on its own is
+    # already covered in test_proxy.py; this test is about PERSISTENCE after
+    # a restart, not about the real 60s rate limit between probes.
+    store1.record_probe("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
     cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
 
-    # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
-    # con un transport SANO en el segundo proceso, para probar que la caida
-    # viene de la TELEMETRIA ya persistida (eventos con is_client_error=0),
-    # no de ningun trafico que este segundo proceso vuelva a generar.
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
+    # "Container restart": a fresh process, a fresh Storage, the SAME database --
+    # with a HEALTHY transport in the second process, to prove the outage comes
+    # from the ALREADY PERSISTED telemetry (events with es_error_cliente=0), not
+    # from any traffic this second process generates again.
+    store2 = Storage(db_path)
+    store2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+        store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
     assert r2.json()["estado"] != "ok"
 
 
-# --- Round 8. El gate encontro dos vectores que round 7 no cerraba, los dos
-#     escotillas de su propio diseno: una cadena de UNA sola ruta (forzable
-#     por el cliente con `model` explicito o `x_min_contexto`, sin ningun
-#     conocimiento interno) y la rama `if emitido:` de completar_stream
-#     (sin chequeo de cadena). Round 8 saca el eje de "cuantas rutas hay":
-#     trafico real NUNCA excluye una ruta directo, solo acumula sospecha;
-#     cruzar el umbral programa una sonda PROPIA (payload fijo `PING`, el
-#     mismo que sondeo.py) que es la unica que decide. Verificado end-to-end
-#     via /health, no solo en proxy.py -- ver test_proxy.py/
-#     test_proxy_stream.py para la cobertura mas granular. ---
+# --- Round 8. The gate found two vectors round 7 did not close, both escape
+#     hatches of its own design: a chain of a SINGLE route (forceable by the
+#     client with an explicit `model` or `x_min_contexto`, with no
+#     internal knowledge) and complete_stream's `if emitido:` branch
+#     (with no chain check). Round 8 removes the "how many routes are there"
+#     axis: real traffic NEVER excludes a route directly, it only accumulates
+#     suspicion; crossing the threshold schedules OUR OWN probe (the fixed `PING`
+#     payload, the same one probing.py uses) and that probe alone decides. Verified
+#     end to end via /health, not only in proxy.py -- see
+#     test_proxy.py/test_proxy_stream.py for the finer-grained coverage. ---
 
-def _ping(cuerpo: bytes) -> bool:
-    mensajes = json.loads(cuerpo).get("messages") or []
+def _ping(body: bytes) -> bool:
+    mensajes = json.loads(body).get("messages") or []
     return bool(mensajes) and mensajes[0].get("content") == "ping"
 
 
-def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
-    # estado_cliente ya tiene una sola ruta gratis -- exactamente el vector
-    # 1 del gate (un `model` explicito, o x_min_contexto, narrows a esto).
-    estado, cliente = estado_cliente
-    ahora = time.time()
+def test_health_stays_ok_under_a_single_route_chain_attack(state_client):
+    # state_client already has a single free route -- exactly the gate's vector 1
+    # (an explicit `model`, or x_min_contexto, narrows down to this).
+    state, client = state_client
+    now = time.time()
 
     def handler(req):
         if _ping(req.content):
@@ -867,26 +864,26 @@ def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
         return httpx.Response(403, json={"error": "contenido flageado"})
 
     async def _quince_pedidos_identicos():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         for i in range(15):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []},
-                                         ahora + i)
-        await estado.proxy.wait_for_pending_probes()
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []},
+                                         now + i)
+        await state.proxy.wait_for_pending_probes()
 
     asyncio.run(_quince_pedidos_identicos())
-    assert cliente.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["estado"] == "ok"
 
 
-def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_cliente):
-    # El vector 2 del gate: la rama if emitido: (force-flush de
-    # PENDING_CAP) sin narrows de cadena -- "auto", sin extensiones.
-    estado, cliente = estado_cliente
-    ahora = time.time()
-    lineas = ['data: {"choices":[{"index":0,"delta":{"content":""},'
+def test_health_stays_ok_under_a_flood_of_contentless_streaming_chunks(state_client):
+    # The gate's vector 2: the `if emitido:` branch (PENDING_CAP's force-flush)
+    # with no chain narrowing -- "auto", no extensions.
+    state, client = state_client
+    now = time.time()
+    lines = ['data: {"choices":[{"index":0,"delta":{"content":""},'
              '"finish_reason":null}]}\n\n' for _ in range(PENDING_CAP + 6)]
-    lineas.append("data: [DONE]\n\n")
-    payload_sin_contenido = "".join(lineas).encode()
+    lines.append("data: [DONE]\n\n")
+    payload_sin_contenido = "".join(lines).encode()
 
     def handler(req):
         if _ping(req.content):
@@ -895,43 +892,43 @@ def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_c
         return httpx.Response(200, content=payload_sin_contenido)
 
     async def _quince_streams_identicos():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        cuerpo = {"model": "auto", "stream": True,
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        body = {"model": "auto", "stream": True,
                  "messages": [{"role": "user", "content": "piensa mucho"}]}
         for i in range(15):
-            [ln async for ln in estado.proxy.complete_stream(rutas, cuerpo, ahora + i)]
-        await estado.proxy.wait_for_pending_probes()
+            [ln async for ln in state.proxy.complete_stream(routes, body, now + i)]
+        await state.proxy.wait_for_pending_probes()
 
     asyncio.run(_quince_streams_identicos())
-    assert cliente.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["estado"] == "ok"
 
 
-def test_health_cae_rapido_con_una_ruta_rota_de_verdad_via_sonda_bajo_demanda(estado_cliente):
-    # Contraste: una ruta rota de verdad (le va mal tambien a la sonda) se
-    # enfria en SUSPICION_THRESHOLD pedidos + una sonda -- no en 5h.
-    estado, cliente = estado_cliente
-    ahora = time.time()
+def test_health_falls_quickly_for_a_genuinely_broken_route_via_an_on_demand_probe(state_client):
+    # The contrast: a genuinely broken route (the probe fails too) cools down
+    # within SUSPICION_THRESHOLD requests plus one probe -- not in 5h.
+    state, client = state_client
+    now = time.time()
 
     async def _umbral_pedidos():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for i in range(SUSPICION_THRESHOLD):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []},
-                                         ahora + i)
-        await estado.proxy.wait_for_pending_probes()
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []},
+                                         now + i)
+        await state.proxy.wait_for_pending_probes()
 
     asyncio.run(_umbral_pedidos())
-    assert estado.proxy.cooldowns  # la sonda confirmo y castigo
-    r = cliente.get("/health")
+    assert state.proxy.cooldowns  # la sonda confirmo y castigo
+    r = client.get("/health")
     assert r.status_code != 200
     assert r.json()["estado"] != "ok"
 
 
-def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tmp_path):
-    ruta_db = str(tmp_path / "salud_sospecha_ok.sqlite3")
-    ahora = time.time()
+def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(tmp_path):
+    db_path = str(tmp_path / "salud_sospecha_ok.sqlite3")
+    now = time.time()
 
     def handler(req):
         if _ping(req.content):
@@ -939,65 +936,65 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
                 {"message": {"role": "assistant", "content": "pong"}}]})
         return httpx.Response(403, json={"error": "contenido flageado"})
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+        store1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _quince_pedidos():
-        rutas = almacen1.active_routes()
+        routes = store1.active_routes()
         for i in range(15):
-            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, ahora + i)
+            await proxy1.complete(routes, {"model": "a:free", "messages": []}, now + i)
         await proxy1.wait_for_pending_probes()
 
     asyncio.run(_quince_pedidos())
     cliente1 = TestClient(create_app(estado1))
     assert cliente1.get("/health").json()["estado"] == "ok"
 
-    # "Reinicio del contenedor": proceso nuevo, Almacen nuevo, MISMA base --
-    # sin que el proxy1 original (con su sonda ya resuelta) intervenga.
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
+    # "Container restart": a fresh process, a fresh Storage, the SAME database --
+    # without the original proxy1 (with its already-resolved probe) intervening.
+    store2 = Storage(db_path)
+    store2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+        store2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     assert cliente2.get("/health").json()["estado"] == "ok"
 
 
-def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_path):
-    # La contracara: la SONDA BAJO DEMANDA (no la periodica) escribio la fila
-    # de `sondas` que declara la ruta muerta -- tiene que persistir igual.
-    ruta_db = str(tmp_path / "salud_sospecha_caida.sqlite3")
-    ahora = time.time()
+def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tmp_path):
+    # The flip side: the ON-DEMAND probe (not the periodic one) wrote the row
+    # in `sondas` that declares the route dead -- it has to persist all the same.
+    db_path = str(tmp_path / "salud_sospecha_caida.sqlite3")
+    now = time.time()
 
-    almacen1 = Storage(ruta_db)
-    almacen1.create_schema()
-    almacen1.upsert_routes(
+    store1 = Storage(db_path)
+    store1.create_schema()
+    store1.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
+        store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))   # rota para CUALQUIER payload, incluida la sonda
-    estado1 = State(store=almacen1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
+    estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
     async def _dos_rachas_de_umbral_pedidos():
-        rutas = almacen1.active_routes()
+        routes = store1.active_routes()
         for i in range(SUSPICION_THRESHOLD):
-            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, ahora + i)
+            await proxy1.complete(routes, {"model": "a:free", "messages": []}, now + i)
         await proxy1.wait_for_pending_probes()
-        # Segunda racha, mas alla del rate-limit de sondas bajo demanda:
-        # dispara una SEGUNDA sonda por el mecanismo real. Round 9 exige
-        # dos fallidas consecutivas (ver Storage.tiene_evidencia_de_vida)
-        # para que /health la trate como muerta -- una sola ya no alcanza.
-        ahora2 = ahora + ON_DEMAND_PROBE_LIMIT_S + SUSPICION_THRESHOLD + 10
+        # A second streak, beyond the on-demand probe rate limit: it fires a
+        # SECOND probe through the real mechanism. Round 9 requires two
+        # consecutive failures (see Storage.has_liveness_evidence) for /health to
+        # treat it as dead -- one alone is no longer enough.
+        ahora2 = now + ON_DEMAND_PROBE_LIMIT_S + SUSPICION_THRESHOLD + 10
         for i in range(SUSPICION_THRESHOLD):
-            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, ahora2 + i)
+            await proxy1.complete(routes, {"model": "a:free", "messages": []}, ahora2 + i)
         await proxy1.wait_for_pending_probes()
 
     asyncio.run(_dos_rachas_de_umbral_pedidos())
@@ -1006,119 +1003,119 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     assert r1.status_code != 200
     assert r1.json()["estado"] != "ok"
 
-    filas = almacen1._con.execute(
+    rows = store1._con.execute(
         "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchall()
-    assert len(filas) == 2
-    assert all(f == ("salud", 0) for f in filas)
+    assert len(rows) == 2
+    assert all(f == ("salud", 0) for f in rows)
 
-    # Segundo proceso, con un transport SANO -- para probar que "caido"
-    # viene de la sonda YA persistida, no de trafico nuevo que este proceso
+    # A second process, with a HEALTHY transport -- to prove that "caido" comes
+    # from the ALREADY PERSISTED probe, not from new traffic this process
     # genere.
-    almacen2 = Storage(ruta_db)
-    almacen2.create_schema()
+    store2 = Storage(db_path)
+    store2.create_schema()
     proxy2 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
-        almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
+        store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
-    estado2 = State(store=almacen2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
+    estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
     assert r2.json()["estado"] != "ok"
 
 
-def test_ranking_cae_con_401_seguidos_igual_que_con_500(estado_cliente):
-    estado, cliente = estado_cliente
-    ahora = time.time()
-    antes = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+def test_the_ranking_falls_on_consecutive_401s_just_as_on_500s(state_client):
+    state, client = state_client
+    now = time.time()
+    antes = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
 
     async def _mandar_401_treinta_veces():
-        rutas = estado.store.active_routes()
-        estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
+        routes = state.store.active_routes()
+        state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"})))
         for _ in range(30):
-            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
+            await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar_401_treinta_veces())
-    despues = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    despues = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert despues["confiabilidad"] < antes["confiabilidad"]
     assert despues["puntaje"] < antes["puntaje"]
 
 
-def test_ranking_desglosa_los_componentes(cliente):
-    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+def test_the_ranking_breaks_down_the_components(client):
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     for campo in ("clave", "puntaje", "calidad", "confiabilidad", "ttft_p50_ms", "tier",
                  "prioridad"):
-        assert campo in fila
+        assert campo in row
 
 
-# --- Hallazgo 3 de la revision de Task 13: /v1/ranking ordenaba SOLO por
-#     puntaje y no traia `prioridad`, asi que podia mostrar kilo/k:free
+# --- Finding 3 of the Task 13 review: /v1/ranking ordered ONLY by score and did
+#     not carry `prioridad`, so it could show kilo/k:free
 #     arriba de todo mientras X-Ruta-Usada decia chatgpt/gpt-5-0 -- el
-#     endpoint que el README describe como el lugar para auditar POR QUE el
-#     router eligio lo que eligio dejaba de explicarlo. Ahora ordena con la
-#     MISMA clave que router.order_routes (via router.sort_key). ---
+#     endpoint the README describes as the place to audit WHY the router chose
+#     what it chose stopped explaining it. It now orders with the SAME key as
+#     router.order_routes (via router.sort_key). ---
 
-def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
-    estado, cliente = estado_cliente
-    estado.store.upsert_routes([
+def test_the_ranking_orders_by_priority_not_only_by_score(state_client):
+    state, client = state_client
+    state.store.upsert_routes([
         Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
              priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: prioridad maxima (0) pero puntaje MALO.
-    estado.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
-    estado.store.record_event("chatgpt/gpt-5:free", False, 0, 500, 20.0)
-    # kilo/a:free (prioridad 100, el default de la fixture): puntaje MEJOR.
-    estado.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
-    estado.store.record_event("kilo/a:free", True, 50, 200, 20.0)
+    state.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
+    state.store.record_event("chatgpt/gpt-5:free", False, 0, 500, 20.0)
+    # kilo/a:free (priority 100, the fixture's default): a BETTER score.
+    state.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    state.store.record_event("kilo/a:free", True, 50, 200, 20.0)
 
-    filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
-    claves = [f["clave"] for f in filas]
-    puntajes = {f["clave"]: f["puntaje"] for f in filas}
-    # Confirma que de verdad puntua peor -- si no, el test no prueba nada.
+    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
+    claves = [f["clave"] for f in rows]
+    puntajes = {f["clave"]: f["puntaje"] for f in rows}
+    # Confirms it genuinely scores worse -- otherwise the test proves nothing.
     assert puntajes["chatgpt/gpt-5:free"] < puntajes["kilo/a:free"]
-    # Y aun asi va primero: la prioridad manda, como en el router de verdad.
+    # And it still goes first: priority rules, as in the real router.
     assert claves[0] == "chatgpt/gpt-5:free"
-    assert {f["clave"]: f["prioridad"] for f in filas} == {
+    assert {f["clave"]: f["prioridad"] for f in rows} == {
         "chatgpt/gpt-5:free": 0, "kilo/a:free": 100}
 
 
-def test_ranking_manda_al_final_una_ruta_en_cooldown_aunque_puntue_mejor(estado_cliente):
-    # Re-revision: /v1/ranking seguia sin modelar el cooldown, asi que una
-    # ruta castigada -- que el router JAMAS elegiria ahora mismo -- podia
-    # encabezar la tabla igual. en_cooldown_hasta ya estaba en la fila (se
-    # puede diagnosticar), pero el ORDEN tiene que coincidir con el del
-    # router: una ruta en cooldown va al final, sin importar prioridad ni
+def test_the_ranking_sends_a_route_in_cooldown_last_even_if_it_scores_better(state_client):
+    # Re-review: /v1/ranking still did not model the cooldown, so a punished
+    # route -- one the router would NEVER pick right now -- could
+    # head the table anyway. en_cooldown_hasta was already in the row (it
+    # can diagnose), but the ORDER has to match the router's: a route in cooldown
+    # goes last, regardless of priority or
     # puntaje.
-    estado, cliente = estado_cliente
-    estado.store.upsert_routes([
+    state, client = state_client
+    state.store.upsert_routes([
         Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
              priority=0),
     ], 2.0, deactivate_missing=False)
-    # chatgpt: la mejor prioridad Y el mejor puntaje -- pero esta castigada.
-    estado.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
-    estado.store.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
-    estado.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
+    # chatgpt: the best priority AND the best score -- but it is punished.
+    state.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    state.store.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
+    state.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
 
-    filas = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
-    claves = [f["clave"] for f in filas]
+    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
+    claves = [f["clave"] for f in rows]
     assert claves[-1] == "chatgpt/gpt-5:free"
     assert claves[0] == "kilo/a:free"
 
 
-# --- Fix round 1, hallazgo 2 (Critical): el tope de pago diario tambien debe
-#     atar en la rama de streaming, no solo en la sincronica. ---
+# --- Fix round 1, finding 2 (Critical): the daily paid cap also has to
+#     bind on the streaming branch, not only on the synchronous one. ---
 
-def _estado_libre_y_pago(daily_paid_cap, hacer_resp_free, hacer_resp_paid):
-    """Dos rutas -- una gratis, una de pago. `hacer_resp_free`/`hacer_resp_paid`
+def _free_and_paid_state(daily_paid_cap, make_free_response, make_paid_response):
+    """Two routes -- one free, one paid. `make_free_response`/`make_paid_response`
     son callables SIN argumentos que fabrican una `httpx.Response` NUEVA en
-    cada llamada (no un objeto compartido): las respuestas viajan por
-    `.stream()`, cuyo estado interno solo se puede consumir una vez, y este
-    helper puede invocarse mas de una vez por ruta dentro de un mismo test."""
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes([
+    each call (not a shared object): the responses travel via `.stream()`, whose
+    internal state can only be consumed once, and this
+    helper may be invoked more than once per route within a single test."""
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes([
         Route("free_prov", "f:free", "gratis", Capabilities(True, False, 100000, 4096)),
         Route("paid_prov", "p:paid", "pago", Capabilities(True, False, 100000, 4096)),
     ], 1.0)
@@ -1128,64 +1125,64 @@ def _estado_libre_y_pago(daily_paid_cap, hacer_resp_free, hacer_resp_paid):
     }
 
     def responder(req):
-        return hacer_resp_free() if "f.test" in str(req.url) else hacer_resp_paid()
+        return make_free_response() if "f.test" in str(req.url) else make_paid_response()
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(responder))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=daily_paid_cap)
-    return estado, TestClient(create_app(estado))
+    return state, TestClient(create_app(state))
 
 
-def test_streaming_pago_cuenta_uso_y_el_tope_ata():
-    # (a) con un tope minusculo, una peticion en streaming SI servida por la
-    # ruta de pago cuenta uso -- y una segunda, con el tope ya agotado, deja
-    # de ofrecer la ruta de pago (el unico proveedor que responde bien es el
-    # pago; con tope agotado la cadena queda vacia de candidatas viables y el
-    # stream cae a "sin rutas disponibles" sin volver a pagar).
-    estado, cliente = _estado_libre_y_pago(
+def test_paid_streaming_counts_usage_and_the_cap_binds():
+    # (a) with a tiny cap, a streaming request that IS served by the paid route
+    # counts usage -- and a second one, with the cap already exhausted, stops
+    # offering the paid route (the only provider answering correctly is the paid
+    # one; with the cap exhausted the chain is left with no viable candidates and
+    # the stream falls to "sin rutas disponibles" without paying again).
+    state, client = _free_and_paid_state(
         daily_paid_cap=1,
-        hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
-        hacer_resp_paid=lambda: httpx.Response(200, content=_sse("de", " pago")))
-    dia = _hoy()
-    assert estado.store.paid_usage("buena", dia) == 0
+        make_free_response=lambda: httpx.Response(500, json={"error": "free caida"}),
+        make_paid_response=lambda: httpx.Response(200, content=_sse("de", " pago")))
+    dia = _today()
+    assert state.store.paid_usage("buena", dia) == 0
 
-    r1 = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r1 = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                       json={"model": "auto", "messages": [], "stream": True})
     assert r1.status_code == 200
     assert "de" in r1.text and "pago" in r1.text
-    assert estado.store.paid_usage("buena", dia) == 1  # (a) conto exactamente 1
+    assert state.store.paid_usage("buena", dia) == 1  # (a) conto exactamente 1
 
-    r2 = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r2 = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                       json={"model": "auto", "messages": [], "stream": True})
-    assert estado.store.paid_usage("buena", dia) == 1  # el tope realmente ato
-    assert "error" in r2.text  # ninguna ruta viable: free sigue caida, pago se excluyo
+    assert state.store.paid_usage("buena", dia) == 1  # el tope realmente ato
+    assert "error" in r2.text  # ninguna route viable: free sigue caida, pago se excluyo
 
 
-# --- Round 9, HIGH 4 del gate: round 8 solo contaba uso de pago en el
-#     EXITO (`r.route`/`on_route_committed`) -- pero un 200 con contenido
-#     vacio (un modelo de razonamiento que se gasta el presupuesto) el
-#     proveedor lo COBRA igual, aunque el gateway lo trate como fallido y
-#     siga la cadena. Medido: 40/40 llamadas facturables con
-#     `pago_hoy: 0`, TOPE_PAGO_DIARIO nunca actuando. Ahora se cuenta todo
-#     intento con status 200 contra una ruta de pago, sirva o no. ---
+# --- Round 9, HIGH 4 from the gate: round 8 counted paid usage only on SUCCESS
+#     (`r.route`/`on_route_committed`) -- but a 200 with empty content (a reasoning
+#     model that burns its budget) is BILLED by the provider anyway, even though
+#     the gateway treats it as failed and continues the chain. Measured: 40/40
+#     billable calls with
+#     `pago_hoy: 0`, TOPE_PAGO_DIARIO never acting. Now every
+#     attempt with status 200 against a paid route, whether it serves or not. ---
 
-def test_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
+def test_paid_streaming_bills_an_empty_200_even_though_it_serves_nothing():
     vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
-    estado, cliente = _estado_libre_y_pago(
+    state, client = _free_and_paid_state(
         daily_paid_cap=5,
-        hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
-        hacer_resp_paid=lambda: httpx.Response(200, content=vacio))
-    dia = _hoy()
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+        make_free_response=lambda: httpx.Response(500, json={"error": "free caida"}),
+        make_paid_response=lambda: httpx.Response(200, content=vacio))
+    dia = _today()
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
-    assert estado.store.paid_usage("buena", dia) == 1  # facturable, aunque no sirvio
+    assert state.store.paid_usage("buena", dia) == 1  # facturable, aunque no sirvio
 
 
-def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes([
+def test_paid_non_streaming_bills_an_empty_200_even_though_it_serves_nothing():
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes([
         Route("free_prov", "f:free", "gratis", Capabilities(True, False, 100000, 4096)),
         Route("paid_prov", "p:paid", "pago", Capabilities(True, False, 100000, 4096)),
     ], 1.0)
@@ -1201,298 +1198,299 @@ def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
         return httpx.Response(200, json=vacio)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(responder))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=5)
-    cliente = TestClient(create_app(estado))
-    dia = _hoy()
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    client = TestClient(create_app(state))
+    dia = _today()
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
-    assert r.status_code == 503  # nada sirvio de verdad al cliente
-    assert estado.store.paid_usage("buena", dia) == 1  # pero SI se factura
+    assert r.status_code == 503  # nada sirvio de verdad al client
+    assert state.store.paid_usage("buena", dia) == 1  # pero SI se factura
 
 
-def test_streaming_servido_por_gratis_no_cuenta_uso_de_pago():
-    # (b) si la ganadora es la ruta GRATIS, no debe contarse como uso de pago
-    # aunque haya una ruta de pago disponible en la cadena.
-    estado, cliente = _estado_libre_y_pago(
+def test_streaming_served_by_a_free_route_counts_no_paid_usage():
+    # (b) if the winner is the FREE route, it must not be counted as paid usage
+    # even though a paid route is available in the chain.
+    state, client = _free_and_paid_state(
         daily_paid_cap=5,
-        hacer_resp_free=lambda: httpx.Response(200, content=_sse("gra", "tis")),
-        hacer_resp_paid=lambda: httpx.Response(200, content=_sse("de", " pago")))
-    dia = _hoy()
+        make_free_response=lambda: httpx.Response(200, content=_sse("gra", "tis")),
+        make_paid_response=lambda: httpx.Response(200, content=_sse("de", " pago")))
+    dia = _today()
 
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
     assert "gra" in r.text and "tis" in r.text
-    assert estado.store.paid_usage("buena", dia) == 0
+    assert state.store.paid_usage("buena", dia) == 0
 
 
-def test_streaming_sin_ninguna_ruta_viva_no_cuenta_uso_de_pago():
-    # (c) si TODAS las rutas fallan, tampoco debe contarse uso de pago.
-    estado, cliente = _estado_libre_y_pago(
+def test_streaming_with_no_live_route_counts_no_paid_usage():
+    # (c) if EVERY route fails, no paid usage must be counted either.
+    state, client = _free_and_paid_state(
         daily_paid_cap=5,
-        hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
-        hacer_resp_paid=lambda: httpx.Response(500, json={"error": "pago caido"}))
-    dia = _hoy()
+        make_free_response=lambda: httpx.Response(500, json={"error": "free caida"}),
+        make_paid_response=lambda: httpx.Response(500, json={"error": "pago caido"}))
+    dia = _today()
 
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
-    assert r.status_code == 200  # los headers ya salieron; el error va en el cuerpo SSE
+    assert r.status_code == 200  # los headers ya salieron; el error va en el body SSE
     assert "error" in r.text
-    assert estado.store.paid_usage("buena", dia) == 0
+    assert state.store.paid_usage("buena", dia) == 0
 
 
-def test_streaming_pago_cuenta_una_sola_vez_no_por_chunk():
-    # (d) un stream de pago con VARIOS chunks debe incrementar uso_pago
-    # exactamente 1, no una vez por chunk.
-    estado, cliente = _estado_libre_y_pago(
+def test_paid_streaming_counts_once_not_per_chunk():
+    # (d) a paid stream with SEVERAL chunks must increment uso_pago by exactly 1,
+    # not once per chunk.
+    state, client = _free_and_paid_state(
         daily_paid_cap=5,
-        hacer_resp_free=lambda: httpx.Response(500, json={"error": "free caida"}),
-        hacer_resp_paid=lambda: httpx.Response(
+        make_free_response=lambda: httpx.Response(500, json={"error": "free caida"}),
+        make_paid_response=lambda: httpx.Response(
             200, content=_sse("u", "n", "o", "dos", "tres", "cuatro")))
-    dia = _hoy()
+    dia = _today()
 
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 200
-    assert estado.store.paid_usage("buena", dia) == 1
+    assert state.store.paid_usage("buena", dia) == 1
 
 
-# --- Fix round 2 (final), cambio 1: `require_api_key` acepta la llave tambien
-#     por `Authorization: Bearer <llave>`, no solo por `X-API-Key`. Es lo que
-#     permite que `OpenAI(base_url=..., api_key="<llave>")` autentique sin
-#     configuracion extra -- la promesa central del contrato ("cambia solo
-#     base_url"), que antes de este cambio era falsa: el SDK manda la llave
-#     via `Authorization`, y el gateway solo leia `X-API-Key`. `X-API-Key`
-#     sigue existiendo (la usa `arkiv-api`, el gateway hermano) y sigue
+# --- Fix round 2 (final), change 1: `require_api_key` also accepts the key
+#     via `Authorization: Bearer <key>`, not only via `X-API-Key`. It is what lets
+#     `OpenAI(base_url=..., api_key="<key>")` authenticate with no extra
+#     configuration -- the contract's central promise ("change only base_url"),
+#     which before this change was false: the SDK sends the key via
+#     `Authorization`, and the gateway only read `X-API-Key`. `X-API-Key`
+#     still exists (`arkiv-api`, the sibling gateway, uses it) and still
 #     ganando si ambas cabeceras llegan juntas.
 
-def test_autoriza_con_bearer_sin_x_api_key(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"Authorization": "Bearer buena"},
+def test_it_authorises_with_bearer_and_no_x_api_key(client):
+    r = client.post("/v1/chat/completions", headers={"Authorization": "Bearer buena"},
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "hola"
 
 
-def test_bearer_con_llave_mala_sigue_dando_401(cliente):
-    r = cliente.post("/v1/chat/completions", headers={"Authorization": "Bearer mala"},
+def test_a_bearer_with_a_bad_key_still_returns_401(client):
+    r = client.post("/v1/chat/completions", headers={"Authorization": "Bearer mala"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 401
 
 
-def test_x_api_key_sola_sigue_funcionando_igual_que_antes(cliente):
-    r = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
+def test_x_api_key_alone_still_works_as_before(client):
+    r = client.get("/v1/models", headers={"X-API-Key": "buena"})
     assert r.status_code == 200
 
 
-def test_si_llegan_las_dos_y_no_coinciden_gana_x_api_key(cliente):
-    # X-API-Key trae la buena; Authorization trae una llave que ni siquiera
+def test_when_both_arrive_and_disagree_x_api_key_wins(client):
+    # X-API-Key carries the good one; Authorization carries a key that is not even
     # existe. Si Authorization ganara, esto seria 401 -- confirma la
     # precedencia declarada.
-    r = cliente.get("/v1/models", headers={
+    r = client.get("/v1/models", headers={
         "X-API-Key": "buena", "Authorization": "Bearer ni-existe"})
     assert r.status_code == 200
 
 
-def test_authorization_malformado_no_revienta_y_da_401(cliente):
-    # Ninguna de estas formas rotas debe tirar una excepcion sin atrapar: se
-    # tratan igual que "no se mando ninguna llave".
+def test_a_malformed_authorization_does_not_blow_up_and_returns_401(client):
+    # None of these broken shapes may raise an uncaught exception: they are
+    # treated the same as "no key was sent at all".
     for cabecera in ("buena", "Bearer", "Bearer   ", "Basic buena", "buena sin bearer"):
-        r = cliente.get("/v1/models", headers={"Authorization": cabecera})
+        r = client.get("/v1/models", headers={"Authorization": cabecera})
         assert r.status_code == 401, cabecera
 
 
-def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes(
+def test_the_per_minute_limit_counts_the_same_whichever_header_is_used():
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200,
                     rate_limiter=PerKeyRateLimiter(2))
-    cliente = TestClient(create_app(estado))
+    client = TestClient(create_app(state))
 
-    r1 = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
-    r2 = cliente.get("/v1/models", headers={"Authorization": "Bearer buena"})
-    r3 = cliente.get("/v1/models", headers={"X-API-Key": "buena"})
+    r1 = client.get("/v1/models", headers={"X-API-Key": "buena"})
+    r2 = client.get("/v1/models", headers={"Authorization": "Bearer buena"})
+    r3 = client.get("/v1/models", headers={"X-API-Key": "buena"})
     assert r1.status_code == 200 and r2.status_code == 200
-    # El limite (2/min) ya se agoto entre las dos peticiones anteriores, sin
-    # importar que cada una uso una cabecera distinta: es la misma llave
-    # resuelta, asi que cuenta contra el mismo contador.
+    # The limit (2/min) was already exhausted between the two previous requests,
+    # regardless of each having used a different header: it is the same resolved
+    # key, so it counts against the same counter.
     assert r3.status_code == 429
 
 
-# --- Fix round 3, I3: /v1/ranking tiene que traer la fecha de la ultima sonda
-#     (§6 del diseno) y distinguir "calidad medida 0.6" de "nunca medida" --
-#     que es exactamente el dato que hacia falta para diagnosticar B2. ---
+# --- Fix round 3, I3: /v1/ranking has to carry the date of the last probe
+#     (design section 6) and tell "measured quality of 0.6" from "never measured"
+#     -- exactly the datum that was missing to diagnose B2. ---
 
-def test_ranking_marca_como_no_medida_una_ruta_sin_sonda_de_calidad(cliente):
-    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert fila["calidad_medida"] is False
-    assert fila["calidad"] is None            # no se muestra el neutro como medicion
-    assert fila["calidad_asumida"] == 0.6     # pero se dice cual se uso para puntuar
-    assert fila["ultima_sonda_calidad"] is None
-    assert fila["ultima_sonda"] is None
+def test_the_ranking_marks_a_route_without_a_quality_probe_as_unmeasured(client):
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert row["calidad_medida"] is False
+    assert row["calidad"] is None            # no se muestra el neutro como medicion
+    assert row["calidad_asumida"] == 0.6     # pero se dice cual se uso para puntuar
+    assert row["ultima_sonda_calidad"] is None
+    assert row["ultima_sonda"] is None
 
 
-def test_ranking_trae_la_fecha_de_la_ultima_sonda(estado_cliente):
-    estado, cliente = estado_cliente
+def test_the_ranking_carries_the_date_of_the_last_probe(state_client):
+    state, client = state_client
     # 2026-08-17T12:00:00Z y 2026-08-17T18:00:00Z
-    estado.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
+    state.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
                                    1786968000.0)
-    estado.store.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
+    state.store.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
                                    1786989600.0)
-    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert fila["calidad_medida"] is True
-    assert fila["calidad"] == 0.6             # 3/5, esta vez SI medido
-    assert fila["calidad_asumida"] is None
-    assert fila["ultima_sonda_calidad"] == "2026-08-17T12:00:00Z"
-    assert fila["ultima_sonda"] == "2026-08-17T18:00:00Z"
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert row["calidad_medida"] is True
+    assert row["calidad"] == 0.6             # 3/5, esta vez SI medido
+    assert row["calidad_asumida"] is None
+    assert row["ultima_sonda_calidad"] == "2026-08-17T12:00:00Z"
+    assert row["ultima_sonda"] == "2026-08-17T18:00:00Z"
 
 
-def test_una_ruta_en_cooldown_no_pierde_su_marca_de_calidad_medida(estado_cliente):
-    # `_metricas` reconstruia Metricas posicionalmente para inyectar el
-    # cooldown, y asi perdia los campos nuevos: una ruta castigada aparecia
-    # como "nunca medida" y el router la mandaba al fondo por partida doble.
-    estado, cliente = estado_cliente
-    estado.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
+def test_a_route_in_cooldown_does_not_lose_its_measured_quality_mark(state_client):
+    # `_metrics` rebuilt Metrics positionally to inject the cooldown, and so lost
+    # the newer fields: a punished route showed up as "never measured" and the
+    # router sent it to the bottom twice over.
+    state, client = state_client
+    state.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
                                    1786968000.0)
-    estado.proxy.cooldowns["kilo/a:free"] = time.time() + 600
-    fila = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert fila["calidad_medida"] is True
-    assert fila["en_cooldown_hasta"] > time.time()
+    state.proxy.cooldowns["kilo/a:free"] = time.time() + 600
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    assert row["calidad_medida"] is True
+    assert row["en_cooldown_hasta"] > time.time()
 
 
-# --- Fix round 3, B3 (Blocking): el 503 del §9 se entregaba como 400 en toda
-#     caida. `ordenar` filtra los cooldowns, la lista llega vacia y la api
-#     gritaba "ninguna ruta cumple lo pedido" -- un 400, que todo SDK y toda
-#     capa de alertas leen como "tu peticion esta mal formada": no reintentan
-#     y no despiertan a nadie. Que los tiers gratis rate-limiteen a la vez es
-#     el fallo ESPERADO, no uno raro. ---
+# --- Fix round 3, B3 (Blocking): section 9's 503 was delivered as a 400 on every
+#     outage. `order_routes` filters out the cooldowns, the list arrives empty and
+#     the api shouted "ninguna ruta cumple lo pedido" -- a 400, which every SDK and
+#     every alerting layer reads as "your request is malformed": they do not retry
+#     and they wake nobody. The free tiers rate-limiting at once is
+#     the EXPECTED failure, not an exotic one. ---
 
-def test_todas_las_candidatas_en_cooldown_da_503_no_400(estado_cliente):
-    estado, cliente = estado_cliente
+def test_every_candidate_in_cooldown_returns_503_not_400(state_client):
+    state, client = state_client
     hasta = time.time() + 600
-    estado.proxy.cooldowns["kilo/a:free"] = hasta
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    state.proxy.cooldowns["kilo/a:free"] = hasta
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 503
     assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(hasta)
 
 
-def test_todas_las_candidatas_en_cooldown_da_503_tambien_en_streaming(estado_cliente):
-    estado, cliente = estado_cliente
-    estado.proxy.cooldowns["kilo/a:free"] = time.time() + 600
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_every_candidate_in_cooldown_returns_503_when_streaming_too(state_client):
+    state, client = state_client
+    state.proxy.cooldowns["kilo/a:free"] = time.time() + 600
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "stream": True})
     assert r.status_code == 503
 
 
-def test_capacidades_que_nadie_cumple_sigue_siendo_400(estado_cliente):
-    # El otro lado de la moneda: esto SI es culpa del cliente y tiene que
-    # seguir siendo 400, con lo que pidio y cuantas rutas hay.
-    estado, cliente = estado_cliente
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_capabilities_nobody_satisfies_is_still_a_400(state_client):
+    # The other side of the coin: this IS the client's fault and has to stay a
+    # 400, with what it asked for and how many routes exist.
+    state, client = state_client
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "x_min_contexto": 99999999})
     assert r.status_code == 400
     assert r.json()["detail"]["rutas_activas"] == 1
 
 
-def test_el_tope_de_pago_diario_da_503_no_400():
-    # §9: "Llave supero su tope de pago diario -> 503, nunca un cobro
-    # silencioso". Con la gratis en cooldown y el tope agotado, la cadena queda
-    # vacia -- pero la ruta de pago EXISTE y podria servir: es indisponibilidad,
-    # no una peticion mal formada.
-    estado, cliente = _estado_libre_y_pago(
+def test_the_daily_paid_cap_returns_503_not_400():
+    # Section 9: "a key exceeded its daily paid cap -> 503, never a silent
+    # charge". With the free route in cooldown and the cap exhausted, the chain is
+    # empty -- but the paid route EXISTS and could serve: this is unavailability,
+    # not a malformed request.
+    state, client = _free_and_paid_state(
         daily_paid_cap=1,
-        hacer_resp_free=lambda: httpx.Response(200, json={"choices": [
+        make_free_response=lambda: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": "hola"}}]}),
-        hacer_resp_paid=lambda: httpx.Response(200, json={"choices": [
+        make_paid_response=lambda: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": "pago"}}]}))
-    estado.store.add_paid_usage("buena", _hoy())          # tope agotado
-    estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
+    state.store.add_paid_usage("buena", _today())          # tope agotado
+    state.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
 
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 503
     assert r.json()["detail"]["tope_pago_alcanzado"] is True
 
 
-def test_el_503_por_indisponibilidad_no_reporta_liberacion_si_no_hay_cooldown():
-    # Solo hay ruta de pago, el cliente la prohibio: no hay nada que esperar,
-    # asi que proxima_liberacion es null en vez de un numero inventado.
-    estado, cliente = _estado_libre_y_pago(
+def test_the_unavailability_503_reports_no_release_when_there_is_no_cooldown():
+    # There is only a paid route and the client forbade it: there is nothing to
+    # wait for, so proxima_liberacion is null instead of an invented number.
+    state, client = _free_and_paid_state(
         daily_paid_cap=9,
-        hacer_resp_free=lambda: httpx.Response(500),
-        hacer_resp_paid=lambda: httpx.Response(500))
-    estado.store.upsert_routes([], 1.0, deactivate_missing=False)
-    estado.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+        make_free_response=lambda: httpx.Response(500),
+        make_paid_response=lambda: httpx.Response(500))
+    state.store.upsert_routes([], 1.0, deactivate_missing=False)
+    state.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [], "x_permitir_pago": False})
     assert r.status_code == 503
     assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(
-        estado.proxy.cooldowns["free_prov/f:free"])
+        state.proxy.cooldowns["free_prov/f:free"])
 
 
-# --- Fix round 3, I2: el §6.1 promete devolver el razonamiento recortado en un
-#     campo aparte, `x_razonamiento`. Se recortaba de `content` y se tiraba: un
-#     cliente con el default `x_crudo: false` no tenia forma de recuperarlo. ---
+# --- Fix round 3, I2: section 6.1 promises to return the trimmed reasoning in a
+#     separate field, `x_razonamiento`. It was trimmed out of `content` and thrown
+#     away: a
+#     client with the default `x_crudo: false` had no way to recover it. ---
 
-def _cliente_que_piensa(contenido):
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    almacen.upsert_routes(
+def _client_that_thinks(contenido):
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes(
         [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "",
                               "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={"choices": [
             {"message": {"role": "assistant", "content": contenido}}]})))
-    estado = State(store=almacen, proxy=Proxy(prov, almacen, http),
+    state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200)
-    return TestClient(create_app(estado))
+    return TestClient(create_app(state))
 
 
-def test_devuelve_el_razonamiento_recortado_en_x_razonamiento():
-    cliente = _cliente_que_piensa("<think>2+2 son 4</think>La respuesta es 4.")
-    r = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_it_returns_the_trimmed_reasoning_in_x_razonamiento():
+    client = _client_that_thinks("<think>2+2 son 4</think>La response es 4.")
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 200
-    assert r.json()["choices"][0]["message"]["content"] == "La respuesta es 4."
+    assert r.json()["choices"][0]["message"]["content"] == "La response es 4."
     assert r.json()["x_razonamiento"] == "2+2 son 4"
 
 
-def test_sin_razonamiento_no_agrega_el_campo():
-    cliente = _cliente_que_piensa("La respuesta es 4.")
-    assert "x_razonamiento" not in cliente.post(
+def test_without_reasoning_it_does_not_add_the_field():
+    client = _client_that_thinks("La response es 4.")
+    assert "x_razonamiento" not in client.post(
         "/v1/chat/completions", headers={"X-API-Key": "buena"},
         json={"model": "auto", "messages": []}).json()
 
 
-def test_en_modo_crudo_no_hay_x_razonamiento_porque_sigue_en_el_content():
-    cliente = _cliente_que_piensa("<think>mmm</think>hola")
-    cuerpo = cliente.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+def test_in_raw_mode_there_is_no_x_razonamiento_because_it_stays_in_the_content():
+    client = _client_that_thinks("<think>mmm</think>hola")
+    body = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                           json={"model": "auto", "messages": [], "x_crudo": True}).json()
-    assert cuerpo["choices"][0]["message"]["content"] == "<think>mmm</think>hola"
-    assert "x_razonamiento" not in cuerpo
+    assert body["choices"][0]["message"]["content"] == "<think>mmm</think>hola"
+    assert "x_razonamiento" not in body
 
 
-# --- Fix round 3, ALSO: el acoplamiento entre el neutro de confiabilidad y el
-#     piso de /health era cargante y vivia en dos archivos distintos, sin nada
-#     que lo probara. Si alguna vez se invertia, una instalacion NUEVA -- sin
-#     un solo evento todavia -- reportaba "caido" y Coolify nunca marcaba el
-#     contenedor como sano: el servicio no arrancaba nunca, por una constante.
+# --- Fix round 3, ALSO: the coupling between the neutral reliability value and
+#     /health's floor was load-bearing and lived in two different files, with
+#     nothing testing it. If it ever inverted, a FRESH install -- with not one
+#     event yet -- reported "caido" and Coolify never marked the container
+#     healthy: the service never started, because of a constant.
 #
-#     Round 6, Parte 2: el mecanismo que este test protegia (comparar
+#     Round 6, Part 2: the mechanism this test protected (comparing
 #     `NEUTRAL_RELIABILITY` contra `UMBRAL_CONFIABILIDAD_SALUD`) desaparecio
-#     junto con `/health` basado en promedio -- `UMBRAL_CONFIABILIDAD_SALUD`
-#     ya no existe. El contrato que protegia ("una ruta sin telemetria cuenta
-#     como viva") sigue vivo, ahora en `Storage.tiene_evidencia_de_vida` (ver
+#     along with the average-based `/health` -- `UMBRAL_CONFIABILIDAD_SALUD` no
+#     longer exists. The contract it protected ("a route with no telemetry counts
+#     as alive") is still in force, now in `Storage.has_liveness_evidence` (see
 #     test_tiene_evidencia_de_vida_sin_ninguna_telemetria en test_almacen.py)
-#     y verificado end-to-end en test_health_ok_si_la_gratis_no_tiene_telemetria_aun
-#     y test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria mas
+#     y verificado end-to-end en test_health_is_ok_when_the_free_route_has_no_telemetry_yet
+#     and test_health_after_a_process_restart_stays_ok_with_no_telemetry
 #     arriba. ---
