@@ -48,6 +48,41 @@ def _leer_campo(campo: str, valor_bruto, mensaje: str, calcular):
             "message": mensaje, "campo": campo, "valor_recibido": valor_bruto})
 
 
+def _hay_imagen(cuerpo: dict) -> bool:
+    """True si algun mensaje trae una imagen.
+
+    En el formato OpenAI, `content` es un string (solo texto) o una LISTA de
+    partes, y una imagen es una parte con `type: "image_url"` (formato
+    clasico) o `"input_image"` (el de la Responses API, que varios clientes
+    ya mandan). Se aceptan los dos: el gateway existe para que cambiar
+    `base_url` alcance, y rechazar el formato nuevo obligaria al cliente a
+    saber contra que proxy esta hablando.
+
+    Sin esto, `requiere_vision` solo se activaba con el alias `auto:vision` o
+    con `x_requiere` -- o sea, solo si el cliente AVISABA. Un cliente que
+    simplemente manda la imagen, que es lo normal contra una API OpenAI,
+    podia terminar en una ruta de solo texto: 200 con una respuesta que
+    ignora la imagen, o un 400 del proveedor. Ninguno de los dos dice "esa
+    ruta no ve imagenes".
+
+    Ante un cuerpo malformado devuelve False y deja que el proveedor rechace:
+    esta funcion elige ruta, no valida el pedido.
+    """
+    mensajes = cuerpo.get("messages")
+    if not isinstance(mensajes, list):
+        return False
+    for m in mensajes:
+        if not isinstance(m, dict):
+            continue
+        contenido = m.get("content")
+        if not isinstance(contenido, list):
+            continue
+        for parte in contenido:
+            if isinstance(parte, dict) and parte.get("type") in ("image_url", "input_image"):
+                return True
+    return False
+
+
 def interpretar_pedido(cuerpo: dict) -> Pedido:
     # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
     # colarse como si fuera un id explicito (quedaria vacio tras el strip y
@@ -58,7 +93,7 @@ def interpretar_pedido(cuerpo: dict) -> Pedido:
         lambda: (modelo_bruto or "").strip()) or "auto"
     modelo, perfil = None, "balanceado"
     requiere_tools = bool(cuerpo.get("tools"))
-    requiere_vision = False
+    requiere_vision = _hay_imagen(cuerpo)
 
     if modelo_pedido == "auto" or modelo_pedido.startswith("auto:"):
         sufijo = modelo_pedido[5:] if ":" in modelo_pedido else ""
