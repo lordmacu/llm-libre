@@ -254,15 +254,13 @@ def test_the_registry_declares_exactly_the_measured_generators():
     # routes would advertise a capability only three of them have.
     assert grok.default_capabilities.images is False
     assert all(e.get("images") is True for e in grok.exceptions.values())
-    # mistral does NOT claim it, and that is a measurement rather than an
-    # oversight: the model invokes generate_image but the black_forest
-    # integration returns success:false and no image ever arrives, on both
-    # configured accounts. See the note in providers.yaml. Its `vision` (image
-    # INPUT) is unaffected and stays true -- which is exactly why the two are
-    # separate axes.
+    # mistral claims BOTH: one route that reads images and generates them. It
+    # generates intermittently (the model decides whether to call the tool) and
+    # on a small shared quota -- see the note in providers.yaml -- but a real
+    # request does return a real image, which is what a declaration requires.
     mistral = next(p for p in provs if p.id == "mistral")
     caps = fixed_routes(mistral)[0].capabilities
-    assert caps.images is False
+    assert caps.images is True
     assert caps.vision is True
     # Everyone else: no claim. A provider gains the capability by claiming it.
     for pid in ("chatgpt", "perplexity", "deepseek", "kilo", "minimax"):

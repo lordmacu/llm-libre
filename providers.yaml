@@ -252,26 +252,34 @@ providers:
         # back named "Red". The proxy uploads images to Mistral's Azure Blob
         # storage and passes them in the files array -- a real path, not a claim.
         vision: true
-        # images:false -- and this is a MEASUREMENT, reversing a claim that was
-        # made here on 2026-08-18 before it was checked.
+        # images:true -- withdrawn on 2026-08-18 and restored the same day, once
+        # a generation actually returned an image. Both halves are worth keeping.
         #
-        # Le Chat does drive generation from this same model, through the
-        # `beta-imagegen` feature flag, and the model DOES invoke the tool: the
-        # stream carries {"type":"tool_call","name":"generate_image",
-        # "toolType":"image","integration":{"name":"black_forest","type":"mcp"}}
-        # with a properly expanded prompt in publicArguments. But the stored
-        # message ends `"isDone":true,"success":false,"isInterrupted":true` and
-        # no image_url ever arrives -- not in the stream, and not on re-reading
-        # the conversation with message.all twelve times over 72s. Verified on
-        # BOTH configured accounts.
+        # It was withdrawn because no image_url ever arrived. That was real, and
+        # it had TWO causes, neither of them this gateway's: the proxy read the
+        # SSE chunk's `url` when the field is `imageUrl`, and a bare prompt makes
+        # the model answer with SVG text instead of calling the tool. Both are
+        # fixed in mistral-proxy (baf6de0, bf1fca1) and a real request now
+        # returns a real Azure Blob URL.
         #
-        # So the failure is on the Le Chat side, not in the proxy's parsing, and
-        # nothing this gateway declares can change it. Claiming the capability
-        # would put this route in the /v1/images/generations pool where it would
-        # burn its timeout on every request and return nothing -- the same
-        # silent-wrong-answer failure that tools:false exists to prevent.
-        # Flip it back the day a generation actually returns an image.
-        images: false
+        # Two things to know about this route, because they shape how it behaves
+        # in the pool rather than whether it belongs there:
+        #
+        #   - it is INTERMITTENT. The model decides whether to call the tool, and
+        #     when it declines the proxy answers 502 "Model did not generate an
+        #     image (responded with text)". That is a genuine failed attempt, so
+        #     the gateway fails over to grok and the route accumulates suspicion
+        #     -- which is the correct handling of "it did not do the thing".
+        #   - the account quota is SMALL and shared with chat. Once spent, chat
+        #     survives via the proxy's anonymous fallback but generation does not
+        #     (an anonymous session returns no image at all, measured), so this
+        #     route 429s on images long before it does on chat.
+        #
+        # And it is exactly why /v1/assets exists: the URL it returns carries
+        # `se=<timestamp>`, an Azure SAS expiry roughly an hour out. Handing that
+        # to a client would be handing them a link that dies while they look at
+        # it.
+        images: true
         # Both are conservative FLOORS, DECLARED not measured: Mistral Medium
         # 3.5's published window is larger, but nothing here verified it, and
         # `context` is only used to filter by x_min_context. Raise it when it is
