@@ -30,12 +30,12 @@ async def _rutas_chatgpt_descubiertas(chatgpt) -> list:
     ("gpt-5-3-mini") que un dia deja de existir hace fallar el test con un
     diagnostico ERRADO ("revento al mandarle tools, ¿volvio el 500 viejo?")
     en vez de decir lo que de verdad paso (el id ya no existe)."""
-    from llm_libre.catalogo import normalizar
+    from llm_libre.catalog import normalize
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get(chatgpt.base_url.rstrip("/") + chatgpt.modelos_path)
     assert r.status_code == 200, "chatgpt-proxy dejo de responder /v1/models"
-    rutas = normalizar("chatgpt", r.json(), prioridad=chatgpt.prioridad,
-                       capacidades_por_defecto=chatgpt.capacidades_por_defecto)
+    rutas = normalize("chatgpt", r.json(), priority=chatgpt.prioridad,
+                      default_capabilities=chatgpt.capacidades_por_defecto)
     assert rutas, "el catalogo descubierto de chatgpt-proxy vino vacio"
     return rutas
 
@@ -123,8 +123,8 @@ async def test_kilo_sigue_aceptando_peticiones_anonimas():
 
 
 async def test_el_catalogo_de_kilo_trae_modelos_gratis_con_tools():
-    from llm_libre.catalogo import normalizar
+    from llm_libre.catalog import normalize
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get("https://api.kilo.ai/api/gateway/models")
-    rutas = normalizar("kilo", r.json())
+    rutas = normalize("kilo", r.json())
     assert any(x.capacidades.tools for x in rutas)

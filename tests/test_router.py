@@ -239,15 +239,15 @@ def test_un_id_de_chatgpt_elegido_a_mano_sigue_ruteando_directo():
 
 
 def test_una_ruta_de_chatgpt_descubierta_de_verdad_rutea_directo_al_pedirla():
-    # Integra catalogo.normalizar (donde chatgpt DESCUBRE sus ids, con
+    # Integra catalog.normalize (donde chatgpt DESCUBRE sus ids, con
     # capacidades_por_defecto) con router.ordenar: prueba el camino
     # completo, no rutas armadas a mano.
-    from llm_libre.catalogo import normalizar
+    from llm_libre.catalog import normalize
     defaults = Capacidades(tools=False, vision=False, contexto=128000, max_salida=8192)
-    descubiertas = normalizar(
+    descubiertas = normalize(
         "chatgpt",
         {"data": [{"id": "gpt-5-3-mini", "description": "GPT-5.3 Mini"},
                   {"id": "gpt-5-5", "description": "GPT-5.5"}]},
-        prioridad=0, capacidades_por_defecto=defaults)
+        priority=0, default_capabilities=defaults)
     salida = ordenar(descubiertas, {}, Pedido(modelo="gpt-5-3-mini"), ahora=0.0)
     assert [x.modelo_id for x in salida] == ["gpt-5-3-mini"]

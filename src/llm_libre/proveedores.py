@@ -28,8 +28,8 @@ class Proveedor:
     # OpenRouter, via modelos_path) y "todo declarado" (MiniMax, via
     # modelos_fijos): un proveedor cuyo /models trae IDS pero NINGUN metadato
     # de capacidad (chatgpt-proxy). None => modo normal (capacidades se
-    # descubren desde /models, como siempre). Si esta declarado, catalogo.
-    # normalizar aplica estas capacidades a CADA id que descubra y saltea los
+    # descubren desde /models, como siempre). Si esta declarado, catalog.
+    # normalize aplica estas capacidades a CADA id que descubra y saltea los
     # chequeos de precio/modalidad -- pero los IDS siguen viniendo de
     # /models, nunca de aca: sigue siendo descubrimiento, no una lista
     # cableada con otro nombre.

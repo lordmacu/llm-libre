@@ -145,7 +145,7 @@ async def test_un_fallo_parcial_no_corrompe_el_visto_por_ultima_vez_de_lo_que_si
 
 CATALOGO_VACIO = {"data": []}
 
-# Un 200 real, pero cuyo unico modelo es de pago: normalizar() lo filtra y el
+# Un 200 real, pero cuyo unico modelo es de pago: normalize() lo filtra y el
 # resultado utilizable tambien queda en cero, aunque la respuesta "tenga data".
 CATALOGO_TODO_FILTRADO = {"data": [
     {"id": "pago:model", "pricing": {"prompt": "0.002"}, "context_length": 1000,
@@ -295,9 +295,9 @@ async def test_un_200_con_cuerpo_no_json_se_trata_como_fallo_y_no_frena_a_los_de
 
 
 async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_demas():
-    # JSON valido pero de una forma que normalizar() no espera (p.ej. un error
+    # JSON valido pero de una forma que normalize() no espera (p.ej. un error
     # de autenticacion servido con status 200): dispara AttributeError dentro
-    # de normalizar(), no un httpx.HTTPError.
+    # de normalize(), no un httpx.HTTPError.
     almacen = _almacen()
 
     def handler(req):
