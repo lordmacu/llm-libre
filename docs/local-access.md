@@ -71,6 +71,33 @@ print(client.chat.completions.create(
     messages=[{"role": "user", "content": "hola"}]).choices[0].message.content)
 ```
 
+## Interactive docs, OpenAPI and Postman
+
+Swagger UI and ReDoc are served live by the gateway -- try every endpoint from
+the browser, no import needed:
+
+| | Public URL | Over the SSH tunnel |
+|---|---|---|
+| Swagger UI | https://llm.comparadorinternet.co/docs | http://127.0.0.1:8102/docs |
+| ReDoc | https://llm.comparadorinternet.co/redoc | http://127.0.0.1:8102/redoc |
+| OpenAPI JSON | https://llm.comparadorinternet.co/openapi.json | http://127.0.0.1:8102/openapi.json |
+
+The Swagger page has an **Authorize** button; paste `YOUR_KEY` there once and
+every request on the page carries it.
+
+**Postman.** Two ways in:
+
+- **Import the OpenAPI URL** directly -- in Postman, *Import -> Link* and paste
+  `https://llm.comparadorinternet.co/openapi.json`. This always matches what the
+  service actually serves, since that document is generated from the running app.
+- **Import the curated collection** shipped in the repo,
+  [`llm-libre.postman_collection.json`](../llm-libre.postman_collection.json)
+  (repo root). It has worked examples grouped into folders -- chat, images,
+  vision, diagnostics, error paths. The repo is private, so there is no public
+  download link: use the file from your checkout. After importing, set the
+  collection variables `base_url` (e.g. `https://llm.comparadorinternet.co`, no
+  trailing slash, no `/v1`) and `api_key`.
+
 ## Endpoints
 
 | Call | Key | What it does |
