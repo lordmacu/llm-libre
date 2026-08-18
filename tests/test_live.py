@@ -40,7 +40,7 @@ async def _rutas_chatgpt_descubiertas(chatgpt) -> list:
     return rutas
 
 
-async def test_chatgpt_proxy_responde_un_chat_real_si_esta_configurado():
+async def test_chatgpt_proxy_answers_a_real_chat_when_configured():
     # Se salta limpio si CHATGPT_PROXY_URL no esta seteada: este proxy es un
     # servicio propio (blog), no siempre esta arriba, y a diferencia de Kilo
     # /OpenRouter no hay una URL publica fija contra la que pegar siempre.
@@ -71,7 +71,7 @@ async def test_chatgpt_proxy_responde_un_chat_real_si_esta_configurado():
     assert isinstance(contenido, str) and contenido.strip()
 
 
-async def test_chatgpt_proxy_no_hace_function_calling_de_verdad():
+async def test_chatgpt_proxy_does_not_really_do_function_calling():
     # El hecho que sostiene tools:false en proveedores.yaml: el usuario
     # reporto "ya tenemos los tools habilitados" y esto se verifico
     # ejecutando (no releyendo) -- el proxy ya NO devuelve HTTP 500 al
@@ -122,7 +122,7 @@ async def test_kilo_sigue_aceptando_peticiones_anonimas():
     assert r.status_code == 200, "el tier anonimo de Kilo dejo de funcionar"
 
 
-async def test_el_catalogo_de_kilo_trae_modelos_gratis_con_tools():
+async def test_the_kilo_catalogue_carries_free_models_with_tools():
     from llm_libre.catalog import normalize
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get("https://api.kilo.ai/api/gateway/models")

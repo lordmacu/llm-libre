@@ -1,0 +1,43 @@
+from llm_libre.models import NEUTRAL_METRICS, Capabilities, Route, RouteRequest
+
+
+def test_a_routes_key_joins_provider_and_model():
+    r = Route("kilo", "poolside/laguna-s-2.1:free", "gratis",
+              Capabilities(tools=True, vision=False, context=262144, max_output=32768))
+    assert r.key == "kilo/poolside/laguna-s-2.1:free"
+
+
+def test_a_route_without_a_declared_priority_lands_last_by_default():
+    r = Route("kilo", "modelo:free", "gratis",
+              Capabilities(tools=True, vision=False, context=1000, max_output=100))
+    assert r.priority == 100
+
+
+def test_the_priority_can_be_declared_explicitly():
+    r = Route("chatgpt", "gpt-5-3-mini", "gratis",
+              Capabilities(tools=False, vision=False, context=128000, max_output=8192),
+              priority=0)
+    assert r.priority == 0
+
+
+def test_a_default_request_is_balanced_and_allows_paid():
+    p = RouteRequest()
+    assert p.profile == "balanceado"
+    assert p.allow_paid is True
+    assert p.model is None
+
+
+def test_the_neutral_metrics_are_not_in_cooldown():
+    assert NEUTRAL_METRICS.cooldown_until == 0.0
+    assert 0.0 < NEUTRAL_METRICS.quality <= 1.0
+
+
+def test_as_wire_emits_the_spanish_keys_the_error_bodies_use():
+    """The 400/503 bodies serialise this, so these keys are the HTTP contract --
+    see tests/test_wire_contract.py, which asserts them end to end."""
+    wire = RouteRequest(model="x", needs_tools=True, min_context=1000).as_wire()
+    assert set(wire) == {"modelo", "requiere_tools", "requiere_vision",
+                         "min_contexto", "perfil", "permitir_pago"}
+    assert wire["modelo"] == "x"
+    assert wire["requiere_tools"] is True
+    assert wire["min_contexto"] == 1000
