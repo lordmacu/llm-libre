@@ -30,6 +30,7 @@ rather than by walking a directory.
 from __future__ import annotations
 
 import base64
+import logging
 import hashlib
 import re
 import time
@@ -38,6 +39,8 @@ from pathlib import Path
 # A hostile or broken provider must not be able to fill the disk one response at
 # a time. 10 MB is far above any image either upstream produces and far below
 # anything that would matter on a 230 GB volume.
+log = logging.getLogger(__name__)
+
 MAX_BYTES = 10 * 1024 * 1024
 
 # How long a generated asset stays retrievable. Long enough that a client can
@@ -196,6 +199,13 @@ async def localise(payload: dict, store: AssetStore, http, public_base: str,
             continue
         data, content_type = await _download(http, url)
         if data is None:
+            # Degrading here is deliberate (see the docstring) but it must not be
+            # SILENT: the client still gets a working image, so nothing in the
+            # response says the provider URL was handed through un-hosted and
+            # will expire. Without this line the only symptom is a link that
+            # works today and 404s tomorrow, with nothing to correlate it to.
+            log.warning("assets: could not host %.80s -- the provider URL is "
+                        "passed through as-is and WILL expire", url)
             out.append(entry)
             continue
         if want_b64:
@@ -205,20 +215,44 @@ async def localise(payload: dict, store: AssetStore, http, public_base: str,
             continue
         asset_id = store.put(data, content_type, now)
         if asset_id is None or not public_base:
+            log.warning("assets: %s -- the provider URL is passed through as-is "
+                        "and WILL expire",
+                        "PUBLIC_BASE_URL is not configured" if not public_base
+                        else "the store refused the asset")
             out.append(entry)
             continue
+        log.info("assets: hosted %d bytes (%s) as %s, replacing %.60s",
+                 len(data), content_type or "unknown", asset_id, url)
         out.append({**entry, "url": f"{public_base.rstrip('/')}/v1/assets/{asset_id}"})
     return {**payload, "data": out}
 
 
 async def _download(http, url: str) -> tuple[bytes | None, str | None]:
+    """Fetch a provider asset. Returns (None, None) on ANY failure.
+
+    Every return-None path logs WHY. The four failure modes are genuinely
+    different to act on -- a network error is transient, a 403 usually means the
+    signed URL already expired, and "too large" is a policy limit we chose -- and
+    collapsing them into one silent `None` is what makes an intermittent
+    un-hosted image impossible to diagnose after the fact.
+    """
     try:
         resp = await http.get(url, timeout=60, follow_redirects=True)
-    except Exception:
+    except Exception as e:
+        log.warning("assets: download failed for %.60s (%s: %s)",
+                    url, type(e).__name__, e)
         return None, None
     if resp.status_code != 200:
+        log.warning("assets: download of %.60s answered HTTP %s "
+                    "(a signed provider URL may already have expired)",
+                    url, resp.status_code)
         return None, None
     data = resp.content
-    if not data or len(data) > MAX_BYTES:
+    if not data:
+        log.warning("assets: download of %.60s returned an empty body", url)
+        return None, None
+    if len(data) > MAX_BYTES:
+        log.warning("assets: %.60s is %d bytes, over the %d limit -- not hosted",
+                    url, len(data), MAX_BYTES)
         return None, None
     return data, resp.headers.get("content-type")

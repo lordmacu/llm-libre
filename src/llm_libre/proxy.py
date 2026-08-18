@@ -558,6 +558,26 @@ class Proxy:
                         last_error = "200 with no generated image"
 
             success = code == 200 and data is not None
+            # The INTERNAL response, logged per attempt. Image generation is the
+            # one path where the upstream fails in ways the client never sees:
+            # both real providers answer a rate limit or a "the model chose not
+            # to draw" with a body the gateway turns into a plain failover, so
+            # without this line the only evidence left is a 503 with one summary
+            # string. The body is truncated -- a generation response can carry
+            # base64 -- and it is INFO on success, WARNING on failure, so a
+            # normal deployment is quiet and a broken one is diagnosable.
+            if success:
+                log.info("images: %s answered 200 in %d ms with %d image(s)",
+                         route.key, latency_ms, len(data.get("data") or []))
+            else:
+                detail = ""
+                if resp is not None:
+                    try:
+                        detail = resp.text[:300]
+                    except Exception:
+                        detail = "<unreadable body>"
+                log.warning("images: %s failed (HTTP %s, %d ms): %s | body: %.300s",
+                            route.key, code, latency_ms, last_error, detail)
             # ttft stays 0 exactly as on the non-streaming chat path: nothing here
             # measured a time-to-first-token, and writing the round-trip into that
             # column is what made the p50 meaningless before (see storage.py).
