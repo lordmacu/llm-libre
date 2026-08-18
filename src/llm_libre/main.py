@@ -8,7 +8,7 @@ import httpx
 
 from llm_libre.api import State, create_app
 from llm_libre.assets import AssetStore
-from llm_libre.auth import PerKeyRateLimiter
+from llm_libre.auth import RateLimiter
 from llm_libre.probing import cycle
 from llm_libre.providers import load
 from llm_libre.proxy import Proxy
@@ -89,8 +89,14 @@ def build_state() -> State:
     proxy = Proxy({p.id: p for p in providers}, store, http)
     state = State(store=store, proxy=proxy, api_keys=api_keys,
                   daily_paid_cap=int(_env("DAILY_PAID_CAP", "TOPE_PAGO_DIARIO", "200")),
-                  rate_limiter=PerKeyRateLimiter(
-                      int(_env("PER_MINUTE_LIMIT", "LIMITE_POR_MINUTO", "60"))))
+                  rate_limiter=RateLimiter(
+                      int(_env("PER_MINUTE_LIMIT", "LIMITE_POR_MINUTO", "60"))),
+                  # Bounds an UNAUTHENTICATED caller, which the per-key limiter
+                  # cannot: it is keyed by a key, and a request without a valid
+                  # one never reaches it. Generous by design -- a ceiling on
+                  # abuse, not a quota for ordinary use.
+                  ip_rate_limiter=RateLimiter(
+                      int(os.getenv("PER_MINUTE_LIMIT_PER_IP", "120"))))
     state.providers = providers
     state.http = http
     state.assets = AssetStore(ASSETS_DIR, store._con)

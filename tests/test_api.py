@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from llm_libre.storage import Storage
 from llm_libre.api import State, create_app, parse_request
-from llm_libre.auth import PerKeyRateLimiter
+from llm_libre.auth import RateLimiter
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
 from llm_libre.proxy import (ON_DEMAND_PROBE_LIMIT_S, PENDING_CAP,
@@ -1310,7 +1310,7 @@ def test_the_per_minute_limit_counts_the_same_whichever_header_is_used():
             "choices": [{"message": {"role": "assistant", "content": "hi"}}]})))
     state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200,
-                    rate_limiter=PerKeyRateLimiter(2))
+                    rate_limiter=RateLimiter(2))
     client = TestClient(create_app(state))
 
     r1 = client.get("/v1/models", headers={"X-API-Key": "buena"})

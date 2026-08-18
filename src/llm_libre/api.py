@@ -7,7 +7,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llm_libre.assets import content_disposition, localise
-from llm_libre.auth import PerKeyRateLimiter
+from llm_libre.auth import RateLimiter, client_ip
 from llm_libre.models import NEUTRAL_METRICS, RouteRequest
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
                                ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
@@ -161,7 +161,7 @@ class State:
     proxy: object
     api_keys: set
     daily_paid_cap: int
-    rate_limiter: PerKeyRateLimiter = field(default_factory=lambda: PerKeyRateLimiter(60))
+    rate_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(60))
     providers: list = field(default_factory=list)   # used by the scheduler
     http: object = None                             # shared httpx client
     # Generator for the draw between tied routes (see router.shuffle_ties).
@@ -169,6 +169,13 @@ class State:
     # main.build_state() according to ROTATE_TIES so tests can build a
     # deterministic State without going through environment variables.
     rng: object = None
+    # Bounds what an UNAUTHENTICATED caller can cost, which the per-key limiter
+    # cannot: it is keyed by a key, and a request with no valid key never gets
+    # one. Applies to failed auth (otherwise key-guessing is free and unlimited)
+    # and to the three paths that have no key by design -- /health, which is the
+    # most expensive endpoint in the service, and /v1/assets. Generous on
+    # purpose: it is a ceiling on abuse, not a quota for ordinary use.
+    ip_rate_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(120))
     # Where generated binaries are stored, and the origin their URLs carry.
     # Both None in most tests: with no store the images endpoint simply hands
     # back the provider's own URL, which is what it did before this existed.
@@ -206,7 +213,23 @@ def create_app(state: State) -> FastAPI:
     app = FastAPI(title=TITLE, version=VERSION, summary=SUMMARY, description=DESCRIPTION)
     customise_openapi(app)
 
-    def require_api_key(x_api_key: str | None, authorization: str | None = None) -> str:
+    def _limit_by_ip(request: Request) -> None:
+        """Bound what one source can cost before any key is involved."""
+        if state.ip_rate_limiter is None:
+            return
+        if not state.ip_rate_limiter.allow(client_ip(request), time.time()):
+            raise HTTPException(429, "too many requests from this address")
+
+    def require_api_key(x_api_key: str | None, authorization: str | None = None,
+                        request: Request | None = None) -> str:
+        # The IP limit comes FIRST, before the key is even looked at. The other
+        # way round -- which is what this did until the gateway went public --
+        # a wrong key raises 401 without ever reaching a limiter, so guessing
+        # keys, or simply hammering the endpoint, costs the caller nothing and
+        # is bounded by nothing. The per-key limit below can only ever punish
+        # someone who already has a valid key.
+        if request is not None:
+            _limit_by_ip(request)
         key = _resolve_api_key(x_api_key, authorization)
         if not key or key not in state.api_keys:
             raise HTTPException(401, "invalid api key")
@@ -246,7 +269,7 @@ def create_app(state: State) -> FastAPI:
     @app.post("/v1/chat/completions", **CHAT_COMPLETIONS_DOCS)
     async def completions(request: Request, x_api_key: str | None = Header(None),
                           authorization: str | None = Header(None)):
-        key = require_api_key(x_api_key, authorization)
+        key = require_api_key(x_api_key, authorization, request)
         body = await request.json()
         routes, route_request = _routes_for(body, key)
         now = time.time()
@@ -337,7 +360,7 @@ def create_app(state: State) -> FastAPI:
         `proxy.generate_images` is a sibling of `proxy.complete`, not a special
         case inside it. See its docstring for what genuinely differs.
         """
-        key = require_api_key(x_api_key, authorization)
+        key = require_api_key(x_api_key, authorization, request)
         body = await request.json()
         routes, _ = _routes_for(body, key, needs_images=True)
         now = time.time()
@@ -364,7 +387,7 @@ def create_app(state: State) -> FastAPI:
         return JSONResponse(r.json, status_code=r.status, headers=headers)
 
     @app.get("/v1/assets/{asset_id}", **ASSETS_DOCS)
-    def asset(asset_id: str):
+    def asset(asset_id: str, request: Request):
         """Serve a stored binary. DELIBERATELY unauthenticated.
 
         It has to be: the whole point is that the URL works in an `<img>` tag, a
@@ -377,6 +400,7 @@ def create_app(state: State) -> FastAPI:
         change. Retention is the only reason one ever stops existing, and then
         it becomes a 404 rather than different content.
         """
+        _limit_by_ip(request)
         found = state.assets.get(asset_id) if state.assets is not None else None
         if found is None:
             raise HTTPException(404, "asset not found")
@@ -392,16 +416,18 @@ def create_app(state: State) -> FastAPI:
         })
 
     @app.get("/v1/models", **MODELS_DOCS)
-    def models(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
-        require_api_key(x_api_key, authorization)
+    def models(request: Request, x_api_key: str | None = Header(None),
+               authorization: str | None = Header(None)):
+        require_api_key(x_api_key, authorization, request)
         data = [{"id": r.model_id, "object": "model", "owned_by": r.provider}
                 for r in state.store.active_routes()]
         data += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIASES]
         return {"object": "list", "data": data}
 
     @app.get("/v1/ranking", **RANKING_DOCS)
-    def ranking(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
-        require_api_key(x_api_key, authorization)
+    def ranking(request: Request, x_api_key: str | None = Header(None),
+                authorization: str | None = Header(None)):
+        require_api_key(x_api_key, authorization, request)
         now = time.time()
         metrics = _metrics(state, now)
         # Sorted with the SAME key router.order_routes uses (the "balanced"
@@ -450,14 +476,21 @@ def create_app(state: State) -> FastAPI:
         return {"routes": rows}
 
     @app.get("/v1/usage", **USAGE_DOCS)
-    def usage(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
-        key = require_api_key(x_api_key, authorization)
+    def usage(request: Request, x_api_key: str | None = Header(None),
+              authorization: str | None = Header(None)):
+        key = require_api_key(x_api_key, authorization, request)
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return {"day": day, "paid_today": state.store.paid_usage(key, day),
                 "cap": state.daily_paid_cap}
 
     @app.get("/health", **HEALTH_DOCS)
-    def health():
+    def health(request: Request):
+        # Bounded by source address: no key is required here (Coolify uses it as
+        # the container health check) and it is the MOST EXPENSIVE endpoint in
+        # the service -- it recalculates every route's metrics on every call,
+        # ~0.5s across 53 routes. Unlimited and public is the wrong combination
+        # for that.
+        _limit_by_ip(request)
         # Honest: it looks at whether there is a LIVE, serviceable route, not at
         # whether the process is up. "Live" requires TWO things, not one: not
         # being in cooldown (round 8: ONLY a 429 triggers it immediately, or a
