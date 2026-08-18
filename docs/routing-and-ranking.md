@@ -12,17 +12,17 @@ later, so get them straight first:
 
 | Word | Values | What it answers | Lives on |
 |---|---|---|---|
-| **tier** | `gratis` \| `pago` | Does this route cost money? | `Ruta.tier` / `Proveedor.tier` |
-| **perfil** | `rapido` \| `balanceado` \| `potente` | What does *this request* prefer (speed vs. measured quality)? | `Pedido.perfil` (set by the `model` alias you asked for) |
-| **prioridad** | any integer, default `100` | Manual, operator-set ordering: which route gets tried first *before* anyone looks at a score | `Ruta.prioridad` / `Proveedor.prioridad` (from `providers.yaml`) |
+| **tier** | `free` \| `paid` | Does this route cost money? | `Route.tier` / `Provider.tier` |
+| **perfil** | `fast` \| `balanced` \| `strong` | What does *this request* prefer (speed vs. measured quality)? | `Pedido.perfil` (set by the `model` alias you asked for) |
+| **priority** | any integer, default `100` | Manual, operator-set ordering: which route gets tried first *before* anyone looks at a score | `Route.priority` / `Provider.priority` (from `providers.yaml`) |
 
 They never override each other. In particular: **a paid route with
-`prioridad: 0` still goes last.** `prioridad` only breaks ties *within* a
+`priority: 0` still goes last.** `priority` only breaks ties *within* a
 tier; it can never buy a paid route a place ahead of a free one. The
 production config sets this up on purpose: `chatgpt` (a self-hosted
-provider) has `prioridad: 0` so it is tried before third-party `kilo`
-(`prioridad: 1`) -- but it is still `tier: gratis`, so this has nothing to
-do with money, and `minimax` (`tier: pago`, `prioridad: 2`) is still tried
+provider) has `priority: 0` so it is tried before third-party `kilo`
+(`priority: 1`) -- but it is still `tier: free`, so this has nothing to
+do with money, and `minimax` (`tier: paid`, `priority: 2`) is still tried
 dead last regardless of that low-looking number.
 
 ## How the router orders candidates
@@ -30,20 +30,20 @@ dead last regardless of that low-looking number.
 `router.ordenar()` runs on **every** request, including one that names an
 explicit real model id -- there is no shortcut that skips it. What an
 explicit id changes is narrower than it sounds: `router.compatibles()`
-adds one extra filter (`r.modelo_id == pedido.modelo`) on top of the same
+adds one extra filter (`r.model_id == request.model`) on top of the same
 capability/context checks every request goes through, and the request
 still has to clear the same cooldown filter afterward. Concretely: an
-explicit id combined with an impossible `x_min_contexto` still gets `400`
+explicit id combined with an impossible `x_min_context` still gets `400`
 (step 1 below), and an explicit id whose only matching route happens to be
 cooling down right now still gets `503` (step 2), exactly like `auto`
 would. The steps, in order:
 
 1. **Filter by capability.** A route is a candidate at all only if it
    satisfies what the request requires: `tools` / `vision` if requested
-   (via `x_requiere`, an `auto:tools` / `auto:vision` alias, or simply
+   (via `x_requires`, an `auto:tools` / `auto:vision` alias, or simply
    including a non-empty `tools` array in the request body -- see the
    OpenAPI docs at `/docs` for that last one, it is easy to miss), a
-   context window at least as large as `x_min_contexto` if set, and (for an
+   context window at least as large as `x_min_context` if set, and (for an
    explicit id) that the route's `modelo_id` matches exactly. If nothing in
    the whole catalog can ever satisfy this, the request gets `400`
    immediately -- this filter runs before availability is even considered.
@@ -54,18 +54,18 @@ would. The steps, in order:
    *right now*) -- a different failure from step 1's `400` (no route could
    *ever* work).
 3. Sort what is left by, in this exact order:
-   1. **`tier == "pago"` first.** Free before paid, always, full stop --
+   1. **`tier == "paid"` first.** Free before paid, always, full stop --
       this is the one invariant nothing below it can break.
-   2. **`prioridad`, ascending**, within the same tier.
+   2. **`priority`, ascending**, within the same tier.
    3. **Whether the route has ever been measured by the quality battery.**
       A route with no measurement yet ranks *below* every measured route at
       the same priority -- but it still stays in the list, reachable, so it
       eventually gets a turn and gets measured. It is not penalized to the
       point of starvation, just deprioritized against known quantities.
-   4. **The score**, `puntaje = calidad^wc * confiabilidad^wr * f(latencia)^wl`,
+   4. **The score**, `score = quality^wc * reliability^wr * f(latency)^wl`,
       highest first. The exponents (`wc`, `wr`, `wl`) come from the
-      requested `perfil` -- see `llm_libre/ranking.py`'s `PESOS` table.
-      `x_permitir_pago: false` on the request removes paid routes from
+      requested `profile` -- see `llm_libre/ranking.py`'s `PESOS` table.
+      `x_allow_paid: false` on the request removes paid routes from
       consideration even earlier, before this sort even runs.
 
 The result is the full ordered attempt chain, not just a single winner --
@@ -76,14 +76,14 @@ which is what the rest of this document is for.
 
 ## Reading `GET /v1/ranking`
 
-This is the operator's main debugging tool: "why did `X-Ruta-Usada` say
+This is the operator's main debugging tool: "why did `X-Route-Used` say
 what it said?" `GET /v1/ranking` returns one row per active route, **sorted
-with the literal same key the router itself uses** (`router.clave_de_orden`,
+with the literal same key the router itself uses** (`router.sort_key`,
 the same function `ordenar()` calls) -- so the row at the top of this table
 is, right now, genuinely the route a fresh `auto` request would try first.
 That was not always true: an earlier version sorted by score alone, and
-could show a route at the top of the table while `X-Ruta-Usada` reported a
-completely different one, because the display ignored `prioridad` and
+could show a route at the top of the table while `X-Route-Used` reported a
+completely different one, because the display ignored `priority` and
 cooldown state. If you ever see that again, treat it as a regression.
 
 ### Worked example
@@ -91,7 +91,7 @@ cooldown state. If you ever see that again, treat it as a regression.
 Two real routing decisions, observed against the live deployment:
 
 - `POST /v1/chat/completions` with `"model": "auto"` was served by
-  **`chatgpt/gpt-5-3-mini`** (`X-Tier: gratis`, `X-Intentos: 1`, ~4.5s).
+  **`chatgpt/gpt-5-3-mini`** (`X-Tier: free`, `X-Attempts: 1`, ~4.5s).
 - The exact same prompt with `"model": "auto:tools"` fell through to
   **`kilo/cohere/north-mini-code:free`**, because every `chatgpt` route
   declares `tools: false` in `providers.yaml` (the anonymous backend does
@@ -104,18 +104,18 @@ timestamps will differ, but the shape and the reasoning are real):
 
 ```json
 {
-  "rutas": [
+  "routes": [
     {
-      "clave": "chatgpt/gpt-5-3-mini", "tier": "gratis", "prioridad": 0,
-      "puntaje": 0.7912, "calidad": 0.8, "calidad_medida": true,
-      "confiabilidad": 0.98, "ttft_p50_ms": 900.0, "latencia_p50_ms": 4500.0,
-      "en_cooldown_hasta": 0.0, "tools": false, "vision": false, "contexto": 128000
+      "key": "chatgpt/gpt-5-3-mini", "tier": "free", "priority": 0,
+      "score": 0.7912, "quality": 0.8, "quality_measured": true,
+      "reliability": 0.98, "ttft_p50_ms": 900.0, "latency_p50_ms": 4500.0,
+      "cooldown_until": 0.0, "tools": false, "vision": false, "context": 128000
     },
     {
-      "clave": "kilo/cohere/north-mini-code:free", "tier": "gratis", "prioridad": 1,
-      "puntaje": 0.8420, "calidad": 0.8, "calidad_medida": true,
-      "confiabilidad": 1.0, "ttft_p50_ms": 650.0, "latencia_p50_ms": 2100.0,
-      "en_cooldown_hasta": 0.0, "tools": true, "vision": false, "contexto": 128000
+      "key": "kilo/cohere/north-mini-code:free", "tier": "free", "priority": 1,
+      "score": 0.8420, "quality": 0.8, "quality_measured": true,
+      "reliability": 1.0, "ttft_p50_ms": 650.0, "latency_p50_ms": 2100.0,
+      "cooldown_until": 0.0, "tools": true, "vision": false, "context": 128000
     }
   ]
 }
@@ -123,50 +123,50 @@ timestamps will differ, but the shape and the reasoning are real):
 
 Reading it top to bottom:
 
-- **`chatgpt/gpt-5-3-mini` sits above `kilo/...` despite a *lower* `puntaje`
-  (0.79 vs. 0.84).** This is `prioridad` doing its job: `0 < 1`, and
-  `prioridad` is compared before the score. This is exactly why `auto`
+- **`chatgpt/gpt-5-3-mini` sits above `kilo/...` despite a *lower* `score`
+  (0.79 vs. 0.84).** This is `priority` doing its job: `0 < 1`, and
+  `priority` is compared before the score. This is exactly why `auto`
   picked `chatgpt` for the plain request above.
 - **`auto:tools` skips `chatgpt` entirely** -- not because of ordering, but
   because `"tools": false` on that row fails the capability filter (step 1)
   before ordering is even considered. `kilo/...`, with `"tools": true`, is
-  the next candidate in tier `gratis`, so it wins for that request.
+  the next candidate in tier `free`, so it wins for that request.
 - If `chatgpt/gpt-5-3-mini` were punished right now, its row would still
   appear in this table (it is diagnostic, not filtered by cooldown) but
-  would sort to the **bottom** regardless of its score or `prioridad` --
-  `en_cooldown_hasta` is the first element of the sort key, ahead of
+  would sort to the **bottom** regardless of its score or `priority` --
+  `cooldown_until` is the first element of the sort key, ahead of
   everything else. Check that field whenever a route you expected to win
   did not.
 
 ### Field notes worth knowing before you stare at this table
 
-- **`calidad` is `null`, and the number you'd expect is in `calidad_asumida`
-  instead, whenever `calidad_medida` is `false`.** A route that has never
+- **`quality` is `null`, and the number you'd expect is in `quality_assumed`
+  instead, whenever `quality_measured` is `false`.** A route that has never
   been through the quality battery is not silently shown as if a real
   measurement of `0.6` existed -- that would make an assumption look like
   data. It still counts toward the score (as the neutral value), it is just
   labeled honestly.
-- **`en_cooldown_hasta` is a raw Unix timestamp in seconds** (`0` = not in
-  cooldown) -- unlike `ultima_sonda` and `ultima_sonda_calidad`, which are
+- **`cooldown_until` is a raw Unix timestamp in seconds** (`0` = not in
+  cooldown) -- unlike `last_probe` and `last_quality_probe`, which are
   ISO-8601 strings (or `null` if that probe never ran). This asymmetry is
   real, not a typo in this doc; convert it yourself if you need a human
   time. Production runs on Ubuntu (GNU coreutils): `date -d @<value>`.
   (`date -r <value>` is the macOS/BSD form -- handy for local development
   on a Mac, but it does not run as-is on the server; do not paste it into
   an SSH session against `blog` expecting it to work.)
-- **`ttft_p50_ms` and `latencia_p50_ms` measure different things and are
+- **`ttft_p50_ms` and `latency_p50_ms` measure different things and are
   not interchangeable.** `ttft_p50_ms` (time to first token) only gets
   populated by streaming traffic and probes, and is what the score's
-  latency factor is actually calibrated against. `latencia_p50_ms` is the
+  latency factor is actually calibrated against. `latency_p50_ms` is the
   full round-trip of the non-streaming path (and of every probe), exposed
   for diagnostics only -- it does not feed the score. A deployment that
   only ever sees non-streaming traffic will show every route's
   `ttft_p50_ms` stuck at the neutral default (`1500.0`), because nothing
   ever measured a real one; that is expected, not broken.
-- `puntaje` is always computed with the `balanceado` profile weights for
+- `score` is always computed with the `balanced` profile weights for
   this table, regardless of what any individual request asked for -- it is
   meant as a stable reference point, not a live prediction for every
-  possible `perfil`.
+  possible `profile`.
 
 ## Cooldowns: what they are and how they clear
 
@@ -214,7 +214,7 @@ record actually clears is a different thing: the **escalation counter**
 route gets punished again. A route that recovers on its own resets to a
 fresh 60s base instead of continuing to escalate from wherever the
 exponential backoff had left off -- but the cooldown that is active at any
-given moment always runs its full course to `en_cooldown_hasta`.
+given moment always runs its full course to `cooldown_until`.
 
 There is currently no manual "un-cooldown this route" switch -- if a route
 is stuck punished longer than its backoff should allow, that itself is
@@ -266,7 +266,7 @@ in one pass, `Proxy._admitir_sondas_pendientes` picks who goes next by
 without an on-demand probe (never probed on demand = counts as infinitely
 stale, so it always wins) gets the next free slot. Plain first-come-first-served
 would starve whichever route sits last in the attempt chain forever, since
-`completar()` walks candidates in the same `prioridad`/score order every
+`completar()` walks candidates in the same `priority`/score order every
 time and would always ask for a slot for the front of the chain first --
 exactly the route most likely to already be healthy. Fair-share re-sorting
 means every suspicious route eventually gets its probe within a bounded

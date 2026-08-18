@@ -13,8 +13,8 @@ what its own `/models` endpoint can tell the gateway:
 | Pattern | Model ids come from | Capabilities come from | Who uses it |
 |---|---|---|---|
 | **Fully discovered** | its `/models` | its `/models` | Kilo (OpenRouter too, as an example -- see the note below) |
-| **Fully declared** | `modelos_fijos` in the YAML | `modelos_fijos` in the YAML | MiniMax |
-| **Discovered ids, declared capabilities** | its `/models` | `capacidades_por_defecto` in the YAML | `chatgpt` |
+| **Fully declared** | `fixed_models` in the YAML | `fixed_models` in the YAML | MiniMax |
+| **Discovered ids, declared capabilities** | its `/models` | `default_capabilities` in the YAML | `chatgpt` |
 
 > **A note on OpenRouter, mentioned throughout this doc as an example of
 > the "fully discovered" pattern:** it is not currently in the live
@@ -24,7 +24,7 @@ what its own `/models` endpoint can tell the gateway:
 > and ranking-table space to repeatedly prove they were dead). It stays
 > useful here purely as a worked example: unlike Kilo, its free tier
 > requires an API key for `/chat/completions` even though `/models` is
-> public without one, which is a good illustration of `clave_env` being
+> public without one, which is a good illustration of `api_key_env` being
 > *declared* on a provider without that provider's tier being optional in
 > practice. Re-adding it is a YAML entry plus `OPENROUTER_API_KEY`, not a
 > code change -- see "Adding a new provider" below.
@@ -32,12 +32,12 @@ what its own `/models` endpoint can tell the gateway:
 > **Removing OpenRouter's YAML entry did not, by itself, deactivate its
 > already-discovered routes.** `sincronizar_catalogo` only deactivates
 > stale routes for the provider it is currently syncing (scoped by
-> `Almacen.upsert_rutas(..., proveedor=p.id)`) -- a provider dropped from
+> `Storage.upsert_routes(..., provider=p.id)`) -- a provider dropped from
 > the registry entirely never gets synced again, so without something
 > else, its routes would stay `activa = 1` forever: still listed in
 > `GET /v1/models`, still shown in `GET /v1/ranking`, still eligible as
-> routing candidates that would fail every time. `Almacen.desactivar_proveedores_no_registrados`
-> closes that gap: it runs once per sondeo cycle, before the per-provider
+> routing candidates that would fail every time. `Storage.deactivate_unregistered_providers`
+> closes that gap: it runs once per probing cycle, before the per-provider
 > loop, and deactivates (never deletes -- same "history detects renames"
 > principle as everything else) any route whose provider is absent from
 > the process's current registry. This is why OpenRouter's 16 rows
@@ -45,7 +45,7 @@ what its own `/models` endpoint can tell the gateway:
 > permanently-broken candidates.
 
 Adding or removing a provider both need a **restart** to take effect --
-see "Adding a new provider" below for why (`proveedores.cargar()` only
+see "Adding a new provider" below for why (`providers.load()` only
 runs once, at startup).
 
 All three are still "discovery" in the sense the project cares about
@@ -86,10 +86,10 @@ a list of ids:
 MiniMax's real `/models` response is bare -- `id`/`created`/`owned_by`,
 nothing about pricing or capability -- so there is nothing useful to
 discover. Both the id and the capabilities are written by hand under
-`modelos_fijos`:
+`fixed_models`:
 
 ```yaml
-modelos_fijos:
+fixed_models:
   - id: MiniMax-M3
     tools: true
     vision: false
@@ -97,12 +97,12 @@ modelos_fijos:
     max_salida: 32768
 ```
 
-This is also, not coincidentally, the only pattern used for a `tier: pago`
+This is also, not coincidentally, the only pattern used for a `tier: paid`
 provider today: paid routes are never probed (spending real money just to
 measure them would defeat the point of a free-first gateway), so there is
 no periodic re-verification of these numbers the way a discovered route
-gets. Keep them conservative -- `contexto` here is documented in the YAML
-as "a conservative floor, used only to filter by `x_min_contexto`"; raise
+gets. Keep them conservative -- `context` here is documented in the YAML
+as "a conservative floor, used only to filter by `x_min_context`"; raise
 it only once you have confirmed a larger one against the real API.
 
 ### Discovered ids, declared capabilities (`chatgpt`)
@@ -111,7 +111,7 @@ it only once you have confirmed a larger one against the real API.
 catalog, with a TTL cache and a fallback to the last-good response) but,
 unlike Kilo/OpenRouter, never reports pricing or modality metadata --
 every entry is just `id`/`object`/`created`/`owned_by`/`description`. This
-is exactly the gap `capacidades_por_defecto` closes: declare the
+is exactly the gap `default_capabilities` closes: declare the
 capabilities **once**, for the provider as a whole, and every id that
 provider's `/models` reports gets stamped with them:
 
@@ -123,7 +123,7 @@ capacidades_por_defecto:
   max_salida: 8192
 ```
 
-When `capacidades_por_defecto` is set for a provider, `catalogo.normalizar()`
+When `default_capabilities` is set for a provider, `catalogo.normalizar()`
 applies it to every discovered id **and skips the price/modality checks
 entirely** -- a provider that declares defaults is asserting the things
 its own catalog cannot tell the gateway, so those checks would have
@@ -157,7 +157,7 @@ one provider's config.
 
 ## Other per-provider fields worth knowing about
 
-- **`prioridad`** (default `100`): manual ordering within a tier, see
+- **`priority`** (default `100`): manual ordering within a tier, see
   [`routing-and-ranking.md`](routing-and-ranking.md). Does not affect
   discovery, only the order routes get tried in.
 - **`base_url_env`**: names an environment variable whose value overrides
@@ -165,7 +165,7 @@ one provider's config.
   yet (today: `chatgpt`, self-hosted, deployed alongside this gateway).
   See [`configuration.md`](configuration.md) for the path-suffix behavior
   this implies.
-- **`desenvuelve_canvas`** (default `false`): whether the gateway should
+- **`unwraps_canvas`** (default `false`): whether the gateway should
   unwrap `:::word{...}` ... `:::` fences from this provider's responses.
   This is **not** a generic Markdown cleanup -- `:::note{...}` is also
   legitimate Docusaurus/MDX syntax, and applying this blindly to every
@@ -198,25 +198,25 @@ one provider's config.
 In the common case (a provider whose `/models` is as informative as
 Kilo/OpenRouter's), this really is config-only:
 
-1. Add an entry to `providers.yaml` with `id`, `tier`, `dialecto:
-   openai`, `base_url`, and `modelos_path` (plus `clave_env` if it needs an
+1. Add an entry to `providers.yaml` with `id`, `tier`, `dialect:
+   openai`, `base_url`, and `models_path` (plus `api_key_env` if it needs an
    API key).
 2. If its `/models` does not report capabilities, add
-   `capacidades_por_defecto` instead of expecting discovery to work.
+   `default_capabilities` instead of expecting discovery to work.
 3. If its `/models` reports **neither** ids nor capabilities usefully
-   (MiniMax's shape), use `modelos_fijos` instead -- this is about what
+   (MiniMax's shape), use `fixed_models` instead -- this is about what
    the catalog endpoint can tell the gateway, not about `tier`. A `tier:
    pago` provider with a `/models` as informative as Kilo's could use full
    discovery exactly the same way a free one does; MiniMax happens to use
-   `modelos_fijos` because its `/models` is bare, and happens to also be
+   `fixed_models` because its `/models` is bare, and happens to also be
    the paid one, but those are two independent facts about it. The one
-   thing that IS tied to `tier: pago`, unconditionally and regardless of
+   thing that IS tied to `tier: paid`, unconditionally and regardless of
    which registration pattern a provider uses: it is never probed (see
-   `sondeo.sondear_salud` / `sondear_calidad`, both filter to
-   `tier == "gratis"`) -- spending real money just to measure a route
+   `probing.probe_health` / `probe_quality`, both filter to
+   `tier == "free"`) -- spending real money just to measure a route
    would defeat the point of a free-first gateway.
-4. **Restart the process.** `proveedores.cargar()` only runs once, at
-   startup (`principal.crear_estado`) -- there is no mechanism that
+4. **Restart the process.** `providers.load()` only runs once, at
+   startup (`main.build_state`) -- there is no mechanism that
    re-reads `providers.yaml` on its own, so a YAML edit needs a restart
    before anything downstream sees it. ("Wait for the next sync cycle"
    alone does *not* work, despite `sincronizar_catalogo` running
@@ -226,7 +226,7 @@ Kilo/OpenRouter's), this really is config-only:
    measurements in `GET /v1/ranking` on their own (skipped for a `tier:
    pago` provider, per the point above -- it only ever gets measured by
    real traffic). The same applies in reverse when removing a provider --
-   see the callout above on `desactivar_proveedores_no_registrados` for
+   see the callout above on `deactivate_unregistered_providers` for
    what happens to its already-discovered routes once the process comes
    back up with a shorter registry.
 

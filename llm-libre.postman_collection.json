@@ -2,7 +2,7 @@
   "info": {
     "_postman_id": "dd9aecbf-668a-4d2a-98e1-3ff8f3ad1c18",
     "name": "llm-libre",
-    "description": "llm-libre: one OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) in front of several providers' FREE LLM tiers, with a paid fallback (MiniMax) as a last resort and a self-measured ranking that decides routing for you.\n\n## Setup\nFill in the two collection variables (top of this collection, or an environment): `base_url` (e.g. `https://llm-libre.example.com`, no trailing slash -- do NOT include `/v1`, each request adds its own path) and `api_key` (one of the deployment's `LLM_LIBRE_API_KEYS`).\n\n## Folders\n- **Chat completions** -- `auto*` aliases, an explicit model id, streaming, and one request per `x_*` gateway extension so its effect is discoverable on its own.\n- **Catalog & diagnostics** -- `GET /v1/models`, `GET /v1/ranking` (the operator's tool to explain a routing decision), `GET /v1/uso`, `GET /health` (no key needed).\n- **Error paths** -- missing key, an unknown model id, and an impossible capability requirement: half of what you need when something misbehaves is knowing what the failure looks like.\n\nBoth auth styles are represented: every request here uses `X-API-Key` except **Auth: Authorization Bearer**, which proves the OpenAI-SDK-compatible path (`Authorization: Bearer <key>`) works exactly the same.",
+    "description": "llm-libre: one OpenAI-compatible endpoint (`/v1/chat/completions`, `/v1/models`) in front of several providers' FREE LLM tiers, with a paid fallback (MiniMax) as a last resort and a self-measured ranking that decides routing for you.\n\n## Setup\nFill in the two collection variables (top of this collection, or an environment): `base_url` (e.g. `https://llm-libre.example.com`, no trailing slash -- do NOT include `/v1`, each request adds its own path) and `api_key` (one of the deployment's `LLM_LIBRE_API_KEYS`).\n\n## Folders\n- **Chat completions** -- `auto*` aliases, an explicit model id, streaming, and one request per `x_*` gateway extension so its effect is discoverable on its own.\n- **Catalog & diagnostics** -- `GET /v1/models`, `GET /v1/ranking` (the operator's tool to explain a routing decision), `GET /v1/usage`, `GET /health` (no key needed).\n- **Error paths** -- missing key, an unknown model id, and an impossible capability requirement: half of what you need when something misbehaves is knowing what the failure looks like.\n\nBoth auth styles are represented: every request here uses `X-API-Key` except **Auth: Authorization Bearer**, which proves the OpenAI-SDK-compatible path (`Authorization: Bearer <key>`) works exactly the same.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
@@ -46,7 +46,7 @@
                 "completions"
               ]
             },
-            "description": "Balanced profile: quality, reliability and latency weigh evenly. In production this is typically served by chatgpt/gpt-5-3-mini (prioridad: 0) -- check the response headers `X-Ruta-Usada` / `X-Tier: gratis` / `X-Intentos` to see who actually answered.",
+            "description": "Balanced profile: quality, reliability and latency weigh evenly. In production this is typically served by chatgpt/gpt-5-3-mini (priority: 0) -- check the response headers `X-Route-Used` / `X-Tier: free` / `X-Attempts` to see who actually answered.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
@@ -60,7 +60,7 @@
           "response": []
         },
         {
-          "name": "auto:rapido",
+          "name": "auto:fast",
           "request": {
             "method": "POST",
             "header": [
@@ -87,7 +87,7 @@
             "description": "Fast profile: latency weighs more in the score, some measured quality is traded off.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto:rapido\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto:fast\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -98,7 +98,7 @@
           "response": []
         },
         {
-          "name": "auto:potente",
+          "name": "auto:strong",
           "request": {
             "method": "POST",
             "header": [
@@ -125,7 +125,7 @@
             "description": "Powerful profile: measured quality weighs more, some latency is traded off.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto:potente\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto:strong\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Say hello in one short sentence.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -236,7 +236,7 @@
                 "completions"
               ]
             },
-            "description": "A real route id, exactly as GET /v1/models lists it (no provider prefix -- 'kilo/' in X-Ruta-Usada is added by the gateway, not part of the model id). Still fails over between every provider that happens to serve this same model.",
+            "description": "A real route id, exactly as GET /v1/models lists it (no provider prefix -- 'kilo/' in X-Route-Used is added by the gateway, not part of the model id). Still fails over between every provider that happens to serve this same model.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"cohere/north-mini-code:free\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Write a haiku about databases.\"\n    }\n  ]\n}",
@@ -274,10 +274,10 @@
                 "completions"
               ]
             },
-            "description": "Server-Sent Events. IMPORTANT: streaming responses never carry X-Ruta-Usada / X-Tier / X-Intentos (headers go out before the failover chain resolves) -- check GET /v1/uso for paid spend, and the `model` field inside the chunks themselves for which model answered. In Postman, open the response in the 'Send and Download' / EventStream view to see chunks as they arrive instead of buffered as one blob.",
+            "description": "Server-Sent Events. IMPORTANT: streaming responses never carry X-Route-Used / X-Tier / X-Attempts (headers go out before the failover chain resolves) -- check GET /v1/usage for paid spend, and the `model` field inside the chunks themselves for which model answered. In Postman, open the response in the 'Send and Download' / EventStream view to see chunks as they arrive instead of buffered as one blob.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto:rapido\",\n  \"stream\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Count from 1 to 5.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto:fast\",\n  \"stream\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Count from 1 to 5.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -288,7 +288,7 @@
           "response": []
         },
         {
-          "name": "Extension: x_requiere",
+          "name": "Extension: x_requires",
           "request": {
             "method": "POST",
             "header": [
@@ -315,7 +315,7 @@
             "description": "Gateway extension, stripped before the request reaches the provider. Capabilities the chosen route MUST support -- here, function-calling. Equivalent to (and combinable with) the `auto:tools` / `auto:vision` aliases. Only \"tools\" and \"vision\" currently have any effect.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto\",\n  \"x_requiere\": [\n    \"tools\"\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_requires\": [\n    \"tools\"\n  ],\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -326,7 +326,7 @@
           "response": []
         },
         {
-          "name": "Extension: x_min_contexto",
+          "name": "Extension: x_min_context",
           "request": {
             "method": "POST",
             "header": [
@@ -350,10 +350,10 @@
                 "completions"
               ]
             },
-            "description": "Gateway extension, stripped before the request reaches the provider. Minimum context window (tokens) a route must advertise to be considered. Compare against the `contexto` field GET /v1/ranking publishes per route.",
+            "description": "Gateway extension, stripped before the request reaches the provider. Minimum context window (tokens) a route must advertise to be considered. Compare against the `context` field GET /v1/ranking publishes per route.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto\",\n  \"x_min_contexto\": 100000,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_min_context\": 100000,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -364,7 +364,7 @@
           "response": []
         },
         {
-          "name": "Extension: x_permitir_pago (disable paid fallback)",
+          "name": "Extension: x_allow_paid (disable paid fallback)",
           "request": {
             "method": "POST",
             "header": [
@@ -388,10 +388,10 @@
                 "completions"
               ]
             },
-            "description": "Gateway extension, stripped before the request reaches the provider. Defaults to true (the gateway MAY silently fall back to the paid MiniMax route if every free route is down -- always reported via X-Tier: pago and counted in GET /v1/uso, never an invisible charge). Setting this to false forbids that fallback for this one request: you get 503 instead of a charge if free is exhausted.",
+            "description": "Gateway extension, stripped before the request reaches the provider. Defaults to true (the gateway MAY silently fall back to the paid MiniMax route if every free route is down -- always reported via X-Tier: pago and counted in GET /v1/usage, never an invisible charge). Setting this to false forbids that fallback for this one request: you get 503 instead of a charge if free is exhausted.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto\",\n  \"x_permitir_pago\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_allow_paid\": false,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Reply with just the word OK.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -402,7 +402,7 @@
           "response": []
         },
         {
-          "name": "Extension: x_crudo (disable reasoning stripping)",
+          "name": "Extension: x_raw (disable reasoning stripping)",
           "request": {
             "method": "POST",
             "header": [
@@ -426,10 +426,10 @@
                 "completions"
               ]
             },
-            "description": "Gateway extension, stripped before the request reaches the provider. Disables reasoning-tag stripping (<think>/<thinking>/<reasoning>): `content` comes back exactly as the provider sent it, and `x_razonamiento` is never added. Compare this response's `content` against the default request above (no x_crudo) for the same kind of prompt on a model that leaks its chain-of-thought.",
+            "description": "Gateway extension, stripped before the request reaches the provider. Disables reasoning-tag stripping (<think>/<thinking>/<reasoning>): `content` comes back exactly as the provider sent it, and `x_reasoning` is never added. Compare this response's `content` against the default request above (no x_raw) for the same kind of prompt on a model that leaks its chain-of-thought.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto\",\n  \"x_crudo\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What is 2+2? Think step by step.\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_raw\": true,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"What is 2+2? Think step by step.\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -508,7 +508,7 @@
                 "models"
               ]
             },
-            "description": "The normalized catalog (OpenAI /models shape) plus the auto* aliases. In production: 34 real routes + 5 aliases = 39 entries; cross-check the route count against GET /health's rutas_activas."
+            "description": "The normalized catalog (OpenAI /models shape) plus the auto* aliases. In production: 34 real routes + 5 aliases = 39 entries; cross-check the route count against GET /health's active_routes."
           },
           "response": []
         },
@@ -532,12 +532,12 @@
                 "ranking"
               ]
             },
-            "description": "Not part of the OpenAI contract. Per-route score with its components broken out, sorted with the exact same key the router itself uses (cooldown, tier==pago, prioridad, unmeasured, -score) -- this is the operator's main tool to explain why a request got the X-Ruta-Usada it got. See docs/routing-and-ranking.md for a full worked example."
+            "description": "Not part of the OpenAI contract. Per-route score with its components broken out, sorted with the exact same key the router itself uses (cooldown, tier==paid, priority, unmeasured, -score) -- this is the operator's main tool to explain why a request got the X-Route-Used it got. See docs/routing-and-ranking.md for a full worked example."
           },
           "response": []
         },
         {
-          "name": "GET /v1/uso",
+          "name": "GET /v1/usage",
           "request": {
             "method": "GET",
             "header": [
@@ -547,7 +547,7 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/v1/uso",
+              "raw": "{{base_url}}/v1/usage",
               "host": [
                 "{{base_url}}"
               ],
@@ -642,7 +642,7 @@
                 "completions"
               ]
             },
-            "description": "A model id that no longer exists (this exact one is the real-world example that motivated the whole project -- see the design spec, §1) -> 404 with `sugerencias`: the nearest ids that ARE still in the catalog. Different from the 503 you get when a route is merely down -- 404 here means the id itself is gone.",
+            "description": "A model id that no longer exists (this exact one is the real-world example that motivated the whole project -- see the design spec, §1) -> 404 with `suggestions`: the nearest ids that ARE still in the catalog. Different from the 503 you get when a route is merely down -- 404 here means the id itself is gone.",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"model\": \"poolside/laguna-m.1:free\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
@@ -680,10 +680,10 @@
                 "completions"
               ]
             },
-            "description": "No route in any provider's catalog can simultaneously satisfy this context window AND both capabilities -> 400, not 503: this is not 'temporarily unavailable', it can NEVER be satisfied as asked. Compare with the 503 you get from GET /v1/uso's daily cap, or from every candidate route being down/cooling -- see docs/operations-runbook.md.",
+            "description": "No route in any provider's catalog can simultaneously satisfy this context window AND both capabilities -> 400, not 503: this is not 'temporarily unavailable', it can NEVER be satisfied as asked. Compare with the 503 you get from GET /v1/usage's daily cap, or from every candidate route being down/cooling -- see docs/operations-runbook.md.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto\",\n  \"x_requiere\": [\n    \"tools\",\n    \"vision\"\n  ],\n  \"x_min_contexto\": 999999999,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_requires\": [\n    \"tools\",\n    \"vision\"\n  ],\n  \"x_min_context\": 999999999,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -732,7 +732,7 @@
           "response": []
         },
         {
-          "name": "x_min_contexto not a number -> 400",
+          "name": "x_min_context not a number -> 400",
           "request": {
             "method": "POST",
             "header": [
@@ -756,10 +756,10 @@
                 "completions"
               ]
             },
-            "description": "A non-numeric x_min_contexto -> 400 naming the field and the value received, instead of a generic 500 -- this is evidence about THIS request's payload, not an internal gateway failure.",
+            "description": "A non-numeric x_min_context -> 400 naming the field and the value received, instead of a generic 500 -- this is evidence about THIS request's payload, not an internal gateway failure.",
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"model\": \"auto\",\n  \"x_min_contexto\": \"cien mil\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
+              "raw": "{\n  \"model\": \"auto\",\n  \"x_min_context\": \"cien mil\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"hi\"\n    }\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"

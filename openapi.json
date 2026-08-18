@@ -3,7 +3,7 @@
   "info": {
     "title": "llm-libre",
     "summary": "One OpenAI-compatible endpoint for several providers' free LLM models.",
-    "description": "\nllm-libre is a gateway that puts several LLM providers' **free** tiers\nbehind a single [OpenAI-compatible](https://platform.openai.com/docs/api-reference/chat)\ncontract. Any OpenAI SDK works against it unmodified: point `base_url` at\nthis service and pass one of the configured API keys, nothing else changes.\n\n## Why \"auto\" instead of picking a model yourself\n\nFree model catalogs churn: ids get renamed or removed, and no single\nprovider's free tier is reliably the best one. llm-libre measures its own\nproviders (a small health probe plus a code-verifiable quality battery,\nsee `GET /v1/ranking`) and, when you request the `auto` model or one of\nits variants, routes you to the best currently-healthy candidate --\nretrying the next one automatically on failure.\n\n## Authentication\n\nEvery endpoint except `GET /health` requires an API key, accepted through\n**either** header (if both are present, `X-API-Key` wins):\n\n- `X-API-Key: <key>`\n- `Authorization: Bearer <key>` -- what any OpenAI SDK sends automatically\n  when you set its `api_key` parameter, so the \"just change `base_url`\"\n  promise holds without extra configuration.\n\n## Rate limiting\n\nEach key is limited to a fixed number of requests per minute (see the\n`LIMITE_POR_MINUTO` deployment variable). Exceeding it returns `429`.\n\n## Status codes, and why four of them are easy to confuse\n\n- **`400`** -- no route could *ever* satisfy this request (an impossible\n  capability/context combination). Not retryable as-is; fix the request.\n- **`404`** -- the specific model id you asked for no longer exists, either\n  in the local catalog or, for a model that is still in the local catalog,\n  because the upstream provider itself just returned a live `404` for it.\n  Comes with `sugerencias` (nearest known ids).\n- **`503`** -- routes that *could* serve this request exist, but right now\n  they are all down or cooling down, or (for a request that allows the paid\n  fallback) the calling key already spent its daily paid allowance. Safe to\n  retry later; see `GET /v1/ranking` and `GET /health` to find out why.\n- **`401`** -- missing or invalid API key.\n- **`429`** -- the calling key is over its per-minute rate limit.\n",
+    "description": "\nllm-libre is a gateway that puts several LLM providers' **free** tiers\nbehind a single [OpenAI-compatible](https://platform.openai.com/docs/api-reference/chat)\ncontract. Any OpenAI SDK works against it unmodified: point `base_url` at\nthis service and pass one of the configured API keys, nothing else changes.\n\n## Why \"auto\" instead of picking a model yourself\n\nFree model catalogs churn: ids get renamed or removed, and no single\nprovider's free tier is reliably the best one. llm-libre measures its own\nproviders (a small health probe plus a code-verifiable quality battery,\nsee `GET /v1/ranking`) and, when you request the `auto` model or one of\nits variants, routes you to the best currently-healthy candidate --\nretrying the next one automatically on failure.\n\n## Authentication\n\nEvery endpoint except `GET /health` requires an API key, accepted through\n**either** header (if both are present, `X-API-Key` wins):\n\n- `X-API-Key: <key>`\n- `Authorization: Bearer <key>` -- what any OpenAI SDK sends automatically\n  when you set its `api_key` parameter, so the \"just change `base_url`\"\n  promise holds without extra configuration.\n\n## Rate limiting\n\nEach key is limited to a fixed number of requests per minute (see the\n`PER_MINUTE_LIMIT` deployment variable). Exceeding it returns `429`.\n\n## Status codes, and why four of them are easy to confuse\n\n- **`400`** -- no route could *ever* satisfy this request (an impossible\n  capability/context combination). Not retryable as-is; fix the request.\n- **`404`** -- the specific model id you asked for no longer exists, either\n  in the local catalog or, for a model that is still in the local catalog,\n  because the upstream provider itself just returned a live `404` for it.\n  Comes with `suggestions` (nearest known ids).\n- **`503`** -- routes that *could* serve this request exist, but right now\n  they are all down or cooling down, or (for a request that allows the paid\n  fallback) the calling key already spent its daily paid allowance. Safe to\n  retry later; see `GET /v1/ranking` and `GET /health` to find out why.\n- **`401`** -- missing or invalid API key.\n- **`429`** -- the calling key is over its per-minute rate limit.\n",
     "version": "0.1.0"
   },
   "paths": {
@@ -13,7 +13,7 @@
           "Chat"
         ],
         "summary": "Create a chat completion (OpenAI-compatible, with automatic routing)",
-        "description": "llm-libre is a gateway that puts several LLM providers' **free** tiers\nbehind a single [OpenAI-compatible](https://platform.openai.com/docs/api-reference/chat)\ncontract. Any OpenAI SDK works against it unmodified: point `base_url` at\nthis service and pass one of the configured API keys, nothing else changes.\n\n## Why \"auto\" instead of picking a model yourself\n\nFree model catalogs churn: ids get renamed or removed, and no single\nprovider's free tier is reliably the best one. llm-libre measures its own\nproviders (a small health probe plus a code-verifiable quality battery,\nsee `GET /v1/ranking`) and, when you request the `auto` model or one of\nits variants, routes you to the best currently-healthy candidate --\nretrying the next one automatically on failure.\n\n## Authentication\n\nEvery endpoint except `GET /health` requires an API key, accepted through\n**either** header (if both are present, `X-API-Key` wins):\n\n- `X-API-Key: <key>`\n- `Authorization: Bearer <key>` -- what any OpenAI SDK sends automatically\n  when you set its `api_key` parameter, so the \"just change `base_url`\"\n  promise holds without extra configuration.\n\n## Rate limiting\n\nEach key is limited to a fixed number of requests per minute (see the\n`LIMITE_POR_MINUTO` deployment variable). Exceeding it returns `429`.\n\n**Response headers** (non-streaming only -- see below):\n- `X-Ruta-Usada`: `<provider>/<model_id>` of the route that actually served the request\n- `X-Tier`: `gratis` or `pago`\n- `X-Intentos`: how many routes were tried before responding (or before giving up)\n\n**Streaming responses never carry these three headers.** HTTP headers are\nsent before the response body, and at that point the failover chain has\nnot been resolved yet -- the gateway does not yet know which route will\nend up serving the request. Paid usage is still recorded even while\nstreaming (check `GET /v1/uso`), and the `model` field inside the\nstream's own chunks says which model answered.\n\n**Reasoning stripping.** Several free (and paid) models leak their\nchain-of-thought inside `content`, wrapped in `<think>`, `<thinking>` or\n`<reasoning>` tags. By default the gateway strips that from `content` and\nreturns it separately as `x_razonamiento`, a top-level field any OpenAI\nSDK ignores harmlessly -- only present in non-streaming responses, and\nonly when something was actually stripped. Set `x_crudo: true` to disable\nstripping entirely.",
+        "description": "llm-libre is a gateway that puts several LLM providers' **free** tiers\nbehind a single [OpenAI-compatible](https://platform.openai.com/docs/api-reference/chat)\ncontract. Any OpenAI SDK works against it unmodified: point `base_url` at\nthis service and pass one of the configured API keys, nothing else changes.\n\n## Why \"auto\" instead of picking a model yourself\n\nFree model catalogs churn: ids get renamed or removed, and no single\nprovider's free tier is reliably the best one. llm-libre measures its own\nproviders (a small health probe plus a code-verifiable quality battery,\nsee `GET /v1/ranking`) and, when you request the `auto` model or one of\nits variants, routes you to the best currently-healthy candidate --\nretrying the next one automatically on failure.\n\n## Authentication\n\nEvery endpoint except `GET /health` requires an API key, accepted through\n**either** header (if both are present, `X-API-Key` wins):\n\n- `X-API-Key: <key>`\n- `Authorization: Bearer <key>` -- what any OpenAI SDK sends automatically\n  when you set its `api_key` parameter, so the \"just change `base_url`\"\n  promise holds without extra configuration.\n\n## Rate limiting\n\nEach key is limited to a fixed number of requests per minute (see the\n`PER_MINUTE_LIMIT` deployment variable). Exceeding it returns `429`.\n\n**Response headers** (non-streaming only -- see below):\n- `X-Route-Used`: `<provider>/<model_id>` of the route that actually served the request\n- `X-Tier`: `free` or `paid`\n- `X-Attempts`: how many routes were tried before responding (or before giving up)\n\n**Streaming responses never carry these three headers.** HTTP headers are\nsent before the response body, and at that point the failover chain has\nnot been resolved yet -- the gateway does not yet know which route will\nend up serving the request. Paid usage is still recorded even while\nstreaming (check `GET /v1/usage`), and the `model` field inside the\nstream's own chunks says which model answered.\n\n**Reasoning stripping.** Several free (and paid) models leak their\nchain-of-thought inside `content`, wrapped in `<think>`, `<thinking>` or\n`<reasoning>` tags. By default the gateway strips that from `content` and\nreturns it separately as `x_reasoning`, a top-level field any OpenAI\nSDK ignores harmlessly -- only present in non-streaming responses, and\nonly when something was actually stripped. Set `x_raw: true` to disable\nstripping entirely.",
         "operationId": "completions_v1_chat_completions_post",
         "parameters": [
           {
@@ -51,7 +51,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Success. Non-streaming: the upstream provider's chat completion, passed through (plus `x_razonamiento` if something was stripped). Streaming: Server-Sent Events.",
+            "description": "Success. Non-streaming: the upstream provider's chat completion, passed through (plus `x_reasoning` if something was stripped). Streaming: Server-Sent Events.",
             "content": {
               "application/json": {
                 "schema": {},
@@ -102,7 +102,7 @@
                         "completion_tokens": 9,
                         "total_tokens": 21
                       },
-                      "x_razonamiento": "The user asked for 2+2, which is 4."
+                      "x_reasoning": "The user asked for 2+2, which is 4."
                     }
                   }
                 }
@@ -115,7 +115,7 @@
               }
             },
             "headers": {
-              "X-Ruta-Usada": {
+              "X-Route-Used": {
                 "schema": {
                   "type": "string"
                 },
@@ -126,14 +126,14 @@
                 "schema": {
                   "type": "string",
                   "enum": [
-                    "gratis",
-                    "pago"
+                    "free",
+                    "paid"
                   ]
                 },
-                "example": "gratis",
+                "example": "free",
                 "description": "Non-streaming only."
               },
-              "X-Intentos": {
+              "X-Attempts": {
                 "schema": {
                   "type": "integer"
                 },
@@ -143,7 +143,7 @@
             }
           },
           "400": {
-            "description": "The request cannot be satisfied -- either no route could ever match what was asked (an impossible capability/context combination), or the request itself is malformed in a way this gateway checks for (an unrecognized `auto:<suffix>` alias, or `model` / `x_requiere` / `x_min_contexto` sent with the wrong type -- these three always answer with the same `{message, campo, valor_recibido}` shape).",
+            "description": "The request cannot be satisfied -- either no route could ever match what was asked (an impossible capability/context combination), or the request itself is malformed in a way this gateway checks for (an unrecognized `auto:<suffix>` alias, or `model` / `x_requires` / `x_min_context` sent with the wrong type -- these three always answer with the same `{message, field, received_value}` shape).",
             "content": {
               "application/json": {
                 "examples": {
@@ -151,15 +151,15 @@
                     "summary": "No route can ever satisfy this combination",
                     "value": {
                       "detail": {
-                        "message": "ninguna ruta cumple lo pedido",
-                        "pedido": {
-                          "requiere_tools": false,
-                          "requiere_vision": true,
-                          "min_contexto": 0,
-                          "perfil": "balanceado",
-                          "permitir_pago": true
+                        "message": "no route satisfies the request",
+                        "request": {
+                          "needs_tools": false,
+                          "needs_vision": true,
+                          "min_context": 0,
+                          "profile": "balanced",
+                          "allow_paid": true
                         },
-                        "rutas_activas": 18
+                        "active_routes": 18
                       }
                     }
                   },
@@ -167,34 +167,34 @@
                     "summary": "'auto:<typo>' -- not silently treated as plain 'auto'",
                     "value": {
                       "detail": {
-                        "message": "alias de modelo desconocido: 'auto:tolls'",
-                        "sugerencias": [
+                        "message": "unknown model alias: 'auto:tolls'",
+                        "suggestions": [
                           "auto",
-                          "auto:rapido",
-                          "auto:potente",
+                          "auto:fast",
+                          "auto:strong",
                           "auto:tools",
                           "auto:vision"
                         ]
                       }
                     }
                   },
-                  "invalid_x_min_contexto": {
-                    "summary": "x_min_contexto is not a number",
+                  "invalid_x_min_context": {
+                    "summary": "x_min_context is not a number",
                     "value": {
                       "detail": {
-                        "message": "x_min_contexto debe ser un numero entero",
-                        "campo": "x_min_contexto",
-                        "valor_recibido": "cien mil"
+                        "message": "x_min_context must be an integer",
+                        "field": "x_min_context",
+                        "received_value": "a hundred thousand"
                       }
                     }
                   },
-                  "invalid_x_requiere": {
-                    "summary": "x_requiere is neither a string nor a list of strings",
+                  "invalid_x_requires": {
+                    "summary": "x_requires is neither a string nor a list of strings",
                     "value": {
                       "detail": {
-                        "message": "x_requiere debe ser un string o una lista de strings",
-                        "campo": "x_requiere",
-                        "valor_recibido": 5
+                        "message": "x_requires must be a string or a list of strings",
+                        "field": "x_requires",
+                        "received_value": 5
                       }
                     }
                   },
@@ -202,9 +202,9 @@
                     "summary": "model is not a string",
                     "value": {
                       "detail": {
-                        "message": "model debe ser un string",
-                        "campo": "model",
-                        "valor_recibido": 5
+                        "message": "model must be a string",
+                        "field": "model",
+                        "received_value": 5
                       }
                     }
                   }
@@ -217,7 +217,7 @@
             "content": {
               "application/json": {
                 "example": {
-                  "detail": "llave invalida"
+                  "detail": "invalid api key"
                 }
               }
             }
@@ -228,8 +228,8 @@
               "application/json": {
                 "example": {
                   "detail": {
-                    "message": "el modelo 'poolside/laguna-m.1:free' ya no existe",
-                    "sugerencias": [
+                    "message": "the model 'poolside/laguna-m.1:free' no longer exists",
+                    "suggestions": [
                       "poolside/laguna-s-2.1:free",
                       "poolside/laguna-xs-2.1:free"
                     ]
@@ -243,13 +243,13 @@
             "content": {
               "application/json": {
                 "example": {
-                  "detail": "demasiadas peticiones para esta llave"
+                  "detail": "too many requests for this key"
                 }
               }
             }
           },
           "503": {
-            "description": "Candidate routes exist but none can serve this request right now: they are all down or cooling down (see `GET /v1/ranking` for `en_cooldown_hasta` per route and `GET /health`), or the calling key already spent its daily paid allowance.",
+            "description": "Candidate routes exist but none can serve this request right now: they are all down or cooling down (see `GET /v1/ranking` for `cooldown_until` per route and `GET /health`), or the calling key already spent its daily paid allowance.",
             "content": {
               "application/json": {
                 "examples": {
@@ -257,17 +257,17 @@
                     "summary": "Every candidate is down or in cooldown (raised before any attempt)",
                     "value": {
                       "detail": {
-                        "message": "todas las rutas que podrian servir estan caidas o en cooldown",
-                        "pedido": {
-                          "requiere_tools": false,
-                          "requiere_vision": false,
-                          "min_contexto": 0,
-                          "perfil": "balanceado",
-                          "permitir_pago": true
+                        "message": "every route that could serve is down or in cooldown",
+                        "request": {
+                          "needs_tools": false,
+                          "needs_vision": false,
+                          "min_context": 0,
+                          "profile": "balanced",
+                          "allow_paid": true
                         },
-                        "rutas_compatibles": 18,
-                        "proxima_liberacion": 1755400300.0,
-                        "tope_pago_alcanzado": false
+                        "compatible_routes": 18,
+                        "next_release": 1755400300.0,
+                        "paid_cap_reached": false
                       }
                     }
                   },
@@ -275,26 +275,26 @@
                     "summary": "Free routes exhausted and the key's daily paid allowance is spent",
                     "value": {
                       "detail": {
-                        "message": "todas las rutas que podrian servir estan caidas o en cooldown",
-                        "pedido": {
-                          "requiere_tools": false,
-                          "requiere_vision": false,
-                          "min_contexto": 0,
-                          "perfil": "balanceado",
-                          "permitir_pago": true
+                        "message": "every route that could serve is down or in cooldown",
+                        "request": {
+                          "needs_tools": false,
+                          "needs_vision": false,
+                          "min_context": 0,
+                          "profile": "balanced",
+                          "allow_paid": true
                         },
-                        "rutas_compatibles": 18,
-                        "tope_pago_alcanzado": true
+                        "compatible_routes": 18,
+                        "paid_cap_reached": true
                       }
                     }
                   },
                   "chain_exhausted_after_attempts": {
-                    "summary": "Every candidate was actually attempted and each one failed just now (not pre-filtered by cooldown) -- this shape has no `detail` key, and DOES carry an X-Intentos header (see below)",
+                    "summary": "Every candidate was actually attempted and each one failed just now (not pre-filtered by cooldown) -- this shape has no `detail` key, and DOES carry an X-Attempts header (see below)",
                     "value": {
                       "error": {
-                        "message": "sin rutas disponibles",
-                        "detalle": "HTTP 500",
-                        "proxima_liberacion": 1755400060.0
+                        "message": "no routes available",
+                        "detail": "HTTP 500",
+                        "next_release": 1755400060.0
                       }
                     }
                   }
@@ -302,12 +302,12 @@
               }
             },
             "headers": {
-              "X-Intentos": {
+              "X-Attempts": {
                 "schema": {
                   "type": "integer"
                 },
                 "example": 3,
-                "description": "Present ONLY on the 'chain exhausted after real attempts' shape (`chain_exhausted_after_attempts` above) -- absent on the 'pre-filtered, nothing was attempted' shape (`all_down_or_cooling` / `paid_allowance_spent`), which is raised before any route is tried. Never accompanied by `X-Ruta-Usada` or `X-Tier` on a 503: those two only appear once a route actually succeeds."
+                "description": "Present ONLY on the 'chain exhausted after real attempts' shape (`chain_exhausted_after_attempts` above) -- absent on the 'pre-filtered, nothing was attempted' shape (`all_down_or_cooling` / `paid_allowance_spent`), which is raised before any route is tried. Never accompanied by `X-Route-Used` or `X-Tier` on a 503: those two only appear once a route actually succeeds."
               }
             }
           }
@@ -321,12 +321,12 @@
                 "required": [
                   "messages"
                 ],
-                "description": "This endpoint is a pure passthrough (see llm_libre.cliente.armar_peticion): the request is read as raw JSON, never validated against a strict schema, and forwarded to the chosen provider almost verbatim -- only the gateway extensions below (`x_*`) are stripped, and `model` is rewritten to the provider's real id. Any other field, including standard OpenAI parameters not listed here (`temperature`, `top_p`, `max_tokens`, `response_format`, `seed`, `logprobs`, or any field a given upstream provider defines on its own) still reaches the provider unchanged. Note `model` is NOT required: a request with no `model` field at all defaults cleanly to the `auto` alias and returns `200`, exactly like sending `\"model\": \"auto\"` explicitly.",
+                "description": "This endpoint is a pure passthrough (see llm_libre.client.build_request): the request is read as raw JSON, never validated against a strict schema, and forwarded to the chosen provider almost verbatim -- only the gateway extensions below (`x_*`) are stripped, and `model` is rewritten to the provider's real id. Any other field, including standard OpenAI parameters not listed here (`temperature`, `top_p`, `max_tokens`, `response_format`, `seed`, `logprobs`, or any field a given upstream provider defines on its own) still reaches the provider unchanged. Note `model` is NOT required: a request with no `model` field at all defaults cleanly to the `auto` alias and returns `200`, exactly like sending `\"model\": \"auto\"` explicitly.",
                 "properties": {
                   "model": {
                     "type": "string",
                     "example": "auto",
-                    "description": "Either a real route id -- as listed by `GET /v1/models`, e.g. `nvidia/nemotron-3-super-120b-a12b:free` -- which fails over between every provider that serves that exact model; or one of the virtual aliases: `auto` (balanced profile), `auto:rapido` (fast profile: latency weighs more), `auto:potente` (powerful profile: measured quality weighs more), `auto:tools` (balanced + requires function-calling support), `auto:vision` (balanced + requires image-input support). `auto:balanceado` also works (redundant with plain `auto`) but is not listed separately in `GET /v1/models`. An alias fails over across the gateway's whole ranked candidate list, paid fallback included if allowed. An `auto:` prefix with anything else after it (e.g. a typo like `auto:tolls`) returns `400` naming the unrecognized alias, instead of silently falling back to plain `auto`. Omitting `model` entirely (or sending `null`) defaults to `auto`; sending it as anything other than a string (a number, a boolean, an array, an object) returns `400` naming this field."
+                    "description": "Either a real route id -- as listed by `GET /v1/models`, e.g. `nvidia/nemotron-3-super-120b-a12b:free` -- which fails over between every provider that serves that exact model; or one of the virtual aliases: `auto` (balanced profile), `auto:fast` (fast profile: latency weighs more), `auto:strong` (powerful profile: measured quality weighs more), `auto:tools` (balanced + requires function-calling support), `auto:vision` (balanced + requires image-input support). `auto:balanced` also works (redundant with plain `auto`) but is not listed separately in `GET /v1/models`. An alias fails over across the gateway's whole ranked candidate list, paid fallback included if allowed. An `auto:` prefix with anything else after it (e.g. a typo like `auto:tolls`) returns `400` naming the unrecognized alias, instead of silently falling back to plain `auto`. Omitting `model` entirely (or sending `null`) defaults to `auto`; sending it as anything other than a string (a number, a boolean, an array, an object) returns `400` naming this field."
                   },
                   "messages": {
                     "type": "array",
@@ -338,14 +338,14 @@
                   "stream": {
                     "type": "boolean",
                     "default": false,
-                    "description": "If true, the response is Server-Sent Events (`text/event-stream`), OpenAI-shaped chunks ending in `data: [DONE]`. IMPORTANT: a streaming response never carries the `X-Ruta-Usada` / `X-Tier` / `X-Intentos` headers -- see the endpoint description."
+                    "description": "If true, the response is Server-Sent Events (`text/event-stream`), OpenAI-shaped chunks ending in `data: [DONE]`. IMPORTANT: a streaming response never carries the `X-Route-Used` / `X-Tier` / `X-Attempts` headers -- see the endpoint description."
                   },
                   "tools": {
                     "type": "array",
                     "items": {
                       "type": "object"
                     },
-                    "description": "Standard OpenAI tools array. Sending a non-empty `tools` array makes function-calling support REQUIRED for this request, exactly like `x_requiere: [\"tools\"]` or the `auto:tools` alias -- you do not need to also set those; the gateway checks for the field's presence regardless of which model alias you used."
+                    "description": "Standard OpenAI tools array. Sending a non-empty `tools` array makes function-calling support REQUIRED for this request, exactly like `x_requires: [\"tools\"]` or the `auto:tools` alias -- you do not need to also set those; the gateway checks for the field's presence regardless of which model alias you used."
                   },
                   "tool_choice": {
                     "description": "Standard OpenAI tool_choice, forwarded as-is."
@@ -358,7 +358,7 @@
                     "type": "integer",
                     "description": "Forwarded as-is."
                   },
-                  "x_requiere": {
+                  "x_requires": {
                     "oneOf": [
                       {
                         "type": "array",
@@ -383,20 +383,20 @@
                     ],
                     "description": "Gateway extension, interpreted here and never forwarded upstream. Capabilities the chosen route MUST advertise. Only `\"tools\"` and `\"vision\"` currently have any effect; other *string* values are accepted but ignored. Equivalent to (and combinable with) the `auto:tools` / `auto:vision` aliases. A single bare string (`\"tools\"`, not `[\"tools\"]`) is also accepted, as a convenience, and treated the same as a one-element list. Anything that is neither a string nor a list of strings (a number, a boolean, a list containing a non-string) returns `400` naming this field, instead of a generic server error."
                   },
-                  "x_min_contexto": {
+                  "x_min_context": {
                     "type": "integer",
                     "example": 100000,
                     "description": "Gateway extension, interpreted here and never forwarded upstream. Minimum context window, in tokens, a route must advertise to be considered. `0` or omitted means no minimum. A value that cannot be read as an integer (e.g. a non-numeric string) returns `400` naming this field, instead of a generic server error."
                   },
-                  "x_permitir_pago": {
+                  "x_allow_paid": {
                     "type": "boolean",
                     "default": true,
-                    "description": "Gateway extension, interpreted here and never forwarded upstream. Defaults to **true**: if every free route is down or exhausted, the gateway is allowed to fall back to the paid route (MiniMax) for this request, counted against the calling key's daily allowance (see `GET /v1/uso`) and always reported via `X-Tier: pago`. Set to `false` to forbid that fallback for this one request -- you then get `503` instead of an unexpected charge."
+                    "description": "Gateway extension, interpreted here and never forwarded upstream. Defaults to **true**: if every free route is down or exhausted, the gateway is allowed to fall back to the paid route (MiniMax) for this request, counted against the calling key's daily allowance (see `GET /v1/usage`) and always reported via `X-Tier: paid`. Set to `false` to forbid that fallback for this one request -- you then get `503` instead of an unexpected charge."
                   },
-                  "x_crudo": {
+                  "x_raw": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Gateway extension, interpreted here and never forwarded upstream. Disables reasoning-tag stripping (`<think>`/`<thinking>`/`<reasoning>`): `content` comes back exactly as the provider sent it, and `x_razonamiento` is never added. Useful for a streaming client, since `x_razonamiento` is never available in streaming responses regardless of this flag."
+                    "description": "Gateway extension, interpreted here and never forwarded upstream. Disables reasoning-tag stripping (`<think>`/`<thinking>`/`<reasoning>`): `content` comes back exactly as the provider sent it, and `x_reasoning` is never added. Useful for a streaming client, since `x_reasoning` is never available in streaming responses regardless of this flag."
                   }
                 },
                 "additionalProperties": true
@@ -429,7 +429,7 @@
                 "streaming": {
                   "summary": "Streaming (Server-Sent Events)",
                   "value": {
-                    "model": "auto:rapido",
+                    "model": "auto:fast",
                     "stream": true,
                     "messages": [
                       {
@@ -475,7 +475,7 @@
                   "summary": "Never fall back to the paid route for this request",
                   "value": {
                     "model": "auto",
-                    "x_permitir_pago": false,
+                    "x_allow_paid": false,
                     "messages": [
                       {
                         "role": "user",
@@ -504,8 +504,8 @@
           "Chat"
         ],
         "summary": "List the normalized model catalog",
-        "description": "The OpenAI-shaped catalog (`GET /models` format, so OpenAI SDK tooling that lists models works unmodified) plus the gateway's own `auto*` aliases. `owned_by` is the provider id for a real route, or `\"llm-libre\"` for an alias. The number of REAL entries here always equals `GET /health`'s `rutas_activas` for that same moment -- the total returned here is that count plus the 5 fixed `auto*` aliases; cross-checking the two is a cheap sanity check that nothing is being double-counted or silently dropped.",
-        "operationId": "modelos_v1_models_get",
+        "description": "The OpenAI-shaped catalog (`GET /models` format, so OpenAI SDK tooling that lists models works unmodified) plus the gateway's own `auto*` aliases. `owned_by` is the provider id for a real route, or `\"llm-libre\"` for an alias. The number of REAL entries here always equals `GET /health`'s `active_routes` for that same moment -- the total returned here is that count plus the 5 fixed `auto*` aliases; cross-checking the two is a cheap sanity check that nothing is being double-counted or silently dropped.",
+        "operationId": "models_v1_models_get",
         "parameters": [
           {
             "name": "x-api-key",
@@ -575,12 +575,12 @@
                       "owned_by": "llm-libre"
                     },
                     {
-                      "id": "auto:rapido",
+                      "id": "auto:fast",
                       "object": "model",
                       "owned_by": "llm-libre"
                     },
                     {
-                      "id": "auto:potente",
+                      "id": "auto:strong",
                       "object": "model",
                       "owned_by": "llm-libre"
                     },
@@ -619,7 +619,7 @@
           "Diagnostics"
         ],
         "summary": "Per-route ranking (not part of the OpenAI contract) -- the operator's main tool to explain a routing decision",
-        "description": "One row per active route, with every component that feeds its score broken out, **sorted with the exact same key the router uses** (`(en_cooldown, tier == \"pago\", prioridad, unmeasured, -puntaje)`), not by score alone -- so the top row here is genuinely the route the router would try first right now, matching `X-Ruta-Usada` on the next request. A route currently in cooldown sorts to the bottom of the table even with a perfect score, because the router would not pick it at this instant either.\n\n`calidad` is `null` and `calidad_asumida` holds the neutral value instead whenever `calidad_medida` is `false`: a route that has never been through the quality battery is not silently shown as if a 0.6 had been measured.\n\n`en_cooldown_hasta` is a **raw Unix timestamp in seconds** (`0` means not in cooldown) -- unlike `ultima_sonda` / `ultima_sonda_calidad`, which are ISO-8601 strings (or `null`).\n\n`ttft_p50_ms` (time to first token) is only ever measured by streaming traffic and probes; `latencia_p50_ms` is the full round-trip and does not feed the score, only diagnostics -- the two are different magnitudes, do not average them together.\n\nThe example rows below are illustrative (scores, timestamps and the exact set of routes drift as the live catalog and its measurements change) -- they use real route ids to stay concrete, not a captured live snapshot.",
+        "description": "One row per active route, with every component that feeds its score broken out, **sorted with the exact same key the router uses** (`(in_cooldown, tier == \"paid\", priority, unmeasured, -score)`), not by score alone -- so the top row here is genuinely the route the router would try first right now, matching `X-Route-Used` on the next request. A route currently in cooldown sorts to the bottom of the table even with a perfect score, because the router would not pick it at this instant either.\n\n`quality` is `null` and `quality_assumed` holds the neutral value instead whenever `quality_measured` is `false`: a route that has never been through the quality battery is not silently shown as if a 0.6 had been measured.\n\n`cooldown_until` is a **raw Unix timestamp in seconds** (`0` means not in cooldown) -- unlike `last_probe` / `last_quality_probe`, which are ISO-8601 strings (or `null`).\n\n`ttft_p50_ms` (time to first token) is only ever measured by streaming traffic and probes; `latency_p50_ms` is the full round-trip and does not feed the score, only diagnostics -- the two are different magnitudes, do not average them together.\n\nThe example rows below are illustrative (scores, timestamps and the exact set of routes drift as the live catalog and its measurements change) -- they use real route ids to stay concrete, not a captured live snapshot.",
         "operationId": "ranking_v1_ranking_get",
         "parameters": [
           {
@@ -662,70 +662,70 @@
               "application/json": {
                 "schema": {},
                 "example": {
-                  "rutas": [
+                  "routes": [
                     {
-                      "clave": "chatgpt/gpt-5-3-mini",
-                      "tier": "gratis",
-                      "prioridad": 0,
-                      "puntaje": 0.7912,
-                      "calidad": 0.8,
-                      "calidad_medida": true,
-                      "ultima_sonda_calidad": "2026-08-17T03:12:04Z",
-                      "ultima_sonda": "2026-08-17T08:00:11Z",
-                      "confiabilidad": 0.98,
+                      "key": "chatgpt/gpt-5-3-mini",
+                      "tier": "free",
+                      "priority": 0,
+                      "score": 0.7912,
+                      "quality": 0.8,
+                      "quality_measured": true,
+                      "last_quality_probe": "2026-08-17T03:12:04Z",
+                      "last_probe": "2026-08-17T08:00:11Z",
+                      "reliability": 0.98,
                       "ttft_p50_ms": 900.0,
-                      "latencia_p50_ms": 4500.0,
-                      "en_cooldown_hasta": 0.0,
+                      "latency_p50_ms": 4500.0,
+                      "cooldown_until": 0.0,
                       "tools": false,
                       "vision": false,
-                      "contexto": 128000
+                      "context": 128000
                     },
                     {
-                      "clave": "kilo/cohere/north-mini-code:free",
-                      "tier": "gratis",
-                      "prioridad": 1,
-                      "puntaje": 0.842,
-                      "calidad": 0.8,
-                      "calidad_medida": true,
-                      "ultima_sonda_calidad": "2026-08-17T03:14:51Z",
-                      "ultima_sonda": "2026-08-17T08:01:02Z",
-                      "confiabilidad": 1.0,
+                      "key": "kilo/cohere/north-mini-code:free",
+                      "tier": "free",
+                      "priority": 1,
+                      "score": 0.842,
+                      "quality": 0.8,
+                      "quality_measured": true,
+                      "last_quality_probe": "2026-08-17T03:14:51Z",
+                      "last_probe": "2026-08-17T08:01:02Z",
+                      "reliability": 1.0,
                       "ttft_p50_ms": 650.0,
-                      "latencia_p50_ms": 2100.0,
-                      "en_cooldown_hasta": 0.0,
+                      "latency_p50_ms": 2100.0,
+                      "cooldown_until": 0.0,
                       "tools": true,
                       "vision": false,
-                      "contexto": 128000
+                      "context": 128000
                     },
                     {
-                      "clave": "kilo/poolside/laguna-s-2.1:free",
-                      "tier": "gratis",
-                      "prioridad": 1,
-                      "puntaje": 0.5015,
-                      "calidad": 0.6,
-                      "calidad_medida": false,
-                      "calidad_asumida": 0.6,
-                      "ultima_sonda": "2026-08-17T08:02:00Z",
-                      "confiabilidad": 0.8,
+                      "key": "kilo/poolside/laguna-s-2.1:free",
+                      "tier": "free",
+                      "priority": 1,
+                      "score": 0.5015,
+                      "quality": 0.6,
+                      "quality_measured": false,
+                      "quality_assumed": 0.6,
+                      "last_probe": "2026-08-17T08:02:00Z",
+                      "reliability": 0.8,
                       "ttft_p50_ms": 1500.0,
-                      "en_cooldown_hasta": 1755400930.0,
+                      "cooldown_until": 1755400930.0,
                       "tools": false,
                       "vision": false,
-                      "contexto": 65536
+                      "context": 65536
                     },
                     {
-                      "clave": "minimax/MiniMax-M3",
-                      "tier": "pago",
-                      "prioridad": 2,
-                      "puntaje": 0.95,
-                      "calidad": 0.9,
-                      "calidad_medida": true,
-                      "confiabilidad": 0.8,
+                      "key": "minimax/MiniMax-M3",
+                      "tier": "paid",
+                      "priority": 2,
+                      "score": 0.95,
+                      "quality": 0.9,
+                      "quality_measured": true,
+                      "reliability": 0.8,
                       "ttft_p50_ms": 1500.0,
-                      "en_cooldown_hasta": 0.0,
+                      "cooldown_until": 0.0,
                       "tools": true,
                       "vision": false,
-                      "contexto": 128000
+                      "context": 128000
                     }
                   ]
                 }
@@ -746,14 +746,14 @@
         ]
       }
     },
-    "/v1/uso": {
+    "/v1/usage": {
       "get": {
         "tags": [
           "Diagnostics"
         ],
         "summary": "Today's paid-usage counter for the calling key",
-        "description": "How many requests the calling key spent against the paid fallback (MiniMax) today (UTC), against its daily allowance (`TOPE_PAGO_DIARIO`). Counts every **billable** attempt, not only successful ones -- a `200` from the paid provider is billable whether or not it contained a usable answer, and streaming counts exactly once per request, not once per chunk. This is the only place a streaming client can see whether the paid fallback served (or was attempted for) its last request, since streaming responses do not carry `X-Tier`.",
-        "operationId": "uso_v1_uso_get",
+        "description": "How many requests the calling key spent against the paid fallback (MiniMax) today (UTC), against its daily allowance (`DAILY_PAID_CAP`). Counts every **billable** attempt, not only successful ones -- a `200` from the paid provider is billable whether or not it contained a usable answer, and streaming counts exactly once per request, not once per chunk. This is the only place a streaming client can see whether the paid fallback served (or was attempted for) its last request, since streaming responses do not carry `X-Tier`.",
+        "operationId": "usage_v1_usage_get",
         "parameters": [
           {
             "name": "x-api-key",
@@ -795,9 +795,9 @@
               "application/json": {
                 "schema": {},
                 "example": {
-                  "dia": "2026-08-17",
-                  "pago_hoy": 0,
-                  "tope": 200
+                  "day": "2026-08-17",
+                  "paid_today": 0,
+                  "cap": 200
                 }
               }
             }
@@ -822,7 +822,7 @@
           "Health"
         ],
         "summary": "Service health -- no API key required",
-        "description": "Honest by design (see the design spec, §6): this does not just check that the process is up, it checks whether there is a route that could actually serve a request right now. Meant to be wired as the deployment's health check (Coolify's, in production).\n\n- **`ok`** (HTTP `200`) -- at least one **free** route is alive: not in cooldown, and with positive evidence that it serves (a recent real success, a recent successful health probe, or no telemetry at all yet -- a freshly-discovered route is not born dead). Normal.\n- **`degradado`** (HTTP `503`) -- no free route is alive, but the paid route is. Every request is now either failing or being billed; find out why the free tier is down (`GET /v1/ranking`, provider status) before the daily paid allowance runs out for every key.\n- **`caido`** (HTTP `503`) -- nothing is alive. `POST /v1/chat/completions` will return `503` for every request.\n\nA route needs **two consecutive failed health probes** (no success in between) to be counted as dead here -- a single failed probe is not enough, to avoid one transient blip (made more likely by the fact that a client's own traffic can indirectly trigger on-demand probes) flipping this to `caido` and restarting the container over nothing. A real outage still fails its second probe just as fast as its first, so genuine detection is not slowed down.",
+        "description": "Honest by design (see the design spec, §6): this does not just check that the process is up, it checks whether there is a route that could actually serve a request right now. Meant to be wired as the deployment's health check (Coolify's, in production).\n\n- **`ok`** (HTTP `200`) -- at least one **free** route is alive: not in cooldown, and with positive evidence that it serves (a recent real success, a recent successful health probe, or no telemetry at all yet -- a freshly-discovered route is not born dead). Normal.\n- **`degraded`** (HTTP `503`) -- no free route is alive, but the paid route is. Every request is now either failing or being billed; find out why the free tier is down (`GET /v1/ranking`, provider status) before the daily paid allowance runs out for every key.\n- **`down`** (HTTP `503`) -- nothing is alive. `POST /v1/chat/completions` will return `503` for every request.\n\nA route needs **two consecutive failed health probes** (no success in between) to be counted as dead here -- a single failed probe is not enough, to avoid one transient blip (made more likely by the fact that a client's own traffic can indirectly trigger on-demand probes) flipping this to `down` and restarting the container over nothing. A real outage still fails its second probe just as fast as its first, so genuine detection is not slowed down.",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -831,35 +831,35 @@
               "application/json": {
                 "schema": {},
                 "example": {
-                  "estado": "ok",
-                  "rutas_activas": 18,
-                  "rutas_libres": 17,
-                  "gratis_libres": 17
+                  "status": "ok",
+                  "active_routes": 18,
+                  "available_routes": 17,
+                  "free_available": 17
                 }
               }
             }
           },
           "503": {
-            "description": "`degradado` (only the paid route is alive) or `caido` (nothing is alive).",
+            "description": "`degraded` (only the paid route is alive) or `down` (nothing is alive).",
             "content": {
               "application/json": {
                 "examples": {
-                  "degradado": {
+                  "degraded": {
                     "summary": "Only the paid route is alive",
                     "value": {
-                      "estado": "degradado",
-                      "rutas_activas": 18,
-                      "rutas_libres": 1,
-                      "gratis_libres": 0
+                      "status": "degraded",
+                      "active_routes": 18,
+                      "available_routes": 1,
+                      "free_available": 0
                     }
                   },
-                  "caido": {
+                  "down": {
                     "summary": "Nothing is alive",
                     "value": {
-                      "estado": "caido",
-                      "rutas_activas": 18,
-                      "rutas_libres": 0,
-                      "gratis_libres": 0
+                      "status": "down",
+                      "active_routes": 18,
+                      "available_routes": 0,
+                      "free_available": 0
                     }
                   }
                 }

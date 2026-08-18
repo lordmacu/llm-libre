@@ -14,18 +14,18 @@ sets these in its own UI, one variable at a time, precisely so there is no
 | `MINIMAX_API_KEY` | *(unset)* | Key for the paid fallback provider. Without it, the paid escape hatch simply cannot be used (every attempt against it fails); free-tier routing is unaffected. |
 | `HEALTH_PROBE_HOURS` | `5` | Hours between health-probe cycles for every free route. **Keep this well under 24h** -- see the callout in [`operations-runbook.md`](operations-runbook.md#get-health-the-three-states-and-what-each-one-implies) for why a value at or near 24h eventually makes `/health` misreport low-traffic routes as dead, unrelated to whether they actually are. |
 | `QUALITY_PROBE_EVERY_N_CYCLES` | `5` | How many health cycles pass between quality-battery runs (so, by default, roughly once a day). See the runbook for what this costs in free-tier quota. |
-| `DAILY_PAID_CAP` | `200` | Daily request allowance against the paid fallback, per key. Counted in requests, not tokens or money -- see `GET /v1/uso`. |
+| `DAILY_PAID_CAP` | `200` | Daily request allowance against the paid fallback, per key. Counted in requests, not tokens or money -- see `GET /v1/usage`. |
 | `PER_MINUTE_LIMIT` | `60` | Per-key rate limit, requests per minute. |
-| `RUTA_DB` | `/datos/llm-libre.sqlite3` | Path to the SQLite file (catalog + all telemetry). See the runbook for why this needs to sit on a persistent volume. |
+| `DB_PATH` | `/datos/llm-libre.sqlite3` | Path to the SQLite file (catalog + all telemetry). See the runbook for why this needs to sit on a persistent volume. |
 | `PROVIDERS_YAML` | `providers.yaml` | Path to the provider registry file. |
 
 ## `KILO_API_KEY`: what "optional" actually means
 
-Verified directly against `proveedores.cargar` and `cliente.armar_peticion`:
+Verified directly against `providers.load` and `client.build_request`:
 **unset, set to `""`, and set to whitespace-only (`"   "`) are all exactly
-equivalent** -- all three normalize to `Proveedor.clave == ""`
-(`cargar` does `(entorno.get(clave_env, "") or "").strip()`), and
-`armar_peticion` only adds an `Authorization` header when `p.clave.strip()`
+equivalent** -- all three normalize to `Provider.api_key == ""`
+(`load` does `(env.get(api_key_env, "") or "").strip()`), and
+`build_request` only adds an `Authorization` header when `p.api_key.strip()`
 is truthy. So, contrary to an earlier version of this doc: there is no
 footgun in leaving `KILO_API_KEY` blank versus not creating the variable
 at all in Coolify's UI -- both produce a request with no `Authorization`
