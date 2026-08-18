@@ -490,7 +490,11 @@ class Proxy:
                 if not es_sonda:
                     self._limpiar_castigo(ruta.clave)
                 if proveedor.emula_tools:
-                    datos = _emu.detect_and_convert(datos)
+                    # `cuerpo` es el pedido del CLIENTE, con su `tools` intacto:
+                    # armar_peticion lo saca solo de la copia que viaja al
+                    # proveedor. Ese array es el allow-list que evita convertir
+                    # una respuesta de texto legitima en un tool call inventado.
+                    datos = _emu.detect_and_convert(datos, cuerpo.get("tools"))
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
@@ -592,41 +596,65 @@ class Proxy:
                         en_intento_facturable(ruta)
                     rec = RecortadorStreamCompuesto(desenvolver_canvas=proveedor.desenvuelve_canvas)
 
-                    # Tool-call emulation: buffer the entire response before deciding
-                    # whether it is a tool call (detection requires the full JSON text).
-                    if proveedor.emula_tools and cuerpo.get("tools"):
-                        buffered = ""
-                        async for linea in resp.aiter_lines():
-                            if not linea.startswith("data:"):
+                    # Emulacion de tools en streaming. Detectar un tool call exige
+                    # el TEXTO COMPLETO (el JSON llega partido en deltas), asi que
+                    # este camino junta la respuesta entera y recien ahi decide:
+                    # o la emite como un chunk de tool_calls, o la suelta como
+                    # texto. El precio es perder el streaming incremental para
+                    # estas rutas -- inevitable, y solo cuando el cliente pidio
+                    # tools contra un proveedor que no las soporta nativamente.
+                    #
+                    # `nombres_tools` es el allow-list del pedido del CLIENTE: sin
+                    # el, un texto legitimo que traiga JSON se convertiria en una
+                    # llamada inventada (ver el docstring de tool_emulator).
+                    nombres_tools = _emu.tool_names(cuerpo.get("tools"))
+                    if proveedor.emula_tools and nombres_tools:
+                        acumulado = ""
+                        async for linea_buf in resp.aiter_lines():
+                            if not linea_buf.startswith("data:"):
                                 continue
-                            carga = linea[5:].strip()
-                            if carga == "[DONE]":
+                            carga_buf = linea_buf[5:].strip()
+                            if carga_buf == "[DONE]":
                                 break
                             try:
-                                obj_buf = json.loads(carga)
+                                obj_buf = json.loads(carga_buf)
                             except json.JSONDecodeError:
                                 continue
                             elec_buf = (obj_buf.get("choices") or [{}])[0]
-                            delta_buf = (elec_buf.get("delta") or {}) if isinstance(elec_buf, dict) else {}
-                            frag = delta_buf.get("content") or ""
-                            if not crudo and isinstance(frag, str):
-                                frag = rec.alimentar(frag)
-                            buffered += frag
-                        buffered += rec.cerrar()
-                        parsed = _emu.parse_tool_calls(buffered.strip())
-                        if parsed:
+                            if not isinstance(elec_buf, dict):
+                                continue
+                            frag = (elec_buf.get("delta") or {}).get("content")
+                            if not isinstance(frag, str):
+                                continue
+                            acumulado += rec.alimentar(frag) if not crudo else frag
+                        if not crudo:
+                            acumulado += rec.cerrar()
+
+                        llamadas = _emu.parse_tool_calls(acumulado, nombres_tools)
+                        if llamadas:
                             _registrar_exito_una_vez()
                             util = True
-                            yield f"data: {json.dumps(_emu.build_synthetic_stream_chunk(parsed))}\n\n"
+                            chunk = _emu.build_stream_chunk(llamadas, cuerpo.get("model", ""))
+                            yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
-                        if buffered.strip():
+                        if acumulado.strip():
+                            # No era un tool call: se entrega como respuesta de
+                            # texto normal, que es exactamente lo que el cliente
+                            # habria recibido sin emulacion.
                             _registrar_exito_una_vez()
                             util = True
-                            yield ('data: {"choices":[{"delta":{"content":%s},"finish_reason":"stop"}]}\n\n'
-                                   % json.dumps(buffered))
+                            texto = {"object": "chat.completion.chunk",
+                                     "choices": [{"index": 0,
+                                                  "delta": {"role": "assistant",
+                                                            "content": acumulado},
+                                                  "finish_reason": "stop"}]}
+                            yield f"data: {json.dumps(texto)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
+                        # 200 que no entrego nada: mismo tratamiento que el
+                        # camino normal -- intento FALLIDO y failover a la
+                        # siguiente ruta. Nada se emitio, asi que sigue limpio.
                         if not evento_registrado:
                             self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
                             evento_registrado = True

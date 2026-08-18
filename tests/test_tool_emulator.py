@@ -30,6 +30,11 @@ BODY_WITH_TOOLS = {
     "tool_choice": "auto",
 }
 
+# The allow-list of function names offered by the request. Detection is gated on
+# it: a JSON object naming anything outside this set stays plain text.
+VALID = {"get_weather"}
+MULTI_VALID = {"fn1", "fn2"}
+
 
 # --- inject_into_body ---
 
@@ -131,7 +136,7 @@ def test_inject_converts_multiple_tool_calls_in_assistant_message():
 
 def test_parse_clean_json():
     text = '{"name": "get_weather", "arguments": {"city": "Bogotá"}}'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["name"] == "get_weather"
     assert result[0]["arguments"]["city"] == "Bogotá"
@@ -139,36 +144,36 @@ def test_parse_clean_json():
 
 def test_parse_json_in_markdown_block():
     text = 'I need to call:\n```json\n{"name": "get_weather", "arguments": {"city": "Madrid"}}\n```'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["name"] == "get_weather"
 
 
 def test_parse_json_embedded_in_prose():
     text = 'To answer this I need {"name": "get_weather", "arguments": {"city": "Lima"}} with real data.'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["name"] == "get_weather"
 
 
 def test_parse_arguments_as_json_string():
     text = '{"name": "get_weather", "arguments": "{\\"city\\": \\"Quito\\"}"}'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["arguments"]["city"] == "Quito"
 
 
 def test_parse_returns_none_for_plain_text():
-    assert parse_tool_calls("The weather in Bogotá is sunny today.") is None
+    assert parse_tool_calls("The weather in Bogotá is sunny today.", VALID) is None
 
 
 def test_parse_returns_none_for_json_without_name():
-    assert parse_tool_calls('{"result": "sunny"}') is None
+    assert parse_tool_calls('{"result": "sunny"}', VALID) is None
 
 
 def test_parse_array_of_tool_calls():
     text = '[{"name": "fn1", "arguments": {"x": 1}}, {"name": "fn2", "arguments": {"y": 2}}]'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, MULTI_VALID)
     assert result is not None
     assert len(result) == 2
     assert result[0]["name"] == "fn1"
@@ -177,28 +182,28 @@ def test_parse_array_of_tool_calls():
 
 def test_parse_function_call_wrapper_format():
     text = '{"function_call": {"name": "get_weather", "arguments": {"city": "Bogotá"}}}'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["name"] == "get_weather"
 
 
 def test_parse_tool_call_wrapper_format():
     text = '{"tool_call": {"name": "get_weather", "arguments": {"city": "Bogotá"}}}'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["name"] == "get_weather"
 
 
 def test_parse_input_key_instead_of_arguments():
     text = '{"name": "get_weather", "input": {"city": "Bogotá"}}'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["arguments"]["city"] == "Bogotá"
 
 
 def test_parse_xml_tool_call_tags():
     text = 'Here is my answer:\n<tool_call>{"name": "get_weather", "arguments": {"city": "Lima"}}</tool_call>'
-    result = parse_tool_calls(text)
+    result = parse_tool_calls(text, VALID)
     assert result is not None
     assert result[0]["name"] == "get_weather"
 
@@ -213,7 +218,7 @@ def test_detect_converts_to_tool_calls():
     data = _response_with_content(
         '{"name": "get_weather", "arguments": {"city": "Bogotá"}}'
     )
-    result = detect_and_convert(data)
+    result = detect_and_convert(data, [WEATHER_TOOL])
     msg = result["choices"][0]["message"]
     assert msg["content"] is None
     tcs = msg["tool_calls"]
@@ -228,35 +233,167 @@ def test_detect_sets_finish_reason_tool_calls():
     data = _response_with_content(
         '{"name": "get_weather", "arguments": {"city": "Cali"}}'
     )
-    result = detect_and_convert(data)
+    result = detect_and_convert(data, [WEATHER_TOOL])
     assert result["choices"][0]["finish_reason"] == "tool_calls"
 
 
 def test_detect_does_not_touch_text_response():
     data = _response_with_content("The weather in Bogotá is sunny.")
-    assert detect_and_convert(data) is data
+    assert detect_and_convert(data, [WEATHER_TOOL]) is data
 
 
 def test_detect_generates_unique_ids():
     data = _response_with_content(
         '{"name": "get_weather", "arguments": {"city": "Medellín"}}'
     )
-    r1 = detect_and_convert(data)
-    r2 = detect_and_convert(data)
+    r1 = detect_and_convert(data, [WEATHER_TOOL])
+    r2 = detect_and_convert(data, [WEATHER_TOOL])
     id1 = r1["choices"][0]["message"]["tool_calls"][0]["id"]
     id2 = r2["choices"][0]["message"]["tool_calls"][0]["id"]
     assert id1 != id2
 
 
 def test_detect_multiple_tool_calls_from_array():
+    fn1 = {"type": "function", "function": {"name": "fn1", "parameters": {}}}
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
     data = _response_with_content(
         '[{"name": "fn1", "arguments": {"x": 1}}, {"name": "fn2", "arguments": {"y": 2}}]'
     )
-    result = detect_and_convert(data)
+    result = detect_and_convert(data, [fn1, fn2])
     tcs = result["choices"][0]["message"]["tool_calls"]
     assert len(tcs) == 2
     assert tcs[0]["function"]["name"] == "fn1"
     assert tcs[1]["function"]["name"] == "fn2"
+
+
+# --- false positives: the most dangerous failure mode ---
+
+def test_detect_ignores_json_naming_an_unoffered_function():
+    """A JSON call for a function the client never offered must stay text."""
+    data = _response_with_content(
+        '{"name": "delete_everything", "arguments": {"confirm": true}}'
+    )
+    assert detect_and_convert(data, [WEATHER_TOOL]) is data
+
+
+def test_detect_ignores_json_when_no_tools_were_requested():
+    """Without an allow-list there is no way to tell a call from JSON data."""
+    data = _response_with_content(
+        '{"name": "get_weather", "arguments": {"city": "Bogotá"}}'
+    )
+    assert detect_and_convert(data, None) is data
+    assert detect_and_convert(data, []) is data
+
+
+def test_parse_rejects_unoffered_name():
+    text = '{"name": "some_other_function", "arguments": {}}'
+    assert parse_tool_calls(text, VALID) is None
+
+
+def test_parse_rejects_mixed_array_of_calls_and_data():
+    """A list where only some entries are valid calls is data, not a batch."""
+    text = '[{"name": "get_weather", "arguments": {}}, {"temp": 18}]'
+    assert parse_tool_calls(text, VALID) is None
+
+
+# --- parser robustness ---
+
+def test_parse_ignores_braces_inside_think_block():
+    """Reasoning scratchpads contain braces that must not anchor the scan."""
+    text = ('<think>Maybe I should emit {"name": "wrong_fn"} here? No.</think>\n'
+            '{"name": "get_weather", "arguments": {"city": "Cali"}}')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Cali"
+
+
+def test_parse_handles_trailing_prose_with_braces():
+    """A greedy regex ran to the last brace anywhere; balanced scanning must not."""
+    text = ('{"name": "get_weather", "arguments": {"city": "Lima"}}\n'
+            'I will format the result as {city, temp} once it arrives.')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Lima"
+
+
+def test_parse_handles_braces_inside_string_values():
+    text = '{"name": "get_weather", "arguments": {"city": "a } tricky { name"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "a } tricky { name"
+
+
+def test_parse_call_without_arguments_key():
+    text = '{"name": "get_weather"}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"] == {}
+
+
+def test_parse_malformed_argument_string_keeps_call_with_empty_args():
+    text = '{"name": "get_weather", "arguments": "{broken json"}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["name"] == "get_weather"
+    assert result[0]["arguments"] == {}
+
+
+# --- history reconstruction ---
+
+def test_inject_keeps_assistant_prose_alongside_tool_calls():
+    """An assistant turn may carry both text and calls; the text must survive."""
+    body = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "user", "content": "Weather in Bogotá?"},
+            {"role": "assistant", "content": "Let me look that up.",
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "get_weather",
+                                          "arguments": '{"city": "Bogotá"}'}}]},
+        ],
+        "tools": [WEATHER_TOOL],
+    }
+    result = inject_into_body(body)
+    asst = next(m for m in result["messages"] if m["role"] == "assistant")
+    assert "Let me look that up." in asst["content"]
+    assert "get_weather" in asst["content"]
+
+
+def test_inject_flattens_list_content_in_tool_message():
+    body = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "tool", "tool_call_id": "c1",
+             "content": [{"type": "text", "text": '{"temp": 18}'}]},
+        ],
+        "tools": [WEATHER_TOOL],
+    }
+    result = inject_into_body(body)
+    last = result["messages"][-1]
+    assert '{"temp": 18}' in last["content"]
+    assert "type" not in last["content"]
+
+
+def test_inject_does_not_mutate_original_body():
+    body = {
+        "model": "deepseek-chat",
+        "messages": [{"role": "system", "content": "Be brief."},
+                     {"role": "user", "content": "hi"}],
+        "tools": [WEATHER_TOOL],
+    }
+    original = json.loads(json.dumps(body))
+    inject_into_body(body)
+    assert body == original
+
+
+def test_inject_strips_tools_even_when_none_are_callable():
+    body = {"model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "retrieval"}],
+            "tool_choice": "auto"}
+    result = inject_into_body(body)
+    assert "tools" not in result
+    assert "tool_choice" not in result
 
 
 # --- live tests against the real DeepSeek proxy ---
