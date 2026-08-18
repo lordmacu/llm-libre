@@ -384,7 +384,7 @@ class Proxy:
                         en_intento_facturable: Callable[[Ruta], None] | None = None
                         ) -> Respuesta:
         """`es_sonda=True` es exclusivamente para uso INTERNO (sondeo
-        periodico via `sondeo.sondear_salud`, y la sonda bajo demanda de
+        periodico via `probing.probe_health`, y la sonda bajo demanda de
         `_probar_bajo_demanda` -- nunca lo pasa un pedido de un cliente
         real): cambia como se interpreta un fallo NO-429. Con
         `es_sonda=False` (el default, todo trafico real) un fallo solo
@@ -1026,7 +1026,7 @@ class Proxy:
         camino que ya castiga de forma inequivoca -- y ademas deja
         constancia en `sondas` (tabla que alimenta tanto confiabilidad como
         `Storage.has_liveness_evidence`), exactamente como
-        `sondeo.sondear_salud` para la periodica: para el resto del
+        `probing.probe_health` para la periodica: para el resto del
         sistema, una sonda bajo demanda y una periodica son
         indistinguibles, solo cambia quien la disparo.
 

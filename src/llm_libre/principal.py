@@ -11,7 +11,7 @@ from llm_libre.api import Estado, crear_app
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.providers import load
 from llm_libre.proxy import Proxy
-from llm_libre.sondeo import ciclo
+from llm_libre.probing import cycle
 
 YAML = os.getenv("PROVEEDORES_YAML", "proveedores.yaml")
 RUTA_DB = os.getenv("RUTA_DB", "/datos/llm-libre.sqlite3")
@@ -65,14 +65,14 @@ def crear_estado() -> Estado:
 
 
 async def planificador(estado: Estado) -> None:
-    """Loop de fondo que corre `sondeo.ciclo` sin parar, cada HORAS_SALUD.
+    """Loop de fondo que corre `probing.cycle` sin parar, cada HORAS_SALUD.
 
     Desviacion respecto del brief original (Task 12): el brief traia el
     cuerpo entero del ciclo -- sincronizar catalogo, sondear salud, sondear
     calidad cada N pasadas, podar -- copiado linea por linea aca mismo. Esa
-    logica ya existe, escrita y probada, como `sondeo.ciclo(estado,
+    logica ya existe, escrita y probada, como `probing.cycle(estado,
     contador)` desde la Task 11 (incluye alli mismo el "cada N ciclos" via
-    `CALIDAD_CADA_N_CICLOS` y la retencion de 30 dias): dos copias de un
+    `QUALITY_EVERY_N_CYCLES` y la retencion de 30 dias): dos copias de un
     mismo loop solo garantizan que se desincronicen con el tiempo. Este
     planificador se limita a invocarla.
 
@@ -91,7 +91,7 @@ async def planificador(estado: Estado) -> None:
     contador = 0
     while True:
         try:
-            await ciclo(estado, contador)
+            await cycle(estado, contador)
         except Exception as e:  # el planificador nunca debe matar al servicio
             print(f"[sondeo] ciclo {contador} fallo: {e}", flush=True)
         contador += 1

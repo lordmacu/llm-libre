@@ -82,7 +82,7 @@ def test_el_scope_de_proveedor_no_cambia_el_comportamiento_por_defecto(almacen):
 
 
 # --- Sacar un proveedor de proveedores.yaml (p.ej. openrouter) no debe
-#     dejar sus rutas activa=1 para siempre: sincronizar_catalogo solo puede
+#     dejar sus rutas activa=1 para siempre: sync_catalogue solo puede
 #     dar de baja, via su scope, lo que SIGUE en el registro -- un
 #     proveedor que desaparece del todo nunca vuelve a pasar por ese loop.
 #     Este barrido aparte cubre exactamente ese hueco. ---

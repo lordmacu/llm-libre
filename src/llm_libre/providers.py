@@ -74,7 +74,7 @@ def join_path(base_url: str, suffix: str) -> str:
     "/chat/completions"` yields `"...:8888?token=abc/chat/completions"` instead
     of `"...:8888/chat/completions?token=abc"`. Round 5: this bug was first fixed
     only in `_resolve_base_url` (where `Provider.base_url` is STORED), but
-    `client.build_request` and `sondeo.sincronizar_catalogo` were still
+    `client.build_request` and `probing.sync_catalogue` were still
     concatenating text when building the FINAL URL actually sent over the network
     -- the splinter had moved one layer down. Both now go through here."""
     parts = urlsplit(base_url)
