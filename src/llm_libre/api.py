@@ -8,9 +8,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.models import NEUTRAL_METRICS, RouteRequest
-from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPCION, HEALTH_DOCS,
-                               MODELOS_DOCS, RANKING_DOCS, RESUMEN, TITULO, USO_DOCS,
-                               VERSION, personalizar_openapi)
+from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
+                               MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE, USAGE_DOCS,
+                               VERSION, customise_openapi)
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
 
@@ -193,12 +193,12 @@ def _resolve_api_key(x_api_key: str | None, authorization: str | None) -> str | 
 
 
 def create_app(estado: State) -> FastAPI:
-    # title/version/summary/description and personalizar_openapi (Task 14) only
+    # title/version/summary/description and customise_openapi (Task 14) only
     # enrich what /docs and /openapi.json serve -- see llm_libre.openapi. They
     # touch no route and no logic: require_api_key, parse_request and the
     # completions passthrough stay exactly the same.
-    app = FastAPI(title=TITULO, version=VERSION, summary=RESUMEN, description=DESCRIPCION)
-    personalizar_openapi(app)
+    app = FastAPI(title=TITLE, version=VERSION, summary=SUMMARY, description=DESCRIPTION)
+    customise_openapi(app)
 
     def require_api_key(x_api_key: str | None, authorization: str | None = None) -> str:
         llave = _resolve_api_key(x_api_key, authorization)
@@ -309,7 +309,7 @@ def create_app(estado: State) -> FastAPI:
             cuerpo_resp = {**cuerpo_resp, "x_razonamiento": r.reasoning}
         return JSONResponse(cuerpo_resp, status_code=r.status, headers=cabeceras)
 
-    @app.get("/v1/models", **MODELOS_DOCS)
+    @app.get("/v1/models", **MODELS_DOCS)
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         require_api_key(x_api_key, authorization)
         datos = [{"id": r.model_id, "object": "model", "owned_by": r.provider}
@@ -362,7 +362,7 @@ def create_app(estado: State) -> FastAPI:
                           "contexto": r.capabilities.context})
         return {"rutas": filas}
 
-    @app.get("/v1/uso", **USO_DOCS)
+    @app.get("/v1/uso", **USAGE_DOCS)
     def uso(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         llave = require_api_key(x_api_key, authorization)
         dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")

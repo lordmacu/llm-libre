@@ -7,7 +7,7 @@ quedan en espanol; solo el texto que termina sirviendose en `/docs` y
 Este modulo NO cambia comportamiento de runtime: solo arma texto,
 ejemplos y fragmentos de JSON Schema que `api.create_app` conecta via los
 parametros nativos de FastAPI (`summary`, `description`, `responses`,
-`openapi_extra`) y via `personalizar_openapi`, que reemplaza `app.openapi`
+`openapi_extra`) y via `customise_openapi`, que reemplaza `app.openapi`
 -- una funcion que solo corre cuando alguien pide `/docs` u
 `/openapi.json`, nunca en el camino de una peticion real. En particular,
 `POST /v1/chat/completions` NO gana un modelo Pydantic: el `requestBody`
@@ -20,11 +20,11 @@ y `tests/test_cliente.py` para la prueba de que esto sigue intacto.
 
 from fastapi.openapi.utils import get_openapi
 
-TITULO = "llm-libre"
-VERSION = "0.1.0"  # mantener sincronizado con pyproject.toml [project].version
-RESUMEN = "One OpenAI-compatible endpoint for several providers' free LLM models."
+TITLE = "llm-libre"
+VERSION = "0.1.0"  # keep in sync with pyproject.toml [project].version
+SUMMARY = "One OpenAI-compatible endpoint for several providers' free LLM models."
 
-DESCRIPCION = """
+DESCRIPTION = """
 llm-libre is a gateway that puts several LLM providers' **free** tiers
 behind a single [OpenAI-compatible](https://platform.openai.com/docs/api-reference/chat)
 contract. Any OpenAI SDK works against it unmodified: point `base_url` at
@@ -70,13 +70,12 @@ Each key is limited to a fixed number of requests per minute (see the
 - **`429`** -- the calling key is over its per-minute rate limit.
 """
 
-# --- Security schemes: puramente documental, ver personalizar_openapi() mas
-#     abajo. No hay ningun fastapi.Security() nuevo en el codigo: la
-#     autenticacion real sigue siendo el `require_api_key` manual que api.py ya
-#     tenia, sin tocar. Esto solo hace que /docs muestre el candado y deje
-#     probar la API desde ahi. --------------------------------------------
+# --- Security schemes: purely documentary, see customise_openapi() below. There
+#     is no new fastapi.Security() in the code: the real authentication is still
+#     the manual `require_api_key` api.py already had, untouched. This only makes
+#     /docs show the padlock and lets you try the API from there. ------------
 
-_ESQUEMAS_SEGURIDAD = {
+_SECURITY_SCHEMES = {
     "ApiKeyHeader": {
         "type": "apiKey",
         "in": "header",
@@ -91,68 +90,67 @@ _ESQUEMAS_SEGURIDAD = {
                        "SDK sends automatically for its `api_key` parameter.",
     },
 }
-_SEGURIDAD_OPERACION = [{"ApiKeyHeader": []}, {"BearerAuth": []}]
+_OPERATION_SECURITY = [{"ApiKeyHeader": []}, {"BearerAuth": []}]
 
-# Endpoints que NO exigen llave (ver api.require_api_key -- /health es el unico).
-_SIN_AUTENTICACION = {"/health"}
+# Endpoints that do NOT require a key (see api.require_api_key -- /health is the only one).
+_UNAUTHENTICATED_PATHS = {"/health"}
 
 
-def personalizar_openapi(app) -> None:
-    """Reemplaza `app.openapi` por una version que agrega los esquemas de
-    seguridad y el requisito `security` por operacion -- lo unico que
-    FastAPI no puede inferir solo, porque la autenticacion real de este
-    proyecto es un chequeo manual de cabeceras (`require_api_key`), no un
-    `fastapi.Security(...)` declarado en la firma de cada endpoint.
+def customise_openapi(app) -> None:
+    """Replace `app.openapi` with a version that adds the security schemes and the
+    per-operation `security` requirement -- the only thing FastAPI cannot infer on
+    its own, because this project's real authentication is a manual header check
+    (`require_api_key`), not a `fastapi.Security(...)` declared in each endpoint's
+    signature.
 
-    Corre PEREZOSO (solo la primera vez que alguien pide `/docs` u
-    `/openapi.json`, cacheado despues en `app.openapi_schema` -- el mismo
-    patron que usa FastAPI internamente) y nunca en el camino de una
-    peticion real a `/v1/*` o `/health`: cero riesgo de cambiar
-    comportamiento de runtime.
+    It runs LAZILY (only the first time someone asks for `/docs` or
+    `/openapi.json`, cached afterwards in `app.openapi_schema` -- the same pattern
+    FastAPI uses internally) and never on the path of a real request to `/v1/*` or
+    `/health`: zero risk of changing runtime behaviour.
     """
-    def _generar():
+    def _generate():
         if app.openapi_schema:
             return app.openapi_schema
-        esquema = get_openapi(title=app.title, version=app.version,
+        schema_ = get_openapi(title=app.title, version=app.version,
                               summary=app.summary, description=app.description,
                               routes=app.routes)
-        esquema.setdefault("components", {})["securitySchemes"] = _ESQUEMAS_SEGURIDAD
-        for ruta, operaciones in esquema.get("paths", {}).items():
-            if ruta in _SIN_AUTENTICACION:
+        schema_.setdefault("components", {})["securitySchemes"] = _SECURITY_SCHEMES
+        for path, operations in schema_.get("paths", {}).items():
+            if path in _UNAUTHENTICATED_PATHS:
                 continue
-            for metodo, operacion in operaciones.items():
-                if metodo in {"get", "post", "put", "patch", "delete"}:
-                    operacion["security"] = _SEGURIDAD_OPERACION
-        _quitar_422_espureo(esquema)
-        app.openapi_schema = esquema
+            for method, operation in operations.items():
+                if method in {"get", "post", "put", "patch", "delete"}:
+                    operation["security"] = _OPERATION_SECURITY
+        _strip_spurious_422(schema_)
+        app.openapi_schema = schema_
         return app.openapi_schema
-    app.openapi = _generar
+    app.openapi = _generate
 
 
-def _quitar_422_espureo(esquema: dict) -> None:
-    """Revision post-Task-14 (gate), hallazgo Minor: FastAPI agrega un `422
-    Validation Error` automatico a CUALQUIER operacion con parametros
-    declarados via `Header`/`Query`/`Path`/body, sin mirar si de verdad
-    pueden fallar su propia validacion. Los cinco endpoints de este
-    gateway solo declaran `str | None = Header(None)` -- siempre validos
-    (cualquier string, o ausente) -- asi que ninguno puede devolver este
-    422 en la practica: documentarlo prometeria una respuesta que el
-    servicio nunca produce. Se saca de cada operacion; `HTTPValidationError`/
-    `ValidationError` en `components.schemas` SOLO se referencian desde ese
-    422 (es lo unico que `get_openapi` los genera para), asi que sin
-    ningun 422 en ninguna operacion quedan huerfanos y se sacan tambien."""
-    for operaciones in esquema.get("paths", {}).values():
-        for operacion in operaciones.values():
-            if isinstance(operacion, dict):
-                operacion.get("responses", {}).pop("422", None)
-    schemas = esquema.get("components", {}).get("schemas", {})
+def _strip_spurious_422(schema_: dict) -> None:
+    """Post-Task-14 review (gate), a Minor finding: FastAPI adds an automatic
+    `422 Validation Error` to ANY operation with parameters declared via
+    `Header`/`Query`/`Path`/body, without looking at whether they can actually
+    fail their own validation. This gateway's five endpoints only declare
+    `str | None = Header(None)` -- always valid (any string, or absent) -- so none
+    of them can return that 422 in practice: documenting it would promise a
+    response the service never produces. It is stripped from every operation;
+    `HTTPValidationError`/`ValidationError` in `components.schemas` are ONLY
+    referenced from that 422 (it is the only thing `get_openapi` generates them
+    for), so with no 422 in any operation they are left orphaned and stripped
+    too."""
+    for operations in schema_.get("paths", {}).values():
+        for operation in operations.values():
+            if isinstance(operation, dict):
+                operation.get("responses", {}).pop("422", None)
+    schemas = schema_.get("components", {}).get("schemas", {})
     schemas.pop("HTTPValidationError", None)
     schemas.pop("ValidationError", None)
 
 
 # --- POST /v1/chat/completions --------------------------------------------
 
-_ESQUEMA_CUERPO_CHAT = {
+_CHAT_BODY_SCHEMA = {
     "type": "object",
     "required": ["messages"],
     "description": (
@@ -287,7 +285,7 @@ _ESQUEMA_CUERPO_CHAT = {
     "additionalProperties": True,
 }
 
-_EJEMPLOS_CUERPO_CHAT = {
+_CHAT_BODY_EXAMPLES = {
     "auto": {
         "summary": "Let the gateway pick the best free route (balanced profile)",
         "value": {
@@ -299,10 +297,10 @@ _EJEMPLOS_CUERPO_CHAT = {
         "summary": "Ask for one specific model id (still fails over between "
                    "providers that serve it)",
         "value": {
-            # El id de MODELO tal cual lo lista GET /v1/models -- SIN el
-            # prefijo de proveedor que si lleva X-Ruta-Usada
-            # ("kilo/cohere/north-mini-code:free"). Mandar el id CON ese
-            # prefijo no matchea ningun modelo_id real y da 404.
+            # The MODEL id exactly as GET /v1/models lists it -- WITHOUT the
+            # provider prefix that X-Ruta-Usada does carry
+            # ("kilo/cohere/north-mini-code:free"). Sending the id WITH that
+            # prefix matches no real modelo_id and returns a 404.
             "model": "cohere/north-mini-code:free",
             "messages": [{"role": "user", "content": "Write a haiku about databases."}],
         },
@@ -343,7 +341,7 @@ _EJEMPLOS_CUERPO_CHAT = {
     },
 }
 
-_EJEMPLO_RESPUESTA_CHAT = {
+_CHAT_RESPONSE_EXAMPLE = {
     "id": "chatcmpl-example",
     "object": "chat.completion",
     "created": 1755400000,
@@ -356,8 +354,8 @@ _EJEMPLO_RESPUESTA_CHAT = {
     "usage": {"prompt_tokens": 12, "completion_tokens": 9, "total_tokens": 21},
 }
 
-_EJEMPLO_RESPUESTA_CHAT_CON_RAZONAMIENTO = {
-    **_EJEMPLO_RESPUESTA_CHAT,
+_CHAT_RESPONSE_EXAMPLE_WITH_REASONING = {
+    **_CHAT_RESPONSE_EXAMPLE,
     "choices": [{
         "index": 0,
         "message": {"role": "assistant", "content": "4"},
@@ -366,7 +364,7 @@ _EJEMPLO_RESPUESTA_CHAT_CON_RAZONAMIENTO = {
     "x_razonamiento": "The user asked for 2+2, which is 4.",
 }
 
-_EJEMPLO_STREAM = (
+_STREAM_EXAMPLE = (
     'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
     'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n'
     'data: {"choices":[{"delta":{"content":"!"}}]}\n\n'
@@ -377,7 +375,7 @@ _EJEMPLO_STREAM = (
 CHAT_COMPLETIONS_DOCS = {
     "tags": ["Chat"],
     "summary": "Create a chat completion (OpenAI-compatible, with automatic routing)",
-    "description": DESCRIPCION.split("## Status codes")[0].strip() + """
+    "description": DESCRIPTION.split("## Status codes")[0].strip() + """
 
 **Response headers** (non-streaming only -- see below):
 - `X-Ruta-Usada`: `<provider>/<model_id>` of the route that actually served the request
@@ -403,8 +401,8 @@ stripping entirely.
         "requestBody": {
             "required": True,
             "content": {"application/json": {
-                "schema": _ESQUEMA_CUERPO_CHAT,
-                "examples": _EJEMPLOS_CUERPO_CHAT,
+                "schema": _CHAT_BODY_SCHEMA,
+                "examples": _CHAT_BODY_EXAMPLES,
             }},
         },
     },
@@ -428,15 +426,15 @@ stripping entirely.
                     "examples": {
                         "plain": {"summary": "Plain answer (real example: auto -> "
                                              "chatgpt/gpt-5-3-mini)",
-                                  "value": _EJEMPLO_RESPUESTA_CHAT},
+                                  "value": _CHAT_RESPONSE_EXAMPLE},
                         "with_reasoning_stripped": {
                             "summary": "A model that leaked <think> got it stripped",
-                            "value": _EJEMPLO_RESPUESTA_CHAT_CON_RAZONAMIENTO},
+                            "value": _CHAT_RESPONSE_EXAMPLE_WITH_REASONING},
                     },
                 },
                 "text/event-stream": {
                     "schema": {"type": "string"},
-                    "example": _EJEMPLO_STREAM,
+                    "example": _STREAM_EXAMPLE,
                 },
             },
         },
@@ -554,7 +552,7 @@ stripping entirely.
 
 # --- GET /v1/models ---------------------------------------------------------
 
-MODELOS_DOCS = {
+MODELS_DOCS = {
     "tags": ["Chat"],
     "summary": "List the normalized model catalog",
     "description": (
@@ -658,7 +656,7 @@ RANKING_DOCS = {
 
 # --- GET /v1/uso ---------------------------------------------------------
 
-USO_DOCS = {
+USAGE_DOCS = {
     "tags": ["Diagnostics"],
     "summary": "Today's paid-usage counter for the calling key",
     "description": (
