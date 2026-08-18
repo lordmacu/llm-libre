@@ -7,7 +7,7 @@ import os
 
 from llm_libre.catalog import normalize
 from llm_libre.modelos import Capacidades
-from llm_libre.proveedores import cargar
+from llm_libre.providers import load
 
 DEFAULTS = Capacidades(tools=True, vision=False, contexto=128000, max_salida=8192)
 CATALOGUE = {"data": [{"id": "bueno"}, {"id": "sin-tools"}, {"id": "otro"}]}
@@ -46,23 +46,23 @@ def test_several_fields_can_be_overridden_at_once():
 
 
 def test_the_yaml_declares_groks_exceptions():
-    provs = cargar("proveedores.yaml", dict(os.environ))
+    provs = load("proveedores.yaml", dict(os.environ))
     grok = [p for p in provs if p.id == "grok"][0]
-    assert grok.capacidades_por_defecto.tools is True
+    assert grok.default_capabilities.tools is True
     # vision True: the proxy resolves the image on its own (resolve_vision_model
     # sends whatever cannot see to the VISION_POOL), and 30 of 31 routes read a
     # 4-digit code from a 488x232 image.
-    assert grok.capacidades_por_defecto.vision is True
+    assert grok.default_capabilities.vision is True
     # Only the imagine-agent-mode family is left out: they are image-generation
     # agents, 0/3 on tool_calls when repeated, and grok_backend itself documents
     # that they have no vision.
-    assert set(grok.excepciones) == {
+    assert set(grok.exceptions) == {
         "imagine-agent-mode", "imagine-agent-mode-dev", "imagine-agent-mode-grok-4-5"}
-    assert all(v == {"tools": False, "vision": False} for v in grok.excepciones.values())
+    assert all(v == {"tools": False, "vision": False} for v in grok.exceptions.values())
 
 
 def test_minimax_declares_measured_vision():
-    from llm_libre.proveedores import rutas_fijas
-    provs = cargar("proveedores.yaml", {"MINIMAX_API_KEY": "x"})
-    mm = [r for p in provs if p.id == "minimax" for r in rutas_fijas(p)]
+    from llm_libre.providers import fixed_routes
+    provs = load("proveedores.yaml", {"MINIMAX_API_KEY": "x"})
+    mm = [r for p in provs if p.id == "minimax" for r in fixed_routes(p)]
     assert mm and mm[0].capacidades.vision is True

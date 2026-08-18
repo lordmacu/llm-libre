@@ -533,11 +533,11 @@ async def test_deepseek_emulates_tool_call():
 
     from llm_libre.almacen import Almacen
     from llm_libre.modelos import Capacidades, Ruta
-    from llm_libre.proveedores import cargar
+    from llm_libre.providers import load
     from llm_libre.proxy import Proxy
 
-    providers = {p.id: p for p in cargar(YAML, {"DEEPSEEK_PROXY_URL": url})}
-    assert providers["deepseek"].emula_tools, "deepseek.emula_tools not active in YAML"
+    providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
+    assert providers["deepseek"].emulates_tools, "deepseek.emulates_tools not active in YAML"
 
     route = Ruta("deepseek", "deepseek-chat", "gratis",
                  Capacidades(tools=True, vision=False, contexto=64000, max_salida=8192))
@@ -575,10 +575,10 @@ async def test_deepseek_text_response_without_tools():
 
     from llm_libre.almacen import Almacen
     from llm_libre.modelos import Capacidades, Ruta
-    from llm_libre.proveedores import cargar
+    from llm_libre.providers import load
     from llm_libre.proxy import Proxy
 
-    providers = {p.id: p for p in cargar(YAML, {"DEEPSEEK_PROXY_URL": url})}
+    providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
     route = Ruta("deepseek", "deepseek-chat", "gratis",
                  Capacidades(tools=False, vision=False, contexto=64000, max_salida=8192))
     store = Almacen(":memory:")

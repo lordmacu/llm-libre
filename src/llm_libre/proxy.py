@@ -276,7 +276,7 @@ def _es_error_del_cliente(codigo: int) -> bool:
 
 
 def _timeout_de(proveedor) -> float:
-    """`Proveedor.timeout_s` (default None) permite acotar el peor caso de UN
+    """`Provider.timeout_s` (default None) permite acotar el peor caso de UN
     proveedor puntual -- p.ej. uno que puede colgarse -- sin bajarle el
     timeout a todos. None (el default, y el comportamiento de siempre para
     quien no lo declare) usa el TIMEOUT_S global."""
@@ -470,7 +470,7 @@ class Proxy:
             # la respuesta pedida).
             razon = ""
             if datos is not None:
-                razon = "" if crudo else self._limpiar(datos, proveedor.desenvuelve_canvas)
+                razon = "" if crudo else self._limpiar(datos, proveedor.unwraps_canvas)
                 if not hay_respuesta(datos):
                     datos = None
                     ultimo_error = "200 sin contenido ni tool_calls"
@@ -489,7 +489,7 @@ class Proxy:
                 # de limpiar) -- completar() no puede saber eso desde aca.
                 if not es_sonda:
                     self._limpiar_castigo(ruta.clave)
-                if proveedor.emula_tools:
+                if proveedor.emulates_tools:
                     # `cuerpo` es el pedido del CLIENTE, con su `tools` intacto:
                     # build_request lo saca solo de la copia que viaja al
                     # proveedor. Ese array es el allow-list que evita convertir
@@ -603,7 +603,7 @@ class Proxy:
                         continue
                     if ruta.tier == "pago" and en_intento_facturable is not None:
                         en_intento_facturable(ruta)
-                    rec = CompositeStreamTrimmer(unwrap_canvas=proveedor.desenvuelve_canvas)
+                    rec = CompositeStreamTrimmer(unwrap_canvas=proveedor.unwraps_canvas)
 
                     # Emulacion de tools en streaming. Detectar un tool call exige
                     # el TEXTO COMPLETO (el JSON llega partido en deltas), asi que
@@ -623,7 +623,7 @@ class Proxy:
                     # incluidos los que no emulan nada -- y la excepcion salia
                     # DENTRO del generador, con el 200 y las cabeceras SSE ya
                     # mandadas: stream cortado y sin failover posible.
-                    if proveedor.emula_tools and _emu.tool_names(cuerpo.get("tools")):
+                    if proveedor.emulates_tools and _emu.tool_names(cuerpo.get("tools")):
                         nombres_tools = _emu.tool_names(cuerpo.get("tools"))
                         acumulado = ""
                         # id/created/model/usage del proveedor: son campos que el

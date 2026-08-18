@@ -12,7 +12,7 @@ written before a single rename:
 - `api.py` serialises `pedido.__dict__` straight into the 400 and 503 error
   bodies, so the `Pedido` dataclass FIELD NAMES are wire format. Renaming a
   field silently changes the HTTP contract.
-- `proveedores.cargar` reads YAML keys as string literals, so the `Proveedor`
+- `providers.load` reads YAML keys as string literals, so the `Provider`
   dataclass fields may be renamed freely but the keys in `proveedores.yaml` may
   not.
 
@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 from llm_libre.almacen import Almacen
 from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.modelos import EXTENSIONES_GATEWAY, Capacidades, Ruta
-from llm_libre.proveedores import Proveedor, cargar
+from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
 
 YAML = "proveedores.yaml"
@@ -39,7 +39,7 @@ def cliente():
     almacen.crear_esquema()
     almacen.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -145,25 +145,25 @@ def test_requiere_values_are_capability_names():
 
 def test_yaml_keys_are_still_understood():
     """proveedores.cargar reads these as string literals; the file must keep them."""
-    provs = cargar(YAML, {})
+    provs = load(YAML, {})
     assert provs, "no providers loaded"
     assert {p.id for p in provs} >= {"chatgpt", "perplexity", "deepseek", "kilo", "minimax"}
     ds = next(p for p in provs if p.id == "deepseek")
     assert ds.tier == "gratis"
-    assert ds.dialecto == "openai"
+    assert ds.dialect == "openai"
     assert ds.prioridad == 1
-    assert ds.emula_tools is True
+    assert ds.emulates_tools is True
     assert ds.timeout_s == 60.0
     cg = next(p for p in provs if p.id == "chatgpt")
-    assert cg.capacidades_por_defecto is not None
-    assert cg.desenvuelve_canvas is True
-    assert cg.modelos_path == "/models"
+    assert cg.default_capabilities is not None
+    assert cg.unwraps_canvas is True
+    assert cg.models_path == "/models"
     grok = next(p for p in provs if p.id == "grok")
-    assert "imagine-agent-mode" in grok.excepciones
+    assert "imagine-agent-mode" in grok.exceptions
 
 
 def test_tier_values_are_wire():
-    provs = cargar(YAML, {})
+    provs = load(YAML, {})
     assert {p.tier for p in provs} <= {"gratis", "pago"}
 
 

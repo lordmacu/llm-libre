@@ -1,9 +1,9 @@
 from llm_libre import tool_emulator as _emu
 from llm_libre.modelos import EXTENSIONES_GATEWAY
-from llm_libre.proveedores import Proveedor, unir_ruta
+from llm_libre.providers import Provider, join_path
 
 
-def build_request(p: Proveedor, body: dict,
+def build_request(p: Provider, body: dict,
                   real_model: str | None = None) -> tuple[str, dict, dict]:
     """Return (url, headers, body) ready to POST to /chat/completions.
 
@@ -17,17 +17,17 @@ def build_request(p: Proveedor, body: dict,
     `x_`: the contract is passthrough, and a provider's own new parameter has to
     be able to travel.
     """
-    # unir_ruta parses and rebuilds the URL rather than concatenating raw text:
+    # join_path parses and rebuilds the URL rather than concatenating raw text:
     # see its docstring for the bug that avoids when base_url carries a query
     # string (via CHATGPT_PROXY_URL with no path of its own).
-    url = unir_ruta(p.base_url, "/chat/completions")
-    headers = {"Content-Type": "application/json", **p.cabeceras_extra}
+    url = join_path(p.base_url, "/chat/completions")
+    headers = {"Content-Type": "application/json", **p.extra_headers}
     # Empty key => do NOT send Authorization. Kilo's anonymous tier depends on this.
-    if p.clave.strip():
-        headers["Authorization"] = "Bearer " + p.clave
+    if p.api_key.strip():
+        headers["Authorization"] = "Bearer " + p.api_key
     out = {k: v for k, v in body.items() if k not in EXTENSIONES_GATEWAY}
     if real_model is not None:
         out["model"] = real_model
-    if p.emula_tools and out.get("tools"):
+    if p.emulates_tools and out.get("tools"):
         out = _emu.inject_into_body(out)
     return url, headers, out

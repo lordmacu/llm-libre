@@ -6,7 +6,7 @@ import httpx
 from llm_libre.almacen import Almacen
 from llm_libre.api import Estado
 from llm_libre.modelos import Capacidades, Ruta
-from llm_libre.proveedores import Proveedor
+from llm_libre.providers import Provider
 from llm_libre.proxy import Proxy
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
 from llm_libre.sondeo import (PING, ciclo, sincronizar_catalogo, sondear_calidad,
@@ -29,7 +29,7 @@ def _ruta(modelo="x:free", tier="gratis", proveedor="kilo", tools=True):
 
 
 def _proxy(handler):
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     return Proxy(prov, _almacen(), httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
@@ -37,7 +37,7 @@ async def test_sincronizar_guarda_las_rutas_descubiertas():
     almacen = _almacen()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
 
@@ -54,7 +54,7 @@ async def test_sincronizar_no_astilla_un_query_string_en_base_url():
         return httpx.Response(200, json=CATALOGO)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    prov = [Proveedor("chatgpt", "gratis", "openai", "https://blog.test:8888?token=abc",
+    prov = [Provider("chatgpt", "gratis", "openai", "https://blog.test:8888?token=abc",
                       "", "/models", {}, [])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert vistas == ["https://blog.test:8888/models?token=abc"]
@@ -64,7 +64,7 @@ async def test_sincronizar_agrega_los_modelos_fijos_de_pago():
     almacen = _almacen()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    prov = [Proveedor("minimax", "pago", "openai", "https://m.test", "k", "",
+    prov = [Provider("minimax", "pago", "openai", "https://m.test", "k", "",
                       {}, [{"id": "MiniMax-M3", "tools": True, "vision": False,
                             "contexto": 128000, "max_salida": 32768}])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
@@ -77,7 +77,7 @@ async def test_sincronizar_propaga_la_prioridad_del_proveedor_a_las_rutas_descub
     almacen = _almacen()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
                       prioridad=1)]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     rutas = almacen.rutas_activas()
@@ -94,9 +94,9 @@ async def test_sincronizar_propaga_las_capacidades_por_defecto_del_proveedor():
     ]}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=catalogo_desnudo)))
-    prov = [Proveedor("chatgpt", "gratis", "openai", "https://cg.test", "", "/models", {}, [],
+    prov = [Provider("chatgpt", "gratis", "openai", "https://cg.test", "", "/models", {}, [],
                       prioridad=0,
-                      capacidades_por_defecto=Capacidades(False, False, 128000, 8192))]
+                      default_capabilities=Capacidades(False, False, 128000, 8192))]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     rutas = almacen.rutas_activas()
     assert [r.clave for r in rutas] == ["chatgpt/gpt-5-3-mini"]
@@ -113,7 +113,7 @@ async def test_un_proveedor_caido_no_borra_el_catalogo_de_los_demas():
         return httpx.Response(500)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     # Si /models falla no se desactiva nada: mejor catalogo viejo que catalogo vacio.
     assert len(almacen.rutas_activas()) == 1
@@ -134,8 +134,8 @@ async def test_un_fallo_parcial_no_corrompe_el_visto_por_ultima_vez_de_lo_que_si
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     fila = almacen._con.execute(
@@ -161,7 +161,7 @@ async def test_un_200_con_data_vacia_no_borra_las_rutas_previas():
     almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO_VACIO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/previa:free"]
 
@@ -171,7 +171,7 @@ async def test_un_200_cuyos_modelos_quedan_todos_filtrados_no_borra_las_rutas_pr
     almacen.upsert_rutas([_ruta("previa:free")], momento=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO_TODO_FILTRADO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/previa:free"]
 
@@ -187,8 +187,8 @@ async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     claves = {r.clave for r in almacen.rutas_activas()}
@@ -212,8 +212,8 @@ async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     claves = {r.clave for r in almacen.rutas_activas()}
@@ -235,8 +235,8 @@ async def test_un_proveedor_sano_no_desactiva_rutas_de_otro_proveedor():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("otro", "gratis", "openai", "https://otro.test", "", "", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("otro", "gratis", "openai", "https://otro.test", "", "", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     claves = {r.clave for r in almacen.rutas_activas()}
@@ -264,8 +264,8 @@ async def test_el_mismo_modelo_en_dos_proveedores_el_que_lo_pierde_se_apaga_el_q
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("otro", "gratis", "openai", "https://o.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("otro", "gratis", "openai", "https://o.test", "", "/models", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     claves = {r.clave for r in almacen.rutas_activas()}
@@ -287,8 +287,8 @@ async def test_un_200_con_cuerpo_no_json_se_trata_como_fallo_y_no_frena_a_los_de
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
@@ -307,8 +307,8 @@ async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
     ]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert [r.clave for r in almacen.rutas_activas()] == ["kilo/x:free"]
@@ -327,9 +327,9 @@ async def test_sincronizar_desactiva_las_rutas_de_un_proveedor_que_se_saco_del_r
     almacen.upsert_rutas([_ruta("previa:free", proveedor="openrouter")], momento=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    # openrouter YA NO esta en la lista que carga proveedores.cargar() --
+    # openrouter YA NO esta en la lista que carga proveedores.load() --
     # simula haberlo sacado de proveedores.yaml.
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     claves = {r.clave for r in almacen.rutas_activas()}
     assert claves == {"kilo/x:free"}
@@ -350,8 +350,8 @@ async def test_sincronizar_no_desactiva_rutas_de_proveedores_que_siguen_registra
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("minimax", "pago", "openai", "https://m.test", "k", "", {},
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("minimax", "pago", "openai", "https://m.test", "k", "", {},
                   [{"id": "MiniMax-M3", "tools": True, "vision": False,
                     "contexto": 128000, "max_salida": 32768}]),
     ]
@@ -393,9 +393,9 @@ async def test_sincronizar_catalogo_no_deja_escapar_la_excepcion_de_un_proveedor
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("nojson", "gratis", "openai", "https://nojson.test", "", "/models", {}, []),
-        Proveedor("raro", "gratis", "openai", "https://raro.test", "", "/models", {}, []),
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("nojson", "gratis", "openai", "https://nojson.test", "", "/models", {}, []),
+        Provider("raro", "gratis", "openai", "https://raro.test", "", "/models", {}, []),
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
     ]
     total = await sincronizar_catalogo(http, prov, almacen, ahora=100.0)
     assert total == 1
@@ -495,7 +495,7 @@ async def test_ciclo_sincroniza_sondea_salud_y_sondea_calidad_en_el_ciclo_cero()
     almacen = _almacen()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, almacen, http)
     estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
                     proveedores=prov, http=http)
@@ -509,7 +509,7 @@ async def test_ciclo_no_sondea_calidad_fuera_del_intervalo():
     almacen = _almacen()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
-    prov = [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, almacen, http)
     estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
                     proveedores=prov, http=http)
@@ -566,8 +566,8 @@ async def test_el_ciclo_completo_no_sondea_la_ruta_de_pago():
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Proveedor("minimax", "pago", "openai", "https://m.test", "k", "", {},
+        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("minimax", "pago", "openai", "https://m.test", "k", "", {},
                   [{"id": "MiniMax-M3", "tools": True, "vision": False,
                     "contexto": 128000, "max_salida": 32768}]),
     ]
@@ -586,7 +586,7 @@ async def test_el_ciclo_completo_no_sondea_la_ruta_de_pago():
 #     Esta es justo la capa que existe para evitar catalogos rancios. ---
 
 def _prov_kilo():
-    return [Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    return [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
 
 
 async def _sincronizar_con(handler, caplog):

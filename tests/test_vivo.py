@@ -18,8 +18,8 @@ def _proveedor_chatgpt(url: str):
     # `base_url` se resuelve igual que en produccion (proveedores.cargar), no
     # se reconstruye la URL a mano: asi los tests usan exactamente el mismo
     # camino (incluida la normalizacion de base_url_env) que el gateway real.
-    from llm_libre.proveedores import cargar
-    return next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": url}) if p.id == "chatgpt")
+    from llm_libre.providers import load
+    return next(p for p in load(YAML, {"CHATGPT_PROXY_URL": url}) if p.id == "chatgpt")
 
 
 async def _rutas_chatgpt_descubiertas(chatgpt) -> list:
@@ -32,10 +32,10 @@ async def _rutas_chatgpt_descubiertas(chatgpt) -> list:
     en vez de decir lo que de verdad paso (el id ya no existe)."""
     from llm_libre.catalog import normalize
     async with httpx.AsyncClient(timeout=60) as c:
-        r = await c.get(chatgpt.base_url.rstrip("/") + chatgpt.modelos_path)
+        r = await c.get(chatgpt.base_url.rstrip("/") + chatgpt.models_path)
     assert r.status_code == 200, "chatgpt-proxy dejo de responder /v1/models"
     rutas = normalize("chatgpt", r.json(), priority=chatgpt.prioridad,
-                      default_capabilities=chatgpt.capacidades_por_defecto)
+                      default_capabilities=chatgpt.default_capabilities)
     assert rutas, "el catalogo descubierto de chatgpt-proxy vino vacio"
     return rutas
 

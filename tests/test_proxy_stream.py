@@ -8,7 +8,7 @@ import httpx
 
 from llm_libre.almacen import Almacen
 from llm_libre.modelos import Capacidades, Ruta
-from llm_libre.proveedores import Proveedor, cargar
+from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
 
 YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
@@ -43,10 +43,10 @@ def _proxy(handler, canvas=frozenset()):
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
     prov = {
-        "kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
-                          desenvuelve_canvas="kilo" in canvas),
-        "chatgpt": Proveedor("chatgpt", "gratis", "openai", "https://cg.test", "", "/models",
-                             {}, [], desenvuelve_canvas="chatgpt" in canvas),
+        "kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
+                          unwraps_canvas="kilo" in canvas),
+        "chatgpt": Provider("chatgpt", "gratis", "openai", "https://cg.test", "", "/models",
+                             {}, [], unwraps_canvas="chatgpt" in canvas),
     }
     return Proxy(prov, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
@@ -570,7 +570,7 @@ async def test_un_400_en_streaming_se_registra_marcado_como_error_del_cliente():
 
 
 # --- Re-revision: hallazgo MEDIUM. completar_stream() seguia usando el
-#     TIMEOUT_S global fijo, ignorando Proveedor.timeout_s -- streaming es el
+#     TIMEOUT_S global fijo, ignorando Provider.timeout_s -- streaming es el
 #     default de los clientes de chat, y es precisamente el camino del
 #     escenario "proxy colgado" que motivo el timeout por proveedor. Un knob
 #     que no hace nada es peor que no tener knob. ---
@@ -584,7 +584,7 @@ async def test_usa_el_timeout_propio_del_proveedor_en_streaming():
 
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
-    lento = Proveedor("lento", "gratis", "openai", "https://lento.test", "", "/models",
+    lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     [l async for l in p.completar_stream([_ruta(proveedor="lento")], CUERPO, 0.0)]
@@ -607,7 +607,7 @@ async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_
 #     streaming, con la config REAL de chatgpt (proveedores.yaml, cargada con
 #     proveedores.cargar -- el mismo camino de produccion), no un proveedor
 #     sintetico. Se pone rojo si el YAML pierde timeout_s o si
-#     completar_stream deja de leer Proveedor.timeout_s por esa ruta. ---
+#     completar_stream deja de leer Provider.timeout_s por esa ruta. ---
 
 async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real_en_streaming():
     vistos = []
@@ -616,7 +616,7 @@ async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real_en_stre
         vistos.append(req.extensions.get("timeout"))
         return httpx.Response(200, content=_sse("bien"))
 
-    chatgpt = next(p for p in cargar(YAML_REAL, {}) if p.id == "chatgpt")
+    chatgpt = next(p for p in load(YAML_REAL, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
     almacen = Almacen(":memory:")
     almacen.crear_esquema()

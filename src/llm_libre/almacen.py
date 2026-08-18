@@ -154,7 +154,7 @@ class Almacen:
         `proveedores.yaml` en ese momento -- no una lista fija dentro de esta
         funcion. Ojo con la precision de esa frase (revision de gate): esto
         NO significa que un edit al YAML se refleje solo, sin reiniciar --
-        `proveedores.cargar()` se llama UNA sola vez, al arrancar el proceso
+        `proveedores.load()` se llama UNA sola vez, al arrancar el proceso
         (`principal.crear_estado`), asi que ese conjunto queda fijo en
         memoria hasta el proximo reinicio. Lo que SI es cierto: dado ese
         conjunto (fijo hasta reiniciar), el barrido corre en CADA ciclo de

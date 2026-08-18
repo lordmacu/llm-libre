@@ -98,11 +98,11 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
               emulates_tools: bool = False) -> list[Ruta]:
     """Turn a /models response into usable free chat routes.
 
-    `priority` belongs to the PROVIDER (see Proveedor.prioridad), not to anything
+    `priority` belongs to the PROVIDER (see Provider.prioridad), not to anything
     /models could carry: it is stamped identically onto every discovered route so
     the router can order them without consulting the registry again.
 
-    `default_capabilities` (Proveedor.capacidades_por_defecto) marks a provider
+    `default_capabilities` (Provider.default_capabilities) marks a provider
     whose /models carries IDS but no capability metadata at all -- chatgpt-proxy
     is the case that motivated it: its catalogue is dynamic (discovered, not
     hardcoded) but only carries id/object/created/owned_by/description, never

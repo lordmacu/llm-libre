@@ -9,7 +9,7 @@ import httpx
 from llm_libre.almacen import Almacen
 from llm_libre.api import Estado, crear_app
 from llm_libre.auth import PerKeyRateLimiter
-from llm_libre.proveedores import cargar
+from llm_libre.providers import load
 from llm_libre.proxy import Proxy
 from llm_libre.sondeo import ciclo
 
@@ -50,7 +50,7 @@ def crear_estado() -> Estado:
             "/health seguiria informando 'ok'. Definila con al menos una "
             "llave, separadas por coma si son varias -- por ejemplo: "
             "LLM_LIBRE_API_KEYS=una-llave-larga-y-secreta")
-    proveedores = cargar(YAML, dict(os.environ))
+    proveedores = load(YAML, dict(os.environ))
     almacen = Almacen(RUTA_DB)
     almacen.crear_esquema()
     http = httpx.AsyncClient()

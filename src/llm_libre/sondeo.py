@@ -7,7 +7,7 @@ import httpx
 from llm_libre.quality_suite import CASES, evaluate
 from llm_libre.catalog import normalize
 from llm_libre.modelos import Ruta
-from llm_libre.proveedores import Proveedor, rutas_fijas, unir_ruta
+from llm_libre.providers import Provider, fixed_routes, join_path
 from llm_libre.proxy import PING
 
 log = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ CALIDAD_CADA_N_CICLOS = int(os.getenv("SONDEO_CALIDAD_CADA_N_CICLOS", "5"))
 RETENCION_DIAS = 30
 
 
-async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Proveedor],
+async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provider],
                                almacen, ahora: float) -> int:
     """Refresca el catalogo, proveedor por proveedor.
 
@@ -71,34 +71,34 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
             "detectar renombres, ver Almacen.upsert_rutas)", desactivadas)
     total = 0
     for p in proveedores:
-        if p.modelos_fijos:
-            rutas = rutas_fijas(p)
+        if p.fixed_models:
+            rutas = fixed_routes(p)
             almacen.upsert_rutas(rutas, ahora, desactivar_faltantes=True, proveedor=p.id)
             total += len(rutas)
             continue
-        if not p.modelos_path:
+        if not p.models_path:
             continue
-        cabeceras = dict(p.cabeceras_extra)
-        if p.clave.strip():
-            cabeceras["Authorization"] = "Bearer " + p.clave
+        cabeceras = dict(p.extra_headers)
+        if p.api_key.strip():
+            cabeceras["Authorization"] = "Bearer " + p.api_key
         try:
-            # unir_ruta parsea y reconstruye, no concatena texto crudo: ver
+            # join_path parsea y reconstruye, no concatena texto crudo: ver
             # su docstring en proveedores.py para el bug que evita.
-            r = await http.get(unir_ruta(p.base_url, p.modelos_path),
+            r = await http.get(join_path(p.base_url, p.models_path),
                                headers=cabeceras, timeout=30.0)
         except httpx.HTTPError as e:
             log.warning("catalogo de %s: no se pudo consultar %s (%s: %s). "
                         "Se conserva el catalogo anterior.",
-                        p.id, p.modelos_path, type(e).__name__, e)
+                        p.id, p.models_path, type(e).__name__, e)
             continue
         if r.status_code != 200:
             log.warning("catalogo de %s: %s respondio HTTP %s. "
                         "Se conserva el catalogo anterior.",
-                        p.id, p.modelos_path, r.status_code)
+                        p.id, p.models_path, r.status_code)
             continue
         try:
-            nuevas = normalize(p.id, r.json(), p.prioridad, p.capacidades_por_defecto,
-                               p.excepciones, emulates_tools=p.emula_tools)
+            nuevas = normalize(p.id, r.json(), p.prioridad, p.default_capabilities,
+                               p.exceptions, emulates_tools=p.emulates_tools)
         except (ValueError, TypeError, AttributeError, KeyError) as e:
             # Cuerpo no-JSON (ValueError/JSONDecodeError) o JSON de una forma
             # inesperada -- p.ej. un error de auth disfrazado de 200, que deja
@@ -107,7 +107,7 @@ async def sincronizar_catalogo(http: httpx.AsyncClient, proveedores: list[Provee
             # tirar abajo la sincronizacion de los demas.
             log.warning("catalogo de %s: no se pudo interpretar la respuesta de %s "
                         "(%s: %s). Se conserva el catalogo anterior.",
-                        p.id, p.modelos_path, type(e).__name__, e)
+                        p.id, p.models_path, type(e).__name__, e)
             continue
         if not nuevas:
             # Un 200 con cero modelos utilizables no autoriza a apagar lo que

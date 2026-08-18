@@ -1,11 +1,11 @@
 from llm_libre.client import build_request
-from llm_libre.proveedores import Proveedor
+from llm_libre.providers import Provider
 
 
-def _prov(clave="", extra=None):
-    return Proveedor(id="kilo", tier="gratis", dialecto="openai",
-                     base_url="https://api.kilo.ai/api/gateway", clave=clave,
-                     modelos_path="/models", cabeceras_extra=extra or {}, modelos_fijos=[])
+def _prov(api_key="", extra=None):
+    return Provider(id="kilo", tier="gratis", dialect="openai",
+                     base_url="https://api.kilo.ai/api/gateway", api_key=api_key,
+                     models_path="/models", extra_headers=extra or {}, fixed_models=[])
 
 
 def test_without_a_key_no_authorization_is_sent():
@@ -16,14 +16,14 @@ def test_without_a_key_no_authorization_is_sent():
 
 
 def test_a_whitespace_only_key_sends_no_authorization():
-    # cargar() normalises whitespace to ""; here we verify build_request does not
+    # load() normalises whitespace to ""; here we verify build_request does not
     # send Authorization for empty keys either.
-    _, headers, _ = build_request(_prov(clave="   "), {"model": "x"})
+    _, headers, _ = build_request(_prov(api_key="   "), {"model": "x"})
     assert "Authorization" not in headers
 
 
 def test_with_a_key_it_sends_a_bearer():
-    _, headers, _ = build_request(_prov(clave="abc"), {"model": "x"})
+    _, headers, _ = build_request(_prov(api_key="abc"), {"model": "x"})
     assert headers["Authorization"] == "Bearer abc"
 
 
@@ -87,7 +87,7 @@ def test_it_lets_any_other_unknown_field_through():
 
 
 # --- Task 13, round 5: the previous round's fix only corrected where
-#     _resolver_base_url STORES `Proveedor.base_url`, but build_request still
+#     _resolver_base_url STORES `Provider.base_url`, but build_request still
 #     assembled the final URL by concatenating raw text
 #     (`p.base_url.rstrip("/") + "/chat/completions"`). With a base_url carrying
 #     a query string (via CHATGPT_PROXY_URL with no path of its own, e.g.
@@ -97,8 +97,8 @@ def test_it_lets_any_other_unknown_field_through():
 #     not on `p.base_url`. ---
 
 def test_a_query_string_in_base_url_does_not_splinter_the_final_url():
-    prov = Proveedor(id="chatgpt", tier="gratis", dialecto="openai",
-                     base_url="https://blog.test:8888?token=abc", clave="",
-                     modelos_path="/models", cabeceras_extra={}, modelos_fijos=[])
+    prov = Provider(id="chatgpt", tier="gratis", dialect="openai",
+                     base_url="https://blog.test:8888?token=abc", api_key="",
+                     models_path="/models", extra_headers={}, fixed_models=[])
     url, _, _ = build_request(prov, {"model": "x"})
     assert url == "https://blog.test:8888/chat/completions?token=abc"

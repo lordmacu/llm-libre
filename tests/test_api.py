@@ -12,7 +12,7 @@ from llm_libre.almacen import Almacen
 from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.modelos import Capacidades, Ruta
-from llm_libre.proveedores import Proveedor
+from llm_libre.providers import Provider
 from llm_libre.proxy import (LIMITE_PROBE_BAJO_DEMANDA_S, TOPE_PENDIENTES,
                              UMBRAL_SOSPECHA, Proxy)
 
@@ -171,7 +171,7 @@ def cliente():
     almacen.crear_esquema()
     almacen.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -189,7 +189,7 @@ def estado_cliente():
     almacen.crear_esquema()
     almacen.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -295,7 +295,7 @@ def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
     almacen.crear_esquema()
     almacen.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
                     llaves={"buena"}, tope_pago_diario=200)
@@ -549,7 +549,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
     for _ in range(30):
         almacen1.registrar_evento("kilo/a:free", False, 0, 403, ahora)
     proxy1 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
@@ -559,7 +559,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
     estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
@@ -584,7 +584,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
     almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
     almacen1.registrar_sonda("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
     proxy1 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
@@ -599,7 +599,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -697,7 +697,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     almacen1.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"}))))
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
@@ -715,7 +715,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -796,7 +796,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     almacen1.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"}))))
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
@@ -827,7 +827,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -944,7 +944,7 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     almacen1.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
 
@@ -963,7 +963,7 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     estado2 = Estado(almacen=almacen2, proxy=proxy2, llaves={"buena"}, tope_pago_diario=200)
     cliente2 = TestClient(crear_app(estado2))
@@ -981,7 +981,7 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     almacen1.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))   # rota para CUALQUIER payload, incluida la sonda
     estado1 = Estado(almacen=almacen1, proxy=proxy1, llaves={"buena"}, tope_pago_diario=200)
@@ -1017,7 +1017,7 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     almacen2 = Almacen(ruta_db)
     almacen2.crear_esquema()
     proxy2 = Proxy(
-        {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -1123,8 +1123,8 @@ def _estado_libre_y_pago(tope_pago_diario, hacer_resp_free, hacer_resp_paid):
         Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
     ], 1.0)
     prov = {
-        "free_prov": Proveedor("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
-        "paid_prov": Proveedor("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
+        "free_prov": Provider("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
+        "paid_prov": Provider("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
     }
 
     def responder(req):
@@ -1190,8 +1190,8 @@ def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
         Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
     ], 1.0)
     prov = {
-        "free_prov": Proveedor("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
-        "paid_prov": Proveedor("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
+        "free_prov": Provider("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
+        "paid_prov": Provider("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
     }
     vacio = {"choices": [{"message": {"role": "assistant", "content": None}}]}
 
@@ -1307,7 +1307,7 @@ def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
     almacen.crear_esquema()
     almacen.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -1447,7 +1447,7 @@ def _cliente_que_piensa(contenido):
     almacen.crear_esquema()
     almacen.upsert_rutas(
         [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Proveedor("kilo", "gratis", "openai", "https://k.test", "",
+    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "",
                               "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={"choices": [

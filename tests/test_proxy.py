@@ -7,7 +7,7 @@ import pytest
 
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.almacen import Almacen
-from llm_libre.proveedores import Proveedor, cargar
+from llm_libre.providers import Provider, load
 from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAXIMO_S,
                              COOLDOWN_BASE_S, COOLDOWN_PAGO_DIRECTO_S,
                              LIMITE_PROBE_BAJO_DEMANDA_S,
@@ -23,9 +23,9 @@ def _ruta(modelo, proveedor="kilo", tier="gratis"):
     return Ruta(proveedor, modelo, tier, Capacidades(True, False, 100000, 4096))
 
 
-def _prov(pid="kilo", tier="gratis", desenvuelve_canvas=False):
-    return Proveedor(pid, tier, "openai", f"https://{pid}.test", "", "/models", {}, [],
-                     desenvuelve_canvas=desenvuelve_canvas)
+def _prov(pid="kilo", tier="gratis", unwraps_canvas=False):
+    return Provider(pid, tier, "openai", f"https://{pid}.test", "", "/models", {}, [],
+                     unwraps_canvas=unwraps_canvas)
 
 
 def _ok(contenido="hola"):
@@ -36,7 +36,7 @@ def _proxy(handler, proveedores=("kilo",), canvas=frozenset()):
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
     cliente = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return Proxy({p: _prov(p, desenvuelve_canvas=p in canvas) for p in proveedores},
+    return Proxy({p: _prov(p, unwraps_canvas=p in canvas) for p in proveedores},
                  almacen, cliente)
 
 
@@ -140,7 +140,7 @@ async def test_recorta_el_razonamiento_de_la_respuesta():
 
 
 async def test_desenvuelve_la_cerca_de_canvas_en_el_camino_no_streaming():
-    # Solo un proveedor que declara desenvuelve_canvas=True (chatgpt-proxy)
+    # Solo un proveedor que declara unwraps_canvas=True (chatgpt-proxy)
     # la desenvuelve -- ver el hallazgo 1 de la revision, mas abajo.
     cerca = (':::writing{title="x"}\nhola\n:::')
     p = _proxy(lambda req: httpx.Response(200, json=_ok(cerca)),
@@ -499,7 +499,7 @@ async def test_usa_el_timeout_propio_del_proveedor_si_lo_declara():
 
     almacen = Almacen(":memory:")
     almacen.crear_esquema()
-    lento = Proveedor("lento", "gratis", "openai", "https://lento.test", "", "/models",
+    lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     await p.completar([_ruta("a:free", proveedor="lento")], CUERPO, ahora=0.0)
@@ -520,7 +520,7 @@ async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real():
         vistos.append(req.extensions.get("timeout"))
         return httpx.Response(200, json=_ok())
 
-    chatgpt = next(p for p in cargar(YAML_REAL, {}) if p.id == "chatgpt")
+    chatgpt = next(p for p in load(YAML_REAL, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
     almacen = Almacen(":memory:")
     almacen.crear_esquema()

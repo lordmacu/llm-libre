@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from llm_libre.modelos import Capacidades
-from llm_libre.proveedores import cargar, rutas_fijas
+from llm_libre.providers import fixed_routes, load
 
 YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
@@ -20,7 +20,7 @@ def test_carga_los_proveedores_registrados():
     # descubiertos de /models y capacidades declaradas (su catalogo no las
     # trae). Es la unica ruta gratis con tools Y vision, las dos verificadas
     # en vivo contra el proxy desplegado.
-    ps = cargar(YAML, {"MINIMAX_API_KEY": "mm"})
+    ps = load(YAML, {"MINIMAX_API_KEY": "mm"})
     assert [p.id for p in ps] == ["chatgpt", "perplexity", "deepseek", "grok",
                                   "kilo", "minimax"]
 
@@ -31,9 +31,9 @@ def test_perplexity_declara_una_sola_ruta_sin_tools():
     # would route tool requests here only to answer prose -- so a request with
     # tools must NEVER land on this provider, and this declaration is what
     # guarantees it.
-    pplx = next(p for p in cargar(YAML, {}) if p.id == "perplexity")
-    assert pplx.emula_tools is False
-    rutas = rutas_fijas(pplx)
+    pplx = next(p for p in load(YAML, {}) if p.id == "perplexity")
+    assert pplx.emulates_tools is False
+    rutas = fixed_routes(pplx)
     assert [r.clave for r in rutas] == ["perplexity/turbo"]
     assert rutas[0].capacidades.tools is False
     assert rutas[0].tier == "gratis"
@@ -41,21 +41,21 @@ def test_perplexity_declara_una_sola_ruta_sin_tools():
 
 
 def test_kilo_sin_clave_queda_con_clave_vacia_y_sigue_siendo_valido():
-    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
-    assert kilo.clave == ""
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
+    assert kilo.api_key == ""
     assert kilo.tier == "gratis"
 
 
 def test_resuelve_las_claves_desde_el_entorno():
-    ps = cargar(YAML, {"MINIMAX_API_KEY": "secreta"})
-    assert next(p for p in ps if p.id == "minimax").clave == "secreta"
+    ps = load(YAML, {"MINIMAX_API_KEY": "secreta"})
+    assert next(p for p in ps if p.id == "minimax").api_key == "secreta"
 
 
 def test_las_cabeceras_extra_se_conservan(tmp_path):
     # Migrado a un YAML sintetico (revision post-Task-14): antes afirmaba
     # sobre `openrouter`, el unico proveedor real que declaraba
     # cabeceras_extra -- pero se saco del registro (ver
-    # test_carga_los_tres_proveedores) y este mecanismo (cargar() propaga
+    # test_carga_los_tres_proveedores) y este mecanismo (load() propaga
     # cabeceras_extra tal cual) no depende de que ningun proveedor puntual
     # lo use hoy.
     yaml_con_cabeceras = tmp_path / "con_cabeceras.yaml"
@@ -68,13 +68,13 @@ def test_las_cabeceras_extra_se_conservan(tmp_path):
         "    modelos_path: /models\n"
         "    cabeceras_extra:\n"
         "      X-Title: llm-libre\n")
-    p = cargar(str(yaml_con_cabeceras), {})[0]
-    assert p.cabeceras_extra["X-Title"] == "llm-libre"
+    p = load(str(yaml_con_cabeceras), {})[0]
+    assert p.extra_headers["X-Title"] == "llm-libre"
 
 
 def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
-    minimax = next(p for p in cargar(YAML, {}) if p.id == "minimax")
-    rutas = rutas_fijas(minimax)
+    minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
+    rutas = fixed_routes(minimax)
     assert len(rutas) == 1
     assert rutas[0].clave == "minimax/MiniMax-M3"
     assert rutas[0].tier == "pago"
@@ -90,33 +90,33 @@ def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
 
 
 def test_un_proveedor_gratis_no_tiene_modelos_fijos():
-    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
-    assert rutas_fijas(kilo) == []
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
+    assert fixed_routes(kilo) == []
 
 
 def test_clave_de_solo_espacios_se_normaliza_a_vacia():
-    ps = cargar(YAML, {"KILO_API_KEY": "   ", "MINIMAX_API_KEY": "\t\n"})
+    ps = load(YAML, {"KILO_API_KEY": "   ", "MINIMAX_API_KEY": "\t\n"})
     kilo = next(p for p in ps if p.id == "kilo")
     minimax = next(p for p in ps if p.id == "minimax")
-    assert kilo.clave == ""
-    assert minimax.clave == ""
+    assert kilo.api_key == ""
+    assert minimax.api_key == ""
 
 
 # --- Task 13: chatgpt-proxy, prioridad y base_url_env ---
 
 def test_chatgpt_tiene_prioridad_cero_y_es_gratis():
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.tier == "gratis"
     assert chatgpt.prioridad == 0
 
 
 def test_kilo_queda_en_prioridad_uno():
-    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.prioridad == 1
 
 
 def test_minimax_queda_en_prioridad_dos():
-    minimax = next(p for p in cargar(YAML, {}) if p.id == "minimax")
+    minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
     assert minimax.prioridad == 2
 
 
@@ -129,23 +129,23 @@ def test_un_proveedor_sin_prioridad_en_el_yaml_usa_el_default_cien(tmp_path):
         "    dialecto: openai\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = cargar(str(yaml_sin_prioridad), {})[0]
+    p = load(str(yaml_sin_prioridad), {})[0]
     assert p.prioridad == 100
 
 
 def test_base_url_env_usa_la_variable_de_entorno_si_esta_definida():
-    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
+    chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
 def test_base_url_env_cae_al_default_del_yaml_si_la_variable_falta():
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.base_url == "http://127.0.0.1:8888/v1"
 
 
 def test_base_url_env_cae_al_default_si_la_variable_esta_en_blanco():
-    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "   "})
+    chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "   "})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "http://127.0.0.1:8888/v1"
 
@@ -153,7 +153,7 @@ def test_base_url_env_cae_al_default_si_la_variable_esta_en_blanco():
 def test_un_proveedor_sin_base_url_env_no_se_afecta(tmp_path):
     # kilo no declara base_url_env: una variable de entorno que por
     # casualidad tenga su id no debe pisarle la url.
-    kilo = next(p for p in cargar(YAML, {"KILO_URL": "https://otra.test"}) if p.id == "kilo")
+    kilo = next(p for p in load(YAML, {"KILO_URL": "https://otra.test"}) if p.id == "kilo")
     assert kilo.base_url == "https://api.kilo.ai/api/gateway"
 
 
@@ -164,28 +164,28 @@ def test_un_proveedor_sin_base_url_env_no_se_afecta(tmp_path):
 #     catalogo sea igual de desnudo lo puede usar, no es especial de chatgpt. ---
 
 def test_chatgpt_se_descubre_por_modelos_path_no_por_modelos_fijos():
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
-    assert chatgpt.modelos_path == "/models"
-    assert chatgpt.modelos_fijos == []
+    chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
+    assert chatgpt.models_path == "/models"
+    assert chatgpt.fixed_models == []
 
 
 def test_chatgpt_declara_capacidades_por_defecto_con_tools_false():
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
-    assert chatgpt.capacidades_por_defecto == Capacidades(
+    chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
+    assert chatgpt.default_capabilities == Capacidades(
         tools=False, vision=False, contexto=128000, max_salida=8192)
 
 
 def test_kilo_no_declara_capacidades_por_defecto():
-    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
-    assert kilo.capacidades_por_defecto is None
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
+    assert kilo.default_capabilities is None
 
 
 def test_minimax_tampoco_declara_capacidades_por_defecto():
     # Sigue siendo el patron viejo: ids Y capacidades declaradas a mano
-    # (rutas_fijas), no descubrimiento con defaults.
-    minimax = next(p for p in cargar(YAML, {}) if p.id == "minimax")
-    assert minimax.capacidades_por_defecto is None
-    assert len(rutas_fijas(minimax)) == 1
+    # (fixed_routes), no descubrimiento con defaults.
+    minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
+    assert minimax.default_capabilities is None
+    assert len(fixed_routes(minimax)) == 1
 
 
 def test_un_proveedor_sin_capacidades_por_defecto_en_el_yaml_queda_en_none(tmp_path):
@@ -197,13 +197,13 @@ def test_un_proveedor_sin_capacidades_por_defecto_en_el_yaml_queda_en_none(tmp_p
         "    dialecto: openai\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = cargar(str(yaml_sin_defaults), {})[0]
-    assert p.capacidades_por_defecto is None
+    p = load(str(yaml_sin_defaults), {})[0]
+    assert p.default_capabilities is None
 
 
 # --- Revision del follow-up: rungs sin pinnear ---
 #
-# `rutas_fijas` estampando `prioridad=p.prioridad` no tenia NINGUN test que
+# `fixed_routes` estampando `prioridad=p.prioridad` no tenia NINGUN test que
 # distinguiera "toma la prioridad real del proveedor" de "siempre pone la
 # misma constante" -- inerte hoy porque minimax es el unico modelos_fijos y
 # es de pago, pero el registro invita a futuros proveedores gratis
@@ -219,13 +219,13 @@ def test_un_proveedor_sin_capacidades_por_defecto_en_el_yaml_queda_en_none(tmp_p
 #     para chatgpt. ---
 
 def test_chatgpt_declara_desenvuelve_canvas():
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
-    assert chatgpt.desenvuelve_canvas is True
+    chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
+    assert chatgpt.unwraps_canvas is True
 
 
 def test_kilo_no_desenvuelve_canvas():
-    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
-    assert kilo.desenvuelve_canvas is False
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
+    assert kilo.unwraps_canvas is False
 
 
 def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp_path):
@@ -237,8 +237,8 @@ def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp
         "    dialecto: openai\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = cargar(str(yaml_sin_canvas), {})[0]
-    assert p.desenvuelve_canvas is False
+    p = load(str(yaml_sin_canvas), {})[0]
+    assert p.unwraps_canvas is False
 
 
 # --- Hallazgo 2 de la revision (timeout por proveedor): agregado limpio, sin
@@ -249,7 +249,7 @@ def test_un_proveedor_sin_timeout_declarado_queda_en_none(tmp_path):
     # kilo sigue sin declarar timeout_s -- Task 14 solo le puso uno a
     # chatgpt (ver el test de abajo), a proposito: no se toca el timeout de
     # ningun otro proveedor.
-    kilo = next(p for p in cargar(YAML, {}) if p.id == "kilo")
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.timeout_s is None
 
 
@@ -260,7 +260,7 @@ def test_chatgpt_declara_su_propio_timeout_en_el_yaml_real():
     # (ver el comentario en proveedores.yaml para la medicion que lo
     # justifica) acota ese peor caso a la mitad sin bajarle el timeout a
     # nadie mas.
-    chatgpt = next(p for p in cargar(YAML, {}) if p.id == "chatgpt")
+    chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s == 45.0
 
 
@@ -274,7 +274,7 @@ def test_un_proveedor_puede_declarar_su_propio_timeout(tmp_path):
         "    base_url: https://lento.test\n"
         "    modelos_path: /models\n"
         "    timeout_s: 20\n")
-    p = cargar(str(yaml_con_timeout), {})[0]
+    p = load(str(yaml_con_timeout), {})[0]
     assert p.timeout_s == 20.0
 
 
@@ -289,7 +289,7 @@ def test_un_proveedor_puede_declarar_su_propio_timeout(tmp_path):
 #     recuperable. Se loguea igual, para que quede visible en produccion. ---
 
 def test_base_url_env_agrega_el_sufijo_si_la_variable_no_lo_trae():
-    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
+    chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
@@ -301,27 +301,27 @@ def test_base_url_env_con_query_string_no_le_astilla_el_sufijo_adentro():
     # ("...:8888?token=abc" -> "...:8888?token=abc/v1"). Hay que parsear la
     # URL y reconstruirla, no concatenar strings.
     chatgpt = next(
-        p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888?token=abc"})
+        p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888?token=abc"})
         if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1?token=abc"
 
 
 def test_base_url_env_no_duplica_el_sufijo_si_ya_lo_trae():
-    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
+    chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
 def test_base_url_env_con_barra_final_no_duplica_el_sufijo():
-    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/"})
+    chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v1"
 
 
 def test_base_url_env_loguea_cuando_normaliza(caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="llm_libre.proveedores"):
-        cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
+    with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
+        load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888"})
     assert "chatgpt" in caplog.text
     assert "/v1" in caplog.text
 
@@ -339,7 +339,7 @@ def test_base_url_env_sin_sufijo_en_el_default_no_agrega_nada(tmp_path):
         "    base_url_env: SUELTO_URL\n"
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
-    p = cargar(str(yaml_sin_sufijo), {"SUELTO_URL": "https://otra.test"})[0]
+    p = load(str(yaml_sin_sufijo), {"SUELTO_URL": "https://otra.test"})[0]
     assert p.base_url == "https://otra.test"
 
 
@@ -352,16 +352,16 @@ def test_base_url_env_sin_sufijo_en_el_default_no_agrega_nada(tmp_path):
 #     por si fue sin querer, no una correccion silenciosa. ---
 
 def test_base_url_env_con_ruta_propia_no_se_le_pisa_el_sufijo():
-    chatgpt = next(p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
+    chatgpt = next(p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
                    if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v2"
 
 
 def test_base_url_env_con_ruta_propia_loguea_advertencia_sin_modificar(caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="llm_libre.proveedores"):
+    with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
         chatgpt = next(
-            p for p in cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
+            p for p in load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v2"})
             if p.id == "chatgpt")
     assert chatgpt.base_url == "https://blog.test:8888/v2"
     assert "chatgpt" in caplog.text
@@ -370,12 +370,12 @@ def test_base_url_env_con_ruta_propia_loguea_advertencia_sin_modificar(caplog):
 
 def test_base_url_env_con_la_ruta_correcta_no_loguea_nada(caplog):
     import logging
-    with caplog.at_level(logging.WARNING, logger="llm_libre.proveedores"):
-        cargar(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
+    with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
+        load(YAML, {"CHATGPT_PROXY_URL": "https://blog.test:8888/v1"})
     assert caplog.text == ""
 
 
-def test_rutas_fijas_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_path):
+def test_fixed_routes_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_path):
     yaml_prioridad_rara = tmp_path / "prioridad_rara.yaml"
     yaml_prioridad_rara.write_text(
         "proveedores:\n"
@@ -390,20 +390,20 @@ def test_rutas_fijas_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_pa
         "        vision: false\n"
         "        contexto: 1000\n"
         "        max_salida: 100\n")
-    p = cargar(str(yaml_prioridad_rara), {})[0]
-    rutas = rutas_fijas(p)
+    p = load(str(yaml_prioridad_rara), {})[0]
+    rutas = fixed_routes(p)
     assert len(rutas) == 1
     assert rutas[0].prioridad == 77
 
 
 def test_deepseek_declara_dos_rutas_con_tools_emuladas():
     # deepseek-chat and deepseek-reasoner don't support native tool calling, but
-    # emula_tools:true makes rutas_fijas() report tools=True in capabilities:
+    # emula_tools:true makes fixed_routes() report tools=True in capabilities:
     # prompt-injection emulation (tool_emulator.py) is transparent to the router.
     # deepseek-vision NO se declara: no se verifico entrada de imagenes.
-    ds = next(p for p in cargar(YAML, {}) if p.id == "deepseek")
-    assert ds.emula_tools is True
-    rutas = rutas_fijas(ds)
+    ds = next(p for p in load(YAML, {}) if p.id == "deepseek")
+    assert ds.emulates_tools is True
+    rutas = fixed_routes(ds)
     assert [r.modelo_id for r in rutas] == ["deepseek-chat", "deepseek-reasoner"]
     assert all(r.capacidades.tools is True for r in rutas)
     assert all(r.capacidades.vision is False for r in rutas)

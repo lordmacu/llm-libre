@@ -50,7 +50,7 @@ class ReasoningTrimmer:
 
 def trim(text: str, unwrap_canvas: bool = False) -> tuple[str, str]:
     """`unwrap_canvas` (default False) is a PROVIDER DECISION
-    (Proveedor.desenvuelve_canvas), not a universal one: ':::note{...}' is also
+    (Provider.unwraps_canvas), not a universal one: ':::note{...}' is also
     standard Docusaurus/MDX syntax (admonitions), and applying it blindly strips
     the markers from a Kilo/OpenRouter response that is quoting or generating
     that syntax on purpose -- which is what happened before this fix. Only a
@@ -221,7 +221,7 @@ class CompositeStreamTrimmer:
 
     `unwrap_canvas` (default False, same argument as in `trim()`) is a DECISION
     OF THE PROVIDER serving this stream -- proxy.py passes it from
-    Proveedor.desenvuelve_canvas. With False the canvas step is skipped entirely:
+    Provider.unwraps_canvas. With False the canvas step is skipped entirely:
     CanvasFenceTrimmer is not even instantiated, so it is obvious by reading that
     this branch does nothing to ':::' -- legitimate Docusaurus/MDX syntax in any
     provider that is not chatgpt-proxy."""
