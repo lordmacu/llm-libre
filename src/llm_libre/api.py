@@ -19,28 +19,24 @@ ALIASES = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
 
 
 def _read_field(campo: str, valor_bruto, mensaje: str, calcular):
-    """Corre `calcular` (una funcion de cero argumentos que interpreta
-    `valor_bruto` -- un valor que vino TAL CUAL del cuerpo JSON del
-    cliente, nunca algo que el gateway arma) y convierte cualquier
-    `TypeError`/`ValueError`/`AttributeError` -- la familia de excepciones
-    que dispara un campo con el TIPO equivocado (`.strip()` sobre un
-    numero, `int()` sobre una lista, `set()` sobre un booleano o sobre una
-    lista que contiene una lista) -- en un 400 uniforme, en vez de
-    dejarla escapar sin atrapar hasta el manejador generico de FastAPI
-    como un 500 opaco.
+    """Run `calcular` (a zero-argument function interpreting `valor_bruto` -- a
+    value that arrived VERBATIM from the client's JSON body, never something the
+    gateway builds) and convert any `TypeError`/`ValueError`/`AttributeError` --
+    the family of exceptions a field of the WRONG TYPE raises (`.strip()` on a
+    number, `int()` on a list, `set()` on a boolean or on a list containing a
+    list) -- into a uniform 400, instead of letting it escape uncaught to
+    FastAPI's generic handler as an opaque 500.
 
-    Revision post-Task-14 (segundo gate): el mismo bug penetro dos veces
-    seguidas -- primero en `x_min_contexto` (arreglado a mano con un
-    try/except puntual), despues en `x_requiere` (el mismo patron,
-    reinventado) -- y una tercera instancia (`model`, via `.strip()`)
-    seguia sin atrapar cuando se encontraron las otras dos. El eje real
-    nunca fue "este campo puntual", fue "cualquier campo que este
-    endpoint interpreta antes de usarlo llega crudo del cliente, sin
-    tipo garantizado" -- ver el docstring de `build_request`, el mismo
-    principio de "esto es passthrough, no confiar en la forma". Esta
-    funcion es el punto UNICO por el que pasa esa interpretacion de aca
-    en mas, para que un cuarto campo (si este endpoint gana uno) no
-    tenga que reinventar el try/except ni arriesgarse a olvidarlo."""
+    Post-Task-14 review (second gate): the same bug got through twice in a row --
+    first in `x_min_contexto` (fixed by hand with a local try/except), then in
+    `x_requiere` (the same pattern, reinvented) -- and a third instance (`model`,
+    via `.strip()`) was still uncaught when the other two were found. The real
+    axis was never "this particular field", it was "every field this endpoint
+    interprets before using it arrives raw from the client, with no guaranteed
+    type" -- see the docstring of `build_request`, the same "this is passthrough,
+    do not trust the shape" principle. This function is the SINGLE point that
+    interpretation goes through from now on, so a fourth field (if this endpoint
+    gains one) does not have to reinvent the try/except or risk forgetting it."""
     try:
         return calcular()
     except (TypeError, ValueError, AttributeError):
@@ -49,24 +45,24 @@ def _read_field(campo: str, valor_bruto, mensaje: str, calcular):
 
 
 def _has_image(cuerpo: dict) -> bool:
-    """True si algun mensaje trae una imagen.
+    """True if any message carries an image.
 
-    En el formato OpenAI, `content` es un string (solo texto) o una LISTA de
-    partes, y una imagen es una parte con `type: "image_url"` (formato
-    clasico) o `"input_image"` (el de la Responses API, que varios clientes
-    ya mandan). Se aceptan los dos: el gateway existe para que cambiar
-    `base_url` alcance, y rechazar el formato nuevo obligaria al cliente a
-    saber contra que proxy esta hablando.
+    In the OpenAI format, `content` is either a string (text only) or a LIST of
+    parts, and an image is a part with `type: "image_url"` (the classic format)
+    or `"input_image"` (the Responses API one, which several clients already
+    send). Both are accepted: the gateway exists so that changing `base_url` is
+    enough, and rejecting the newer format would force the client to know which
+    proxy it is talking to.
 
-    Sin esto, `requiere_vision` solo se activaba con el alias `auto:vision` o
-    con `x_requiere` -- o sea, solo si el cliente AVISABA. Un cliente que
-    simplemente manda la imagen, que es lo normal contra una API OpenAI,
-    podia terminar en una ruta de solo texto: 200 con una respuesta que
-    ignora la imagen, o un 400 del proveedor. Ninguno de los dos dice "esa
-    ruta no ve imagenes".
+    Without this, `needs_vision` was only set by the `auto:vision` alias or by
+    `x_requiere` -- that is, only if the client ANNOUNCED it. A client that
+    simply sends the image, which is the normal thing against an OpenAI API,
+    could end up on a text-only route: a 200 with a response that ignores the
+    image, or a 400 from the provider. Neither of those says "that route cannot
+    see images".
 
-    Ante un cuerpo malformado devuelve False y deja que el proveedor rechace:
-    esta funcion elige ruta, no valida el pedido.
+    On a malformed body it returns False and lets the provider reject: this
+    function picks a route, it does not validate the request.
     """
     mensajes = cuerpo.get("messages")
     if not isinstance(mensajes, list):
@@ -84,9 +80,9 @@ def _has_image(cuerpo: dict) -> bool:
 
 
 def parse_request(cuerpo: dict) -> RouteRequest:
-    # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
-    # colarse como si fuera un id explicito (quedaria vacio tras el strip y
-    # produciria un 404 confuso sobre el modelo '').
+    # A "model" of pure whitespace is, for all practical purposes, absent: it
+    # must not sneak through as if it were an explicit id (it would be empty
+    # after the strip and would produce a confusing 404 about the model '').
     modelo_bruto = cuerpo.get("model")
     modelo_pedido = _read_field(
         "model", modelo_bruto, "model debe ser un string",
@@ -104,18 +100,18 @@ def parse_request(cuerpo: dict) -> RouteRequest:
         elif sufijo == "vision":
             requiere_vision = True
         elif sufijo:
-            # Revision post-Task-14 (gate): un sufijo "auto:<algo>" que no es
-            # ni un perfil conocido ni "tools"/"vision" (p.ej. "auto:turbo",
-            # un typo de "auto:tools") caia por las tres ramas de arriba SIN
-            # tocar nada -- silenciosamente identico a pedir "auto" liso, sin
-            # ningun aviso de que el sufijo se ignoro. Para un cliente que
-            # de verdad queria exigir una capacidad (p.ej. tools, para un
-            # agente que espera una tool_call) eso es peligroso en silencio:
-            # recibe una respuesta "balanceada" comun, no el 400 que le
-            # habria dicho que escribio mal el alias. "auto" sin ":" (sufijo
-            # == "") sigue siendo valido y NO entra aca -- ver PROFILES,
-            # que ya incluye "balanceado" (asi que "auto:balanceado"
-            # tambien resuelve normal, sin pasar por esta rama).
+            # Post-Task-14 review (gate): an "auto:<something>" suffix that is
+            # neither a known profile nor "tools"/"vision" (e.g. "auto:turbo", a
+            # typo for "auto:tools") fell through all three branches above WITHOUT
+            # touching anything -- silently identical to asking for plain "auto",
+            # with no warning that the suffix was ignored. For a client that
+            # genuinely wanted to require a capability (e.g. tools, for an agent
+            # expecting a tool_call) that is dangerous in silence: it receives an
+            # ordinary "balanced" response, not the 400 that would have told it the
+            # alias was misspelled. "auto" with no ":" (suffix == "") is still
+            # valid and does NOT reach here -- see PROFILES, which already includes
+            # "balanceado" (so "auto:balanceado" also resolves normally, without
+            # going through this branch).
             raise HTTPException(400, {
                 "message": f"alias de modelo desconocido: '{modelo_pedido}'",
                 "sugerencias": ALIASES,
@@ -124,16 +120,15 @@ def parse_request(cuerpo: dict) -> RouteRequest:
         modelo = modelo_pedido
 
     def _normalizar_exigidas():
-        # `x_requiere: "tools"` (un string suelto, en vez de la lista
-        # documentada) se acepta como un valor unico -- una API REST
-        # comun. Cualquier otra cosa que no sea un string ni una lista (o
-        # una lista con un elemento no-hasheable, como `[["tools"]]`)
-        # revienta ADENTRO de este `set(...)` con TypeError -- eso es lo
-        # que `_read_field` atrapa y convierte en 400. `set("tools")`
-        # (sin el envoltorio de arriba) iteraria caracter por caracter
-        # -- {'t','o','l','s'} -- y la exigencia se ignoraria en
-        # silencio; por eso el string se envuelve en una lista ANTES del
-        # set(), no despues.
+        # `x_requiere: "tools"` (a bare string, instead of the documented
+        # list) is accepted as a single value -- an ordinary REST API
+        # convenience. Anything else that is neither a string nor a list (or a
+        # list with an unhashable element, like `[["tools"]]`) blows up INSIDE
+        # this `set(...)` with a TypeError -- which is what `_read_field`
+        # catches and turns into a 400. `set("tools")` (without the wrapping
+        # above) would iterate character by character -- {'t','o','l','s'} --
+        # and the requirement would be silently ignored; that is why the string
+        # is wrapped in a list BEFORE the set(), not after.
         valor = cuerpo.get("x_requiere") or []
         if isinstance(valor, str):
             valor = [valor]
@@ -166,12 +161,12 @@ class State:
     api_keys: set
     daily_paid_cap: int
     rate_limiter: PerKeyRateLimiter = field(default_factory=lambda: PerKeyRateLimiter(60))
-    providers: list = field(default_factory=list)   # lo usa el planificador
-    http: object = None                                # cliente httpx compartido
-    # Generador para el sorteo entre rutas empatadas (ver router.shuffle_ties).
-    # None = sin sorteo, orden estrictamente determinista. Se inyecta desde
-    # principal.crear_estado() segun ROTAR_EMPATES para que los tests puedan
-    # armar un State determinista sin pasar por variables de entorno.
+    providers: list = field(default_factory=list)   # used by the scheduler
+    http: object = None                             # shared httpx client
+    # Generator for the draw between tied routes (see router.shuffle_ties).
+    # None = no draw, strictly deterministic order. It is injected from
+    # principal.crear_estado() according to ROTAR_EMPATES so tests can build a
+    # deterministic State without going through environment variables.
     rng: object = None
 
 
@@ -198,10 +193,10 @@ def _resolve_api_key(x_api_key: str | None, authorization: str | None) -> str | 
 
 
 def create_app(estado: State) -> FastAPI:
-    # title/version/summary/description y personalizar_openapi (Task 14) solo
-    # enriquecen lo que sirve /docs y /openapi.json -- ver llm_libre.openapi.
-    # No tocan ninguna ruta ni su logica: require_api_key, parse_request y
-    # el passthrough de completions siguen exactamente igual.
+    # title/version/summary/description and personalizar_openapi (Task 14) only
+    # enrich what /docs and /openapi.json serve -- see llm_libre.openapi. They
+    # touch no route and no logic: require_api_key, parse_request and the
+    # completions passthrough stay exactly the same.
     app = FastAPI(title=TITULO, version=VERSION, summary=RESUMEN, description=DESCRIPCION)
     personalizar_openapi(app)
 
@@ -216,8 +211,8 @@ def create_app(estado: State) -> FastAPI:
     def _routes_for(cuerpo: dict, llave: str) -> tuple[list, object]:
         pedido = parse_request(cuerpo)
         activas = estado.store.active_routes()
-        # Un id explicito que ya no existe merece un 404 con pistas, no un 400 generico:
-        # es exactamente el fallo que este proyecto existe para evitar.
+        # An explicit id that no longer exists deserves a 404 with hints, not a
+        # generic 400: it is exactly the failure this project exists to prevent.
         if pedido.model is not None and not any(r.model_id == pedido.model for r in activas):
             raise HTTPException(404, {
                 "message": f"el modelo '{pedido.model}' ya no existe",
@@ -246,16 +241,16 @@ def create_app(estado: State) -> FastAPI:
         crudo = bool(cuerpo.get("x_crudo"))
 
         def _contar_uso_pago(ruta) -> None:
-            # HIGH 4 (round 9): se llama por cada intento FACTURABLE contra
-            # una ruta de pago -- el proveedor cobra 200 con contenido util,
-            # 200 vacio, y una razonamiento que se gasto el presupuesto por
-            # igual (genera tokens en los tres casos); solo un error de RED
-            # o un status distinto de 200 no genera cobro. Antes esto solo
-            # se llamaba en el EXITO (`r.route`/`on_route_committed`): un
-            # 200-vacio de una ruta de pago se facturaba de verdad y no
-            # aparecia ni en /v1/uso ni contra TOPE_PAGO_DIARIO -- medido,
-            # 40/40 llamadas facturables con `pago_hoy: 0`. Ver proxy.py
-            # (`on_billable_attempt`) para donde se decide "facturable".
+            # HIGH 4 (round 9): called for every BILLABLE attempt against a paid
+            # route -- the provider charges for a 200 with useful content, an
+            # empty 200, and a reasoning model that burned its budget alike (it
+            # generates tokens in all three cases); only a NETWORK error or a
+            # non-200 status produces no charge. This used to be called only on
+            # SUCCESS (`r.route`/`on_route_committed`): an empty 200 from a paid
+            # route was genuinely billed and appeared neither in /v1/uso nor
+            # against TOPE_PAGO_DIARIO -- measured, 40/40 billable calls with
+            # `pago_hoy: 0`. See proxy.py (`on_billable_attempt`) for where
+            # "billable" is decided.
             estado.store.add_paid_usage(
                 llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
@@ -268,26 +263,25 @@ def create_app(estado: State) -> FastAPI:
         r = await estado.proxy.complete(rutas, cuerpo, ahora, crudo,
                                          on_billable_attempt=_contar_uso_pago)
         if r.status == 503 and r.upstream_code == 404 and pedido.model is not None:
-            # ALSO de la revision round 6 -- literalmente la razon de ser
-            # del proyecto: `pedido.model` SIGUE en nuestro catalogo (paso
-            # el check 404 de `_routes_for`, mas arriba) pero el proveedor
-            # real ya no lo tiene: un 404 genuino, en vivo. La ruta ya se
-            # llevo el golpe de confiabilidad (404 es evidencia de la ruta
-            # por default, ver proxy._is_client_error), pero sin este
-            # chequeo el cliente solo veia un 503 generico
-            # ("detalle": "HTTP 404") -- indistinguible de cualquier otra
-            # indisponibilidad transitoria, durante toda la ventana de hasta
-            # 5h antes del proximo sync de catalogo (nunca para rutas de
-            # pago, que no se sondean).
+            # ALSO from the round 6 review -- literally the project's reason to
+            # exist: `pedido.model` is STILL in our catalogue (it passed the 404
+            # check in `_routes_for`, above) but the real provider no longer has
+            # it: a genuine 404, live. The route already took the reliability hit
+            # (a 404 is evidence about the route by default, see
+            # proxy._is_client_error), but without this check the client only saw
+            # a generic 503 ("detalle": "HTTP 404") -- indistinguishable from any
+            # other transient unavailability, for the entire window of up to 5h
+            # before the next catalogue sync (never, for paid routes, which are
+            # not probed).
             #
-            # Solo con un modelo EXPLICITO: en modo "auto" `pedido.model`
-            # es None, no hay un id puntual sobre el cual sugerir, y la ruta
-            # que fallo no es necesariamente la unica candidata razonable --
-            # ese caso se queda con el 503 de siempre.
+            # Only with an EXPLICIT model: in "auto" mode `pedido.model` is None,
+            # there is no particular id to make suggestions about, and the route
+            # that failed is not necessarily the only reasonable candidate -- that
+            # case keeps the usual 503.
             #
-            # Solo el camino sincronico: en streaming el status 200 y las
-            # cabeceras SSE ya salieron antes de que el proxy sepa si la
-            # ruta sirvio, asi que no hay margen HTTP para cambiarlo a 404.
+            # Only the synchronous path: when streaming, the 200 status and the
+            # SSE headers have already gone out before the proxy knows whether the
+            # route served, so there is no HTTP room left to change it to a 404.
             raise HTTPException(404, {
                 "message": f"el modelo '{pedido.model}' ya no existe",
                 "sugerencias": _similar_ids(pedido.model, estado.store.active_routes()),
@@ -298,19 +292,20 @@ def create_app(estado: State) -> FastAPI:
             cabeceras["X-Tier"] = r.route.tier
         cuerpo_resp = r.json
         if r.status == 200 and r.reasoning and isinstance(cuerpo_resp, dict):
-            # §6.1: el razonamiento recortado se devuelve en un campo aparte,
-            # "para quien lo quiera". Antes se recortaba de `content` y se
-            # tiraba, asi que con el default `x_crudo: false` no habia forma de
-            # recuperarlo. Va al nivel superior (no dentro de `choices`) porque
-            # ahi cualquier SDK de OpenAI lo ignora sin romperse, que es la
-            # unica condicion que el contrato pone a las extensiones.
+            # Section 6.1: the trimmed reasoning is returned in a separate
+            # field, "for whoever wants it". It used to be trimmed out of
+            # `content` and thrown away, so with the default `x_crudo: false`
+            # there was no way to recover it. It goes at the top level (not
+            # inside `choices`) because there any OpenAI SDK ignores it without
+            # breaking, which is the only condition the contract places on
+            # extensions.
             #
-            # LIMITACION CONOCIDA, deliberada: en streaming NO se devuelve.
-            # Meterlo ahi obliga a emitir un evento SSE no estandar, que es
-            # justo lo que el §6 descarta por arriesgar el parseo de los SDK
-            # que este contrato existe para complacer. Un cliente que streamea
-            # y quiere el razonamiento pide `x_crudo: true` y lo recibe dentro
-            # del `content`, tal cual lo mando el proveedor.
+            # A KNOWN, deliberate LIMITATION: it is NOT returned when streaming.
+            # Putting it there would require emitting a non-standard SSE event,
+            # which is exactly what section 6 rules out for risking the parsing
+            # of the SDKs this contract exists to please. A client that streams
+            # and wants the reasoning asks for `x_crudo: true` and receives it
+            # inside `content`, exactly as the provider sent it.
             cuerpo_resp = {**cuerpo_resp, "x_razonamiento": r.reasoning}
         return JSONResponse(cuerpo_resp, status_code=r.status, headers=cabeceras)
 
@@ -327,15 +322,14 @@ def create_app(estado: State) -> FastAPI:
         require_api_key(x_api_key, authorization)
         ahora = time.time()
         metricas = _metrics(estado, ahora)
-        # Ordenado con la MISMA clave que usa router.order_routes (perfil
-        # "balanceado", el que tambien usa el puntaje de cada fila) -- no un
-        # sort propio por puntaje: este endpoint es para auditar POR QUE el
-        # router eligio lo que eligio (README), y antes podia mostrar una
-        # ruta arriba de todo mientras X-Ruta-Usada decia otra distinta,
-        # porque no miraba `prioridad` ni el cooldown -- una ruta castigada
-        # (que el router jamas elegiria ahora mismo) podia encabezar la
-        # tabla. `en_cooldown_hasta` sigue expuesto por fila para
-        # diagnostico; lo que cambia es el ORDEN.
+        # Sorted with the SAME key router.order_routes uses (the "balanceado"
+        # profile, the same one each row's score uses) -- not a private sort by
+        # score: this endpoint exists to audit WHY the router chose what it chose
+        # (README), and it used to be able to show one route at the top while
+        # X-Ruta-Usada said a different one, because it looked at neither
+        # `prioridad` nor the cooldown -- a punished route (one the router would
+        # never pick right now) could head the table. `en_cooldown_hasta` is still
+        # exposed per row for diagnostics; what changes is the ORDER.
         activas = sorted(estado.store.active_routes(),
                          key=lambda r: sort_key(r, metricas[r.key], "balanceado", ahora))
         filas = []
@@ -344,22 +338,23 @@ def create_app(estado: State) -> FastAPI:
             medida = m.quality_measured_at is not None
             filas.append({"clave": r.key, "tier": r.tier, "prioridad": r.priority,
                           "puntaje": round(score(m, "balanceado"), 4),
-                          # "nunca medida" se dice, no se disfraza: mostrar el
-                          # neutro en `calidad` como si alguien lo hubiera
-                          # medido es lo que hacia invisible que `auto` estaba
-                          # ordenando por un supuesto. El valor que SI entro al
-                          # puntaje va aparte, en `calidad_asumida`.
+                          # "never measured" is stated, not disguised: showing
+                          # the neutral value in `calidad` as if someone had
+                          # measured it is what made it invisible that `auto` was
+                          # ordering by an assumption. The value that DID enter
+                          # the score goes separately, in `calidad_asumida`.
                           "calidad": round(m.quality, 3) if medida else None,
                           "calidad_medida": medida,
                           "calidad_asumida": None if medida else round(m.quality, 3),
                           "ultima_sonda_calidad": _iso(m.quality_measured_at),
                           "ultima_sonda": _iso(m.last_probe_at),
                           "confiabilidad": round(m.reliability, 3),
-                          # Dos numeros distintos a proposito: ttft_p50_ms es
-                          # tiempo al primer token (solo lo mide el streaming, y
-                          # es lo que pesa en el puntaje); latencia_p50_ms es el
-                          # round-trip completo (no-streaming y sondas). Antes
-                          # compartian columna y el promedio no significaba nada.
+                          # Two different numbers on purpose: ttft_p50_ms is
+                          # time to first token (only streaming measures it, and
+                          # it is what weighs in the score); latencia_p50_ms is
+                          # the complete round-trip (non-streaming and probes).
+                          # They used to share a column and the average meant
+                          # nothing.
                           "ttft_p50_ms": m.ttft_p50_ms,
                           "latencia_p50_ms": m.latency_p50_ms,
                           "en_cooldown_hasta": m.cooldown_until,
@@ -376,39 +371,36 @@ def create_app(estado: State) -> FastAPI:
 
     @app.get("/health", **HEALTH_DOCS)
     def health():
-        # Honesto: mira si hay una ruta VIVA y servible, no si el proceso esta
-        # arriba. "Viva" exige DOS cosas, no una: no estar en cooldown (round
-        # 8: SOLO lo dispara un 429 de inmediato, o una SONDA -- periodica o
-        # bajo demanda -- que confirma que la ruta esta rota; el trafico de
-        # un cliente real nunca excluye una ruta directo, ver el comentario
-        # de cabecera de SUSPICION_THRESHOLD en proxy.py) Y evidencia POSITIVA de
-        # que sirve (`Storage.tiene_evidencia_de_vida`).
+        # Honest: it looks at whether there is a LIVE, serviceable route, not at
+        # whether the process is up. "Live" requires TWO things, not one: not
+        # being in cooldown (round 8: ONLY a 429 triggers it immediately, or a
+        # PROBE -- periodic or on demand -- confirming the route is broken; a real
+        # client's traffic never excludes a route directly, see the header comment
+        # of SUSPICION_THRESHOLD in proxy.py) AND POSITIVE evidence that it serves
+        # (`Storage.has_liveness_evidence`).
         #
-        # Task 13, revision round 6, Parte 2: ESTO YA NO MIRA `confiabilidad`.
-        # `confiabilidad` es un promedio de trafico reciente, y un promedio se
-        # arrastra a 0 con cualquier patron repetido de UN cliente -- el caso
-        # que lo probo es `403`, genuinamente ambiguo (cuenta suspendida =
-        # evidencia de la ruta, vs. contenido moderado = evidencia del
-        # PEDIDO) y que el gateway no puede desambiguar sin parsear el cuerpo
-        # especifico de cada proveedor. 30 pedidos con contenido moderado de
-        # una sola llave alcanzaban para tirar `/health` a "caido" para TODAS
-        # las llaves, sobreviviendo un reinicio del proceso contra la misma
-        # base -- porque Coolify usa este endpoint como health check y
-        # reinicia el contenedor cuando falla.
+        # Task 13, round 6 review, Part 2: THIS NO LONGER LOOKS AT `reliability`.
+        # `reliability` is an average of recent traffic, and an average is dragged
+        # to 0 by any repeated pattern from ONE client -- the case that proved it
+        # is `403`, genuinely ambiguous (suspended account = evidence about the
+        # route, vs moderated content = evidence about the REQUEST) and one the
+        # gateway cannot disambiguate without parsing each provider's specific
+        # body. 30 requests with moderated content from a single key were enough
+        # to drop `/health` to "caido" for ALL keys, surviving a process restart
+        # against the same database -- because Coolify uses this endpoint as its
+        # health check and restarts the container when it fails.
         #
-        # "Evidencia de vida, no ausencia de muerte": un exito reciente
-        # prueba que la ruta sirve; mil fallos de un mismo cliente no prueban
-        # que no sirve. Los fallos, solos, NUNCA bastan para declarar una
-        # ruta muerta aca -- ver el docstring de `tiene_evidencia_de_vida`
-        # para el criterio completo (exito real reciente, o sonda de salud
-        # reciente exitosa, o ninguna telemetria todavia).
+        # "Evidence of life, not absence of death": a recent success proves the
+        # route serves; a thousand failures from one client do not prove it does
+        # not. Failures alone are NEVER enough to declare a route dead here -- see
+        # the docstring of `has_liveness_evidence` for the full criterion (a recent
+        # real success, or a recent successful health probe, or no telemetry yet).
         #
-        # `/v1/ranking` (mas abajo) sigue usando `confiabilidad` exactamente
-        # como antes -- eso NO cambia. La asimetria es a proposito: una ruta
-        # mal puntuada en el ranking solo pierde posicion y se autocorrige
-        # sola; una ruta que `/health` declara muerta reinicia el
-        # contenedor. El ranking puede darse el lujo de ser sensible: la
-        # salud no.
+        # `/v1/ranking` (below) still uses `reliability` exactly as before -- that
+        # does NOT change. The asymmetry is deliberate: a badly scored route in the
+        # ranking merely loses position and self-corrects; a route `/health`
+        # declares dead restarts the container. The ranking can afford to be
+        # sensitive: health cannot.
         ahora = time.time()
         activas = estado.store.active_routes()
         metricas = _metrics(estado, ahora)
@@ -436,26 +428,26 @@ def create_app(estado: State) -> FastAPI:
 
 def _no_routes(activas: list, pedido, metricas: dict, ahora: float,
                tope_alcanzado: bool) -> None:
-    """Levanta el error correcto cuando la cadena de intentos sale vacia.
+    """Raise the right error when the chain of attempts comes back empty.
 
-    El §9 del diseno separa dos situaciones que la version anterior mezclaba en
-    un solo 400:
+    Design section 9 separates two situations the previous version conflated into
+    a single 400:
 
-    - **Ninguna ruta puede cumplir lo pedido** (capacidades, vision, contexto
-      que nadie tiene) -> `400`. Eso si es un error del cliente.
-    - **Hay rutas que podrian servir pero estan todas caidas o en cooldown**
-      (incluido el caso "la llave supero su tope de pago diario") -> `503`,
-      con `proxima_liberacion`.
+    - **No route can satisfy the request** (capabilities, vision, a context
+      nobody has) -> `400`. That genuinely is a client error.
+    - **There are routes that could serve but they are all down or in cooldown**
+      (including the case "this key exceeded its daily paid cap") -> `503`, with
+      `proxima_liberacion`.
 
-    Por que importa: `ordenar` filtra los cooldowns, asi que en CUALQUIER
-    apagon de los tiers gratis -- el fallo esperado, no uno raro -- la lista
-    llegaba vacia y salia un 400. Todo SDK y toda capa de alertas leen 400 como
-    "tu peticion esta mal formada": no reintentan y no despiertan a nadie.
+    Why it matters: `order_routes` filters out cooldowns, so in ANY outage of the
+    free tiers -- the expected failure, not an exotic one -- the list arrived
+    empty and a 400 went out. Every SDK and every alerting layer reads 400 as
+    "your request is malformed": they do not retry and they wake nobody.
 
-    `x_permitir_pago: false` NO se considera aca: es una politica del que
-    llama, no una capacidad que falte en el pozo. Un cliente que prohibe el
-    pago y se queda sin rutas gratis vivas esta en el caso de
-    indisponibilidad (503, reintentable), no en el de peticion invalida.
+    `x_permitir_pago: false` is NOT considered here: it is a policy of the
+    caller, not a capability missing from the pool. A client that forbids paid
+    routes and runs out of live free ones is in the unavailability case (503,
+    retryable), not in the invalid-request one.
     """
     compat = compatible_routes(activas, pedido)
     if not compat:
@@ -470,23 +462,23 @@ def _no_routes(activas: list, pedido, metricas: dict, ahora: float,
         "message": "todas las rutas que podrian servir estan caidas o en cooldown",
         "pedido": pedido.as_wire(),
         "rutas_compatibles": len(compat),
-        # Cuando se libera la PRIMERA de ellas. None = ninguna esta en castigo
-        # (estan descartadas por otra razon, p.ej. el tope de pago).
+        # When the FIRST of them is released. None = none is being punished
+        # (they are excluded for another reason, e.g. the paid cap).
         "proxima_liberacion": min(liberaciones) if liberaciones else None,
         "tope_pago_alcanzado": tope_alcanzado,
     })
 
 
 def _similar_ids(pedido: str, activas: list) -> list[str]:
-    # Round 7, LOW del gate: el llamador del 404-en-vivo (mas arriba) pasa
-    # `activas` SIN filtrar -- ese id de `pedido` TODAVIA esta en el
-    # catalogo local (esa es la premisa entera de ese caso: sigue en el
-    # catalogo, pero el proveedor real ya no lo tiene). Sin excluirlo aca,
-    # `get_close_matches` lo encuentra a SI MISMO como el "parecido" mas
-    # obvio (distancia cero) y el cliente lee `"el modelo 'a:free' ya no
-    # existe"` con `sugerencias: ['a:free', ...]`. Se excluye ACA, en la
-    # funcion, y no en cada llamador: una lista de sugerencias nunca debe
-    # poder sugerir el mismo id que se acaba de declarar muerto.
+    # Round 7, LOW from the gate: the caller of the live-404 (above) passes
+    # `activas` UNFILTERED -- that `pedido` id is STILL in the local catalogue
+    # (that is the entire premise of that case: still in the catalogue, but the
+    # real provider no longer has it). Without excluding it here,
+    # `get_close_matches` finds IT ITSELF as the most obvious "match" (distance
+    # zero) and the client reads `"el modelo 'a:free' ya no existe"` with
+    # `sugerencias: ['a:free', ...]`. It is excluded HERE, in the function, and
+    # not in each caller: a suggestion list must never be able to suggest the very
+    # id just declared dead.
     candidatos = [r.model_id for r in activas if r.model_id != pedido]
     return difflib.get_close_matches(pedido, candidatos, n=3, cutoff=0.3)
 
@@ -501,8 +493,8 @@ def _metrics(estado: State, ahora: float) -> dict:
     base = estado.store.metrics()
     for clave, hasta in estado.proxy.cooldowns.items():
         if clave in base:
-            # `replace` y no `type(m)(...)` posicional: reconstruir a mano deja
-            # afuera cualquier campo nuevo de Metricas (p.ej. calidad_medida_en),
-            # y una ruta en cooldown pasaria a parecer "nunca medida".
+            # `replace` and not a positional `type(m)(...)`: rebuilding by hand
+            # leaves out any new Metrics field (e.g. quality_measured_at), and a
+            # route in cooldown would start looking "never measured".
             base[clave] = replace(base[clave], cooldown_until=hasta)
     return base
