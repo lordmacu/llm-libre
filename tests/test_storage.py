@@ -6,201 +6,198 @@ from llm_libre.storage import Storage
 from llm_libre.models import Capabilities, Route
 
 
-def _ruta(modelo="a:free", provider="kilo", tools=True, priority=100):
+def _route(modelo="a:free", provider="kilo", tools=True, priority=100):
     return Route(provider, modelo, "gratis",
                 Capabilities(tools=tools, vision=False, context=1000, max_output=100),
                 priority=priority)
 
 
 @pytest.fixture
-def almacen():
+def store():
     a = Storage(":memory:")
     a.create_schema()
     return a
 
 
-def test_guarda_y_devuelve_rutas(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    activas = almacen.active_routes()
-    assert len(activas) == 1
-    assert activas[0].key == "kilo/a:free"
-    assert activas[0].capabilities.tools is True
+def test_it_stores_and_returns_routes(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    active = store.active_routes()
+    assert len(active) == 1
+    assert active[0].key == "kilo/a:free"
+    assert active[0].capabilities.tools is True
 
 
-def test_una_ruta_que_desaparece_se_desactiva_pero_no_se_borra(almacen):
-    almacen.upsert_routes([_ruta("vieja:free"), _ruta("nueva:free")], timestamp=100.0)
-    almacen.upsert_routes([_ruta("nueva:free")], timestamp=200.0)
-    activas = [r.model_id for r in almacen.active_routes()]
-    assert activas == ["nueva:free"]
-    # sigue en la tabla: el historico sirve para detectar renombres
-    fila = almacen._con.execute(
+def test_a_route_that_disappears_is_deactivated_not_deleted(store):
+    store.upsert_routes([_route("vieja:free"), _route("nueva:free")], timestamp=100.0)
+    store.upsert_routes([_route("nueva:free")], timestamp=200.0)
+    active = [r.model_id for r in store.active_routes()]
+    assert active == ["nueva:free"]
+    # still in the table: the history is what detects renames
+    row = store._con.execute(
         "SELECT activa FROM rutas WHERE modelo_id = 'vieja:free'").fetchone()
-    assert fila[0] == 0
+    assert row[0] == 0
 
 
-def test_una_ruta_que_vuelve_se_reactiva(almacen):
-    almacen.upsert_routes([_ruta("x:free")], timestamp=100.0)
-    almacen.upsert_routes([], timestamp=200.0)
-    almacen.upsert_routes([_ruta("x:free")], timestamp=300.0)
-    assert len(almacen.active_routes()) == 1
+def test_a_route_that_comes_back_is_reactivated(store):
+    store.upsert_routes([_route("x:free")], timestamp=100.0)
+    store.upsert_routes([], timestamp=200.0)
+    store.upsert_routes([_route("x:free")], timestamp=300.0)
+    assert len(store.active_routes()) == 1
 
 
-def test_no_desactiva_nada_cuando_se_pide_conservar(almacen):
-    almacen.upsert_routes([_ruta("vieja:free"), _ruta("nueva:free")], timestamp=100.0)
-    almacen.upsert_routes([_ruta("nueva:free")], timestamp=200.0, deactivate_missing=False)
-    activas = sorted(r.model_id for r in almacen.active_routes())
-    assert activas == ["nueva:free", "vieja:free"]
-    fila = almacen._con.execute(
+def test_it_deactivates_nothing_when_asked_to_keep(store):
+    store.upsert_routes([_route("vieja:free"), _route("nueva:free")], timestamp=100.0)
+    store.upsert_routes([_route("nueva:free")], timestamp=200.0, deactivate_missing=False)
+    active = sorted(r.model_id for r in store.active_routes())
+    assert active == ["nueva:free", "vieja:free"]
+    row = store._con.execute(
         "SELECT visto_por_ultima_vez FROM rutas WHERE modelo_id = 'nueva:free'").fetchone()
-    assert fila[0] == 200.0
+    assert row[0] == 200.0
 
 
-def test_el_scope_de_proveedor_acota_la_baja_a_ese_proveedor(almacen):
-    # kilo y otro tienen cada uno una ruta vieja. Al re-sincronizar SOLO kilo
-    # (con provider="kilo"), su ruta vieja se apaga pero la de "otro" -- mas
-    # vieja todavia, y ni siquiera mencionada en esta llamada -- debe
-    # sobrevivir: sin el scope, el UPDATE sin filtrar por proveedor la
-    # habria apagado igual, porque su visto_por_ultima_vez tambien es
-    # anterior al `momento` nuevo.
-    almacen.upsert_routes([_ruta("vieja:free", provider="kilo")], timestamp=50.0)
-    almacen.upsert_routes([_ruta("vieja:free", provider="otro")], timestamp=50.0)
-    almacen.upsert_routes([_ruta("nueva:free", provider="kilo")], timestamp=200.0, provider="kilo")
-    activas = {r.key for r in almacen.active_routes()}
-    assert activas == {"kilo/nueva:free", "otro/vieja:free"}
+def test_the_provider_scope_limits_removal_to_that_provider(store):
+    # kilo and otro each have an old route. Re-syncing ONLY kilo (with
+    # provider="kilo") switches off its old route, but otro's -- older still, and
+    # not even mentioned in this call -- must survive: without the scope, an
+    # UPDATE not filtered by provider would have switched it off too, because its
+    # visto_por_ultima_vez is also older than the new `timestamp`.
+    store.upsert_routes([_route("vieja:free", provider="kilo")], timestamp=50.0)
+    store.upsert_routes([_route("vieja:free", provider="otro")], timestamp=50.0)
+    store.upsert_routes([_route("nueva:free", provider="kilo")], timestamp=200.0, provider="kilo")
+    active = {r.key for r in store.active_routes()}
+    assert active == {"kilo/nueva:free", "otro/vieja:free"}
 
 
-def test_el_scope_de_proveedor_no_cambia_el_comportamiento_por_defecto(almacen):
-    # provider=None (el default) preserva el comportamiento historico: sin
-    # scope, acota a toda la tabla -- exactamente lo que ya cubre
-    # test_una_ruta_que_desaparece_se_desactiva_pero_no_se_borra. Este test
-    # solo confirma que pasar provider=None explicito da lo mismo.
-    almacen.upsert_routes([_ruta("vieja:free", provider="kilo"),
-                          _ruta("otra:free", provider="otro")], timestamp=100.0)
-    almacen.upsert_routes([_ruta("otra:free", provider="otro")], timestamp=200.0, provider=None)
-    activas = {r.key for r in almacen.active_routes()}
-    assert activas == {"otro/otra:free"}   # kilo/vieja:free tambien se apaga, como antes
+def test_the_provider_scope_does_not_change_the_default_behaviour(store):
+    # provider=None (the default) preserves the historical behaviour: with no
+    # scope, it covers the whole table -- exactly what
+    # test_a_route_that_disappears_is_deactivated_not_deleted already covers. This
+    # test only confirms that passing provider=None explicitly is the same.
+    store.upsert_routes([_route("vieja:free", provider="kilo"),
+                          _route("otra:free", provider="otro")], timestamp=100.0)
+    store.upsert_routes([_route("otra:free", provider="otro")], timestamp=200.0, provider=None)
+    active = {r.key for r in store.active_routes()}
+    assert active == {"otro/otra:free"}   # kilo/vieja:free is switched off too, as before
 
 
-# --- Sacar un proveedor de proveedores.yaml (p.ej. openrouter) no debe
-#     dejar sus rutas activa=1 para siempre: sync_catalogue solo puede
-#     dar de baja, via su scope, lo que SIGUE en el registro -- un
-#     proveedor que desaparece del todo nunca vuelve a pasar por ese loop.
-#     Este barrido aparte cubre exactamente ese hueco. ---
+# --- Removing a provider from proveedores.yaml (e.g. openrouter) must not
+#     leave its routes at activa=1 forever: sync_catalogue can only remove, via
+#     its scope, what is STILL in the registry -- a provider that disappears
+#     entirely never passes through that loop again. This separate sweep covers
+#     exactly that gap. ---
 
-def test_desactivar_proveedores_no_registrados_apaga_las_rutas_del_que_se_fue(almacen):
-    almacen.upsert_routes([_ruta("a:free", provider="kilo")], timestamp=50.0)
-    almacen.upsert_routes([_ruta("b:free", provider="openrouter")], timestamp=50.0)
-    apagadas = almacen.deactivate_unregistered_providers({"kilo"})
-    assert apagadas == 1
-    claves = {r.key for r in almacen.active_routes()}
-    assert claves == {"kilo/a:free"}
-    # No se borra: sigue en la tabla, solo inactiva -- mismo principio que
-    # upsert_rutas con las rutas que desaparecen del catalogo de un proveedor.
-    fila = almacen._con.execute(
+def test_deactivating_unregistered_providers_switches_off_the_departed_ones_routes(store):
+    store.upsert_routes([_route("a:free", provider="kilo")], timestamp=50.0)
+    store.upsert_routes([_route("b:free", provider="openrouter")], timestamp=50.0)
+    switched_off = store.deactivate_unregistered_providers({"kilo"})
+    assert switched_off == 1
+    keys_ = {r.key for r in store.active_routes()}
+    assert keys_ == {"kilo/a:free"}
+    # Not deleted: still in the table, only inactive -- the same principle as
+    # upsert_routes with routes that vanish from a provider's catalogue.
+    row = store._con.execute(
         "SELECT activa FROM rutas WHERE clave = 'openrouter/b:free'").fetchone()
-    assert fila == (0,)
+    assert row == (0,)
 
 
-def test_desactivar_proveedores_no_registrados_no_toca_los_que_siguen(almacen):
-    almacen.upsert_routes([_ruta("a:free", provider="kilo"),
-                          _ruta("c:free", provider="chatgpt")], timestamp=50.0)
-    almacen.upsert_routes([_ruta("b:free", provider="openrouter")], timestamp=50.0)
-    almacen.deactivate_unregistered_providers({"kilo", "chatgpt"})
-    claves = {r.key for r in almacen.active_routes()}
-    assert claves == {"kilo/a:free", "chatgpt/c:free"}
+def test_deactivating_unregistered_providers_leaves_the_remaining_ones_alone(store):
+    store.upsert_routes([_route("a:free", provider="kilo"),
+                          _route("c:free", provider="chatgpt")], timestamp=50.0)
+    store.upsert_routes([_route("b:free", provider="openrouter")], timestamp=50.0)
+    store.deactivate_unregistered_providers({"kilo", "chatgpt"})
+    keys_ = {r.key for r in store.active_routes()}
+    assert keys_ == {"kilo/a:free", "chatgpt/c:free"}
 
 
-def test_desactivar_proveedores_no_registrados_no_hace_nada_si_todos_siguen(almacen):
-    almacen.upsert_routes([_ruta("a:free", provider="kilo")], timestamp=50.0)
-    apagadas = almacen.deactivate_unregistered_providers({"kilo", "chatgpt", "minimax"})
-    assert apagadas == 0
-    assert len(almacen.active_routes()) == 1
+def test_deactivating_unregistered_providers_does_nothing_when_all_remain(store):
+    store.upsert_routes([_route("a:free", provider="kilo")], timestamp=50.0)
+    switched_off = store.deactivate_unregistered_providers({"kilo", "chatgpt", "minimax"})
+    assert switched_off == 0
+    assert len(store.active_routes()) == 1
 
 
-def test_desactivar_proveedores_no_registrados_es_idempotente(almacen):
-    # Una ruta ya inactiva (por la razon que sea) no cuenta de nuevo ni se
-    # re-toca en una segunda pasada.
-    almacen.upsert_routes([_ruta("b:free", provider="openrouter")], timestamp=50.0)
-    primera = almacen.deactivate_unregistered_providers({"kilo"})
-    segunda = almacen.deactivate_unregistered_providers({"kilo"})
-    assert primera == 1
-    assert segunda == 0
+def test_deactivating_unregistered_providers_is_idempotent(store):
+    # A route that is already inactive (for whatever reason) is neither counted
+    # again nor re-touched on a second pass.
+    store.upsert_routes([_route("b:free", provider="openrouter")], timestamp=50.0)
+    first = store.deactivate_unregistered_providers({"kilo"})
+    second = store.deactivate_unregistered_providers({"kilo"})
+    assert first == 1
+    assert second == 0
 
 
-def test_desactivar_proveedores_no_registrados_con_conjunto_vacio_no_apaga_nada(almacen):
-    # Revision de gate: un `proveedores.yaml` sintacticamente valido pero
-    # con `proveedores: []` (mas probable un archivo truncado/mal editado
-    # que una decision real de "sin proveedores") no debe apagar el
-    # catalogo ENTERO en el primer ciclo -- un conjunto vacio se trata como
-    # "todavia no se sabe nada", no como "todos son huerfanos".
-    almacen.upsert_routes([_ruta("a:free", provider="kilo"),
-                          _ruta("c:free", provider="chatgpt")], timestamp=50.0)
-    apagadas = almacen.deactivate_unregistered_providers(set())
-    assert apagadas == 0
-    assert {r.key for r in almacen.active_routes()} == {"kilo/a:free", "chatgpt/c:free"}
+def test_deactivating_unregistered_providers_with_an_empty_set_switches_off_nothing(store):
+    # Gate review: a syntactically valid `proveedores.yaml` with
+    # `proveedores: []` (more likely a truncated or badly edited file than a real
+    # decision of "no providers") must not switch off the ENTIRE catalogue on the
+    # first cycle -- an empty set is treated as "nothing is known yet", not as
+    # "everything is orphaned".
+    store.upsert_routes([_route("a:free", provider="kilo"),
+                          _route("c:free", provider="chatgpt")], timestamp=50.0)
+    switched_off = store.deactivate_unregistered_providers(set())
+    assert switched_off == 0
+    assert {r.key for r in store.active_routes()} == {"kilo/a:free", "chatgpt/c:free"}
 
 
-def test_la_calidad_sale_de_la_ultima_sonda_de_calidad(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)
-    almacen.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 4, 5, 200.0)
-    assert almacen.metrics()["kilo/a:free"].quality == pytest.approx(0.8)
+def test_quality_comes_from_the_last_quality_probe(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)
+    store.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 4, 5, 200.0)
+    assert store.metrics()["kilo/a:free"].quality == pytest.approx(0.8)
 
 
-def test_la_confiabilidad_mezcla_sondas_y_eventos(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 100.0)
-    almacen.record_event("kilo/a:free", False, 0, 500, 150.0)
-    m = almacen.metrics()["kilo/a:free"]
+def test_reliability_mixes_probes_and_events(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 100.0)
+    store.record_event("kilo/a:free", False, 0, 500, 150.0)
+    m = store.metrics()["kilo/a:free"]
     assert 0.0 < m.reliability < 1.0
 
 
-# --- Re-revision (round 4) de Task 13: un 4xx del cliente ya no castiga la
-#     ruta (round 3), pero SEGUIA escribiendose como evento fallido, y eso
-#     alimenta confiabilidad -- que /health usa para declarar una ruta
-#     muerta. Reproducido: 26 pedidos malformados seguidos de UNA llave
-#     bastan para tirar la confiabilidad de TODAS las rutas por el piso, con
-#     /health en "caido" mientras una llave DISTINTA sigue recibiendo 200.
-#     `registrar_evento` gana `es_error_cliente`, y _confiabilidad excluye
-#     esas filas de eventos POR COMPLETO -- ni suman como fallo, ni cuentan
-#     para la ventana -- para que un 4xx sea evidencia sobre el PEDIDO, no
-#     sobre la ruta. Se mantienen escritas (no se descartan) para que sigan
-#     siendo diagnosticables. ---
+# --- Task 13 re-review (round 4): a client 4xx no longer punishes the route
+#     (round 3), but it was STILL being written as a failed event, and that feeds
+#     reliability -- which /health uses to declare a route dead. Reproduced: 26
+#     consecutive malformed requests from ONE key are enough to sink EVERY route's
+#     reliability, with /health at "caido" while a DIFFERENT key keeps receiving
+#     200s. `record_event` gains `is_client_error`, and _reliability excludes those
+#     event rows ENTIRELY -- they neither count as failures nor take up a slot in
+#     the window -- so a 4xx is evidence about the REQUEST, not about the route.
+#     They stay written (not discarded) so they remain diagnosable. ---
 
-def test_confiabilidad_ignora_eventos_marcados_como_error_del_cliente(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
+def test_reliability_ignores_events_marked_as_client_errors(store):
+    store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
+        store.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
                                  is_client_error=True)
-    m = almacen.metrics()["kilo/a:free"]
-    # Sin ninguna otra observacion, la ventana queda VACIA (no las 30 filas
-    # contando como fallo): confiabilidad cae al neutro, no a 0.
+    m = store.metrics()["kilo/a:free"]
+    # With no other observation, the window is EMPTY (not 30 rows counting as
+    # failures): reliability falls back to the neutral value, not to 0.
     assert m.reliability == pytest.approx(0.8)   # NEUTRAL_RELIABILITY
 
 
-def test_confiabilidad_sigue_cayendo_con_fallos_que_no_son_del_cliente(almacen):
-    # Regresion directa: un 500 (is_client_error=False, el default) tiene
-    # que seguir contando como antes.
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
+def test_reliability_still_drops_on_failures_that_are_not_the_clients(store):
+    # A direct regression: a 500 (is_client_error=False, the default) has to keep
+    # counting as it did before.
+    store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
-    m = almacen.metrics()["kilo/a:free"]
+        store.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
+    m = store.metrics()["kilo/a:free"]
     assert m.reliability == pytest.approx(0.0)
 
 
-def test_confiabilidad_mezcla_error_del_cliente_e_ignora_solo_esos(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
+def test_reliability_mixes_client_errors_and_ignores_only_those(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_event("kilo/a:free", True, 50, 200, 100.0)
     for i in range(10):
-        almacen.record_event("kilo/a:free", False, 0, 400, 101.0 + i,
+        store.record_event("kilo/a:free", False, 0, 400, 101.0 + i,
                                  is_client_error=True)
-    m = almacen.metrics()["kilo/a:free"]
-    # El unico evento que "cuenta" es el exito: los 10 de error del cliente
-    # quedan completamente afuera de la ventana.
+    m = store.metrics()["kilo/a:free"]
+    # The only event that "counts" is the success: the 10 client errors stay
+    # entirely outside the window.
     assert m.reliability == pytest.approx(1.0)
 
 
-_ESQUEMA_VIEJO_SIN_ES_ERROR_CLIENTE = """
+_OLD_SCHEMA_WITHOUT_CLIENT_ERROR_FLAG = """
 CREATE TABLE rutas (
     clave TEXT PRIMARY KEY, proveedor TEXT NOT NULL, modelo_id TEXT NOT NULL,
     tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
@@ -213,10 +210,10 @@ CREATE TABLE eventos (
 """
 
 
-def test_migra_una_base_vieja_sin_es_error_cliente_con_filas(tmp_path):
-    ruta_db = str(tmp_path / "vieja_sin_flag.sqlite3")
-    con = sqlite3.connect(ruta_db)
-    con.executescript(_ESQUEMA_VIEJO_SIN_ES_ERROR_CLIENTE)
+def test_it_migrates_an_old_database_without_the_client_error_flag(tmp_path):
+    db_path = str(tmp_path / "vieja_sin_flag.sqlite3")
+    con = sqlite3.connect(db_path)
+    con.executescript(_OLD_SCHEMA_WITHOUT_CLIENT_ERROR_FLAG)
     con.execute(
         """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
                contexto, max_salida, visto_por_ultima_vez, activa, prioridad)
@@ -227,132 +224,132 @@ def test_migra_una_base_vieja_sin_es_error_cliente_con_filas(tmp_path):
     con.commit()
     con.close()
 
-    almacen = Storage(ruta_db)
-    almacen.create_schema()   # no debe reventar (ALTER TABLE, no CREATE)
+    store = Storage(db_path)
+    store.create_schema()   # no debe reventar (ALTER TABLE, no CREATE)
 
-    # La fila vieja, escrita ANTES de que existiera es_error_cliente, migra
-    # a 0 (comportamiento historico: SI cuenta como fallo) -- no se puede
-    # reclasificar retroactivamente un evento que no distinguia la causa.
-    fila = almacen._con.execute(
+    # The old row, written BEFORE es_error_cliente existed, migrates to 0 (the
+    # historical behaviour: it DOES count as a failure) -- an event that never
+    # distinguished the cause cannot be reclassified retroactively.
+    row = store._con.execute(
         "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free'").fetchone()
-    assert fila[0] == 0
+    assert row[0] == 0
 
-    # Y la base migrada sigue siendo escribible con el flag nuevo.
-    almacen.record_event("kilo/vieja:free", False, 0, 400, 70.0, is_client_error=True)
-    filas = almacen._con.execute(
+    # And the migrated database is still writable with the new flag.
+    store.record_event("kilo/vieja:free", False, 0, 400, 70.0, is_client_error=True)
+    rows = store._con.execute(
         "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free' "
         "ORDER BY momento").fetchall()
-    assert [f[0] for f in filas] == [0, 1]
+    assert [f[0] for f in rows] == [0, 1]
 
 
-def test_una_ruta_sin_datos_recibe_metricas_neutras(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    m = almacen.metrics()["kilo/a:free"]
+def test_a_route_without_data_gets_neutral_metrics(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    m = store.metrics()["kilo/a:free"]
     assert m.quality == pytest.approx(0.6)
     assert m.cooldown_until == 0.0
 
 
-def test_el_uso_de_pago_se_cuenta_por_llave_y_dia(almacen):
-    assert almacen.paid_usage("k1", "2026-08-16") == 0
-    assert almacen.add_paid_usage("k1", "2026-08-16") == 1
-    assert almacen.add_paid_usage("k1", "2026-08-16") == 2
-    assert almacen.paid_usage("k1", "2026-08-17") == 0
-    assert almacen.paid_usage("k2", "2026-08-16") == 0
+def test_paid_usage_is_counted_per_key_and_day(store):
+    assert store.paid_usage("k1", "2026-08-16") == 0
+    assert store.add_paid_usage("k1", "2026-08-16") == 1
+    assert store.add_paid_usage("k1", "2026-08-16") == 2
+    assert store.paid_usage("k1", "2026-08-17") == 0
+    assert store.paid_usage("k2", "2026-08-16") == 0
 
 
-# --- Fix round 3, B2b/I3: distinguir "calidad medida 0.6" de "nunca medida". ---
+# --- Fix round 3, B2b/I3: tell "measured quality of 0.6" from "never measured". ---
 
-def test_una_ruta_nunca_sondeada_no_declara_fecha_de_calidad(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    m = almacen.metrics()["kilo/a:free"]
+def test_a_never_probed_route_declares_no_quality_timestamp(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    m = store.metrics()["kilo/a:free"]
     assert m.quality_measured_at is None
     assert m.last_probe_at is None
-    assert m.quality == pytest.approx(0.6)   # el neutro sigue alimentando el puntaje
+    assert m.quality == pytest.approx(0.6)   # the neutral still feeds the score
 
 
-def test_una_ruta_sondeada_declara_el_momento_de_su_ultima_sonda_de_calidad(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 2, 5, 300.0)
-    almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 900.0)
-    m = almacen.metrics()["kilo/a:free"]
+def test_a_probed_route_declares_the_time_of_its_last_quality_probe(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 2, 5, 300.0)
+    store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 900.0)
+    m = store.metrics()["kilo/a:free"]
     assert m.quality_measured_at == 900.0
     assert m.quality == pytest.approx(0.8)
 
 
-def test_la_ultima_sonda_cuenta_tambien_las_de_salud(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 300.0)
-    almacen.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0, 800.0)
-    m = almacen.metrics()["kilo/a:free"]
-    assert m.last_probe_at == 800.0        # la mas reciente de cualquier tipo
-    assert m.quality_measured_at == 300.0      # pero la de CALIDAD sigue siendo la suya
+def test_the_last_probe_counts_health_probes_too(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 300.0)
+    store.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0, 800.0)
+    m = store.metrics()["kilo/a:free"]
+    assert m.last_probe_at == 800.0        # the most recent of any kind
+    assert m.quality_measured_at == 300.0  # but the QUALITY one is still its own
 
 
-# --- Fix round 3, I5: `ttft_ms` mezclaba dos mediciones incompatibles en una
-#     sola columna. El camino no-streaming guardaba el round-trip COMPLETO
-#     (7-27 s en un modelo de razonamiento) y el de streaming el tiempo real
-#     hasta el primer chunk (~200 ms). Mezclados en un mismo p50, el perfil
-#     `rapido` ordenaba por un numero que no significa nada. ---
+# --- Fix round 3, I5: `ttft_ms` mixed two incompatible measurements into one
+#     column. The non-streaming path stored the COMPLETE round-trip (7-27 s on a
+#     reasoning model) and the streaming one the real time to the first chunk
+#     (~200 ms). Mixed into one p50, the `rapido` profile was ordering by a number
+#     that means nothing. ---
 
-def test_el_ttft_p50_solo_cuenta_mediciones_de_ttft_de_verdad(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    # Streaming: ttft real.
-    almacen.record_event("kilo/a:free", True, 200, 200, 150.0)
-    # No streaming: no hay ttft que medir, va el round-trip a latencia_ms.
-    almacen.record_event("kilo/a:free", True, 0, 200, 160.0, latency_ms=21000)
-    almacen.record_event("kilo/a:free", True, 0, 200, 170.0, latency_ms=19000)
-    assert almacen.metrics()["kilo/a:free"].ttft_p50_ms == 200.0
-
-
-def test_la_latencia_total_se_guarda_aunque_no_alimente_el_ttft(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_event("kilo/a:free", True, 0, 200, 160.0, latency_ms=21000)
-    almacen.record_event("kilo/a:free", True, 0, 200, 170.0, latency_ms=19000)
-    m = almacen.metrics()["kilo/a:free"]
-    assert m.latency_p50_ms == 21000.0        # p50 de las dos observaciones
-    assert m.ttft_p50_ms == 1500.0             # el neutro: ttft nunca se midio
+def test_the_ttft_p50_only_counts_genuine_ttft_measurements(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    # Streaming: a real ttft.
+    store.record_event("kilo/a:free", True, 200, 200, 150.0)
+    # Non-streaming: there is no ttft to measure, the round-trip goes to latencia_ms.
+    store.record_event("kilo/a:free", True, 0, 200, 160.0, latency_ms=21000)
+    store.record_event("kilo/a:free", True, 0, 200, 170.0, latency_ms=19000)
+    assert store.metrics()["kilo/a:free"].ttft_p50_ms == 200.0
 
 
-def test_sin_ninguna_observacion_de_ttft_se_usa_el_neutro(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    m = almacen.metrics()["kilo/a:free"]
+def test_total_latency_is_stored_even_though_it_does_not_feed_the_ttft(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_event("kilo/a:free", True, 0, 200, 160.0, latency_ms=21000)
+    store.record_event("kilo/a:free", True, 0, 200, 170.0, latency_ms=19000)
+    m = store.metrics()["kilo/a:free"]
+    assert m.latency_p50_ms == 21000.0     # p50 of the two observations
+    assert m.ttft_p50_ms == 1500.0         # the neutral: ttft was never measured
+
+
+def test_with_no_ttft_observation_the_neutral_value_is_used(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    m = store.metrics()["kilo/a:free"]
     assert m.ttft_p50_ms == 1500.0
     assert m.latency_p50_ms is None
 
 
-# --- Task 13: `prioridad` persiste y una base vieja migra sin perder datos. ---
+# --- Task 13: `priority` persists and an old database migrates without data loss. ---
 
-def test_upsert_rutas_persiste_la_prioridad(almacen):
-    almacen.upsert_routes([_ruta("chatgpt:free", provider="chatgpt", priority=0)],
+def test_upsert_routes_persists_the_priority(store):
+    store.upsert_routes([_route("chatgpt:free", provider="chatgpt", priority=0)],
                          timestamp=100.0)
-    activas = almacen.active_routes()
-    assert len(activas) == 1
-    assert activas[0].priority == 0
+    active = store.active_routes()
+    assert len(active) == 1
+    assert active[0].priority == 0
 
 
-def test_upsert_rutas_sin_prioridad_declarada_persiste_el_default_cien(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    assert almacen.active_routes()[0].priority == 100
+def test_upsert_routes_without_a_declared_priority_persists_the_default(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    assert store.active_routes()[0].priority == 100
 
 
-def test_resincronizar_actualiza_la_prioridad_de_una_ruta_existente(almacen):
-    # Un cambio de `prioridad` en el YAML (p.ej. subir a un proveedor de
-    # lugar) tiene que propagarse en la proxima sincronizacion, no quedar
-    # pegado al valor con el que la ruta se vio por primera vez.
-    almacen.upsert_routes([_ruta("a:free", priority=1)], timestamp=100.0)
-    almacen.upsert_routes([_ruta("a:free", priority=0)], timestamp=200.0)
-    assert almacen.active_routes()[0].priority == 0
+def test_resyncing_updates_an_existing_routes_priority(store):
+    # A `prioridad` change in the YAML (e.g. moving a provider up) has to
+    # propagate on the next sync, not stay stuck to the value the route was first
+    # seen with.
+    store.upsert_routes([_route("a:free", priority=1)], timestamp=100.0)
+    store.upsert_routes([_route("a:free", priority=0)], timestamp=200.0)
+    assert store.active_routes()[0].priority == 0
 
 
-# `_migrar()` ya tiene un caso (eventos.latencia_ms, ver el comentario de
-# cabecera de almacen.py) que agrega una columna a una tabla que YA existe con
-# `ALTER TABLE ... ADD COLUMN` -- porque `CREATE TABLE IF NOT EXISTS` no toca
-# una tabla existente. Este test reproduce el mismo riesgo para `rutas.
-# prioridad`: la tabla `rutas` de produccion (el volumen de /datos) existe
-# desde ANTES de esta feature y ya tiene filas. Si la migracion no fuera
-# idempotente y compatible con datos existentes, un redeploy contra esa base
-# reventaria al arrancar (o silenciosamente perderia la columna).
-_ESQUEMA_VIEJO_SIN_PRIORIDAD = """
+# `_migrate()` already has a case (eventos.latencia_ms, see the header comment
+# of storage.py) that adds a column to a table that ALREADY exists using
+# `ALTER TABLE ... ADD COLUMN` -- because `CREATE TABLE IF NOT EXISTS` does not
+# touch an existing table. This test reproduces the same risk for
+# `rutas.prioridad`: production's `rutas` table (the /datos volume) exists from
+# BEFORE this feature and already has rows. If the migration were not idempotent
+# and compatible with existing data, a redeploy against that database would blow
+# up at startup (or silently lose the column).
+_OLD_SCHEMA_WITHOUT_PRIORITY = """
 CREATE TABLE rutas (
     clave TEXT PRIMARY KEY, proveedor TEXT NOT NULL, modelo_id TEXT NOT NULL,
     tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
@@ -361,13 +358,13 @@ CREATE TABLE rutas (
 """
 
 
-def test_migra_una_base_vieja_con_filas_sin_perder_datos(tmp_path):
-    ruta_db = str(tmp_path / "vieja.sqlite3")
-    # Simula la base de produccion: esquema PRE-prioridad, con una fila real
-    # adentro (visto_por_ultima_vez, activa -- todo lo que la version vieja
-    # del codigo ya escribia).
-    con = sqlite3.connect(ruta_db)
-    con.executescript(_ESQUEMA_VIEJO_SIN_PRIORIDAD)
+def test_it_migrates_an_old_database_with_rows_without_losing_data(tmp_path):
+    db_path = str(tmp_path / "vieja.sqlite3")
+    # Simulates the production database: the PRE-priority schema, with a real
+    # row inside (visto_por_ultima_vez, activa -- everything the old version of
+    # the code already wrote).
+    con = sqlite3.connect(db_path)
+    con.executescript(_OLD_SCHEMA_WITHOUT_PRIORITY)
     con.execute(
         """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
                contexto, max_salida, visto_por_ultima_vez, activa)
@@ -375,38 +372,38 @@ def test_migra_una_base_vieja_con_filas_sin_perder_datos(tmp_path):
     con.commit()
     con.close()
 
-    # Abrir con el codigo NUEVO no debe reventar (ALTER TABLE, no CREATE).
-    almacen = Storage(ruta_db)
-    almacen.create_schema()
+    # Opening it with the NEW code must not blow up (ALTER TABLE, not CREATE).
+    store = Storage(db_path)
+    store.create_schema()
 
-    activas = almacen.active_routes()
-    assert len(activas) == 1
-    assert activas[0].key == "kilo/vieja:free"
-    # La fila preexistente, sin ninguna prioridad en el momento en que se
-    # escribio, migra al default (100), no a NULL ni a un valor inventado.
-    assert activas[0].priority == 100
+    active = store.active_routes()
+    assert len(active) == 1
+    assert active[0].key == "kilo/vieja:free"
+    # The pre-existing row, with no priority at the time it was written,
+    # migrates to the default (100), not to NULL nor to an invented value.
+    assert active[0].priority == 100
 
-    # Y la base migrada sigue siendo escribible: una sincronizacion nueva
-    # puede declarar prioridad para esa misma ruta o para una nueva.
-    almacen.upsert_routes([_ruta("vieja:free", provider="kilo", priority=0)], timestamp=200.0)
-    almacen.upsert_routes([_ruta("nueva:free", provider="chatgpt", priority=0)],
+    # And the migrated database is still writable: a new sync can declare a
+    # priority for that same route or for a new one.
+    store.upsert_routes([_route("vieja:free", provider="kilo", priority=0)], timestamp=200.0)
+    store.upsert_routes([_route("nueva:free", provider="chatgpt", priority=0)],
                          timestamp=200.0, deactivate_missing=False)
-    activas = {r.key: r.priority for r in almacen.active_routes()}
-    assert activas == {"kilo/vieja:free": 0, "chatgpt/nueva:free": 0}
+    active = {r.key: r.priority for r in store.active_routes()}
+    assert active == {"kilo/vieja:free": 0, "chatgpt/nueva:free": 0}
 
 
-def test_migrar_una_base_vieja_es_idempotente(tmp_path):
-    # Abrir la base migrada una SEGUNDA vez (el redeploy siguiente) no debe
-    # reventar con "duplicate column name".
-    ruta_db = str(tmp_path / "vieja2.sqlite3")
-    con = sqlite3.connect(ruta_db)
-    con.executescript(_ESQUEMA_VIEJO_SIN_PRIORIDAD)
+def test_migrating_an_old_database_is_idempotent(tmp_path):
+    # Opening the migrated database a SECOND time (the next redeploy) must not
+    # blow up with "duplicate column name".
+    db_path = str(tmp_path / "vieja2.sqlite3")
+    con = sqlite3.connect(db_path)
+    con.executescript(_OLD_SCHEMA_WITHOUT_PRIORITY)
     con.close()
 
-    Storage(ruta_db).create_schema()
-    otra_vez = Storage(ruta_db)
-    otra_vez.create_schema()   # no debe reventar
-    assert otra_vez.active_routes() == []
+    Storage(db_path).create_schema()
+    again = Storage(db_path)
+    again.create_schema()   # must not blow up
+    assert again.active_routes() == []
 
 
 # --- Revision round 6 de Task 13, Parte 2. La clasificacion correcta de
@@ -427,25 +424,25 @@ def test_migrar_una_base_vieja_es_idempotente(tmp_path):
 #     autocorrige, mientras que /health mal informado REINICIA EL
 #     CONTENEDOR (Coolify) -- la asimetria es el punto. ---
 
-def test_tiene_evidencia_de_vida_sin_ninguna_telemetria(almacen):
+def test_liveness_evidence_with_no_telemetry_at_all(store):
     # Ruta recien vista: no nacio muerta, todavia no tuvo su primera
     # oportunidad ni para bien ni para mal.
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=100.0) is True
+    store.upsert_routes([_route()], timestamp=100.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=100.0) is True
 
 
-def test_tiene_evidencia_de_vida_con_un_exito_reciente_pese_a_muchos_fallos(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
+def test_liveness_evidence_from_a_recent_success_despite_many_failures(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_event("kilo/a:free", True, 50, 200, 100.0)
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 403, 101.0 + i)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+        store.record_event("kilo/a:free", False, 0, 403, 101.0 + i)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+def test_liveness_evidence_from_a_recent_successful_health_probe(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 # --- Round 10, MEDIUM del gate: el chequeo de respaldo ("nada dentro de la
@@ -457,56 +454,56 @@ def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen
 #     no prueban que la ruta este rota". Ahora SOLO una SONDA (nunca un
 #     evento real, exito o fallo) cuenta como "hay historia". ---
 
-def test_fallos_reales_solos_sin_ninguna_sonda_no_declaran_muerta(almacen):
+def test_real_failures_alone_without_any_probe_do_not_declare_it_dead(store):
     # El camino que el trafico real SOLO puede activar (sin ninguna sonda
     # de por medio) ya no alcanza -- ni con 30 fallos.
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+        store.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-def test_fallos_reales_con_dos_sondas_fallidas_confirmando_si_declaran_muerta(almacen):
+def test_real_failures_with_two_failed_probes_confirming_do_declare_it_dead(store):
     # El camino REAL para llegar a "muerta": trafico real dispara sospecha
     # (round 8), sospecha dispara sondas, y son DOS sondas fallidas
     # consecutivas (round 9) las que confirman -- nunca el trafico solo.
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 131.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 132.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is False
+        store.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 131.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 132.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is False
 
 
-def test_tiene_evidencia_de_vida_si_los_fallos_son_todos_error_del_cliente(almacen):
+def test_liveness_evidence_holds_when_every_failure_is_a_client_error(store):
     # Una ruta que SOLO recibio pedidos malformados (400/413/422, Parte 1)
     # todavia no tuvo su primera oportunidad de verdad -- se trata igual
     # que "sin telemetria", no como "muerta".
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
+    store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
+        store.record_event("kilo/a:free", False, 0, 400, 100.0 + i,
                                  is_client_error=True)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-def test_un_exito_fuera_de_la_ventana_con_solo_fallos_reales_recientes_no_declara_muerta(almacen):
+def test_a_success_outside_the_window_with_only_recent_real_failures_is_not_dead(store):
     from llm_libre.storage import LIVENESS_WINDOW_S
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
-    ahora = 100.0 + LIVENESS_WINDOW_S + 1.0
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_event("kilo/a:free", True, 50, 200, 100.0)
+    now = 100.0 + LIVENESS_WINDOW_S + 1.0
     for i in range(30):
-        almacen.record_event("kilo/a:free", False, 0, 500, ahora - 10.0 + i * 0.1)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=ahora) is True
+        store.record_event("kilo/a:free", False, 0, 500, now - 10.0 + i * 0.1)
+    assert store.has_liveness_evidence("kilo/a:free", now=now) is True
 
 
-def test_un_exito_fuera_de_la_ventana_con_dos_sondas_fallidas_recientes_declara_muerta(almacen):
+def test_a_success_outside_the_window_with_two_recent_failed_probes_is_dead(store):
     from llm_libre.storage import LIVENESS_WINDOW_S
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_event("kilo/a:free", True, 50, 200, 100.0)
-    ahora = 100.0 + LIVENESS_WINDOW_S + 1.0
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora - 1)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, ahora)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=ahora) is False
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_event("kilo/a:free", True, 50, 200, 100.0)
+    now = 100.0 + LIVENESS_WINDOW_S + 1.0
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now - 1)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now)
+    assert store.has_liveness_evidence("kilo/a:free", now=now) is False
 
 
 # --- Round 9, hallazgo del gate ("el camino indirecto de /health"): desde
@@ -518,26 +515,26 @@ def test_un_exito_fuera_de_la_ventana_con_dos_sondas_fallidas_recientes_declara_
 #     reinicio de contenedor). Decision: UNA sonda fallida sola YA NO
 #     alcanza -- hacen falta DOS consecutivas, sin exito de por medio. ---
 
-def test_una_sola_sonda_fallida_ya_no_alcanza_para_declarar_muerta(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+def test_a_single_failed_probe_is_no_longer_enough_to_declare_it_dead(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-def test_dos_sondas_fallidas_consecutivas_si_declaran_muerta(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 140.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is False
+def test_two_consecutive_failed_probes_do_declare_it_dead(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 140.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is False
 
 
-def test_una_sonda_fallida_justo_despues_de_un_exito_no_alcanza(almacen):
+def test_a_failed_probe_right_after_a_success_is_not_enough(store):
     # Un solo fallo precedido por un exito NO es "dos consecutivos": la
     # señal mas vieja de las dos ultimas es un exito, no otro fallo.
-    almacen.upsert_routes([_ruta()], timestamp=100.0)
-    almacen.record_event("kilo/a:free", True, 50, 200, 140.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_event("kilo/a:free", True, 50, 200, 140.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 # --- Round 7, MEDIUM del gate: `tiene_evidencia_de_vida` solo miraba sondas
@@ -554,33 +551,33 @@ def test_una_sonda_fallida_justo_despues_de_un_exito_no_alcanza(almacen):
 #     de PAGO que nunca se sondea; no lo es para una ruta gratis sondeada
 #     cada 5h cuyos ultimos cuatro resultados son CONOCIDOS y se descartaban. ---
 
-def test_una_sonda_fallida_mas_reciente_que_un_exito_viejo_declara_la_ruta_muerta(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=0.0)
-    ahora = 100_000.0
-    veinte_horas = 20 * 3600.0
-    cinco_horas = 5 * 3600.0
-    almacen.record_event("kilo/a:free", True, 50, 200, ahora - veinte_horas)
+def test_a_failed_probe_newer_than_an_old_success_declares_the_route_dead(store):
+    store.upsert_routes([_route()], timestamp=0.0)
+    now = 100_000.0
+    twenty_hours = 20 * 3600.0
+    five_hours = 5 * 3600.0
+    store.record_event("kilo/a:free", True, 50, 200, now - twenty_hours)
     # Cuatro sondas de salud FALLIDAS desde entonces, una cada 5h -- todas
     # mas recientes que el exito de arriba, la ULTIMA hace apenas 1h.
     for i in range(1, 5):
-        almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
-                                ahora - veinte_horas + i * cinco_horas)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=ahora) is False
+        store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
+                                now - twenty_hours + i * five_hours)
+    assert store.has_liveness_evidence("kilo/a:free", now=now) is False
 
 
-def test_un_exito_real_mas_reciente_que_una_sonda_fallida_declara_la_ruta_viva(almacen):
+def test_a_real_success_newer_than_a_failed_probe_declares_the_route_alive(store):
     # Simetrico al de arriba: si DESPUES de una sonda fallida hay un exito
     # real (un cliente de verdad recibio respuesta), esa es la senal mas
     # nueva y gana -- la ruta esta viva AHORA, sin importar el tropiezo
     # anterior de la sonda.
-    almacen.upsert_routes([_ruta()], timestamp=0.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
-    almacen.record_event("kilo/a:free", True, 50, 200, 150.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+    store.upsert_routes([_route()], timestamp=0.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    store.record_event("kilo/a:free", True, 50, 200, 150.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
-def test_una_sonda_exitosa_mas_reciente_que_una_fallida_declara_la_ruta_viva(almacen):
-    almacen.upsert_routes([_ruta()], timestamp=0.0)
-    almacen.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
-    almacen.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
-    assert almacen.has_liveness_evidence("kilo/a:free", now=200.0) is True
+def test_a_successful_probe_newer_than_a_failed_one_declares_the_route_alive(store):
+    store.upsert_routes([_route()], timestamp=0.0)
+    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    store.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
