@@ -6,15 +6,15 @@ A discovered catalogue need not be homogeneous: grok publishes 31 ids of which
 import os
 
 from llm_libre.catalog import normalize
-from llm_libre.modelos import Capacidades
+from llm_libre.models import Capabilities
 from llm_libre.providers import load
 
-DEFAULTS = Capacidades(tools=True, vision=False, contexto=128000, max_salida=8192)
+DEFAULTS = Capabilities(tools=True, vision=False, context=128000, max_output=8192)
 CATALOGUE = {"data": [{"id": "bueno"}, {"id": "sin-tools"}, {"id": "otro"}]}
 
 
 def _by_id(routes):
-    return {r.modelo_id: r.capacidades for r in routes}
+    return {r.model_id: r.capabilities for r in routes}
 
 
 def test_without_exceptions_everything_inherits_the_defaults():
@@ -28,8 +28,8 @@ def test_an_exception_overrides_only_the_declared_field():
     assert caps["sin-tools"].tools is False
     assert caps["bueno"].tools is True
     # whatever is NOT declared is inherited whole
-    assert caps["sin-tools"].contexto == 128000
-    assert caps["sin-tools"].max_salida == 8192
+    assert caps["sin-tools"].context == 128000
+    assert caps["sin-tools"].max_output == 8192
     assert caps["sin-tools"].vision is False
 
 
@@ -65,4 +65,4 @@ def test_minimax_declares_measured_vision():
     from llm_libre.providers import fixed_routes
     provs = load("proveedores.yaml", {"MINIMAX_API_KEY": "x"})
     mm = [r for p in provs if p.id == "minimax" for r in fixed_routes(p)]
-    assert mm and mm[0].capacidades.vision is True
+    assert mm and mm[0].capabilities.vision is True

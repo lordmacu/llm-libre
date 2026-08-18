@@ -1,4 +1,4 @@
-from llm_libre.modelos import Metricas
+from llm_libre.models import Metrics
 
 # (quality_weight, reliability_weight, latency_weight). Higher exponent = harsher
 # penalty when that component drops below 1.
@@ -21,6 +21,6 @@ def latency_factor(ttft_ms: float) -> float:
     return REFERENCE_MS / (REFERENCE_MS + ttft_ms)
 
 
-def score(m: Metricas, profile: str) -> float:
+def score(m: Metrics, profile: str) -> float:
     wq, wr, wl = PESOS.get(profile, PESOS["balanceado"])
-    return (m.calidad ** wq) * (m.confiabilidad ** wr) * (latency_factor(m.ttft_p50_ms) ** wl)
+    return (m.quality ** wq) * (m.reliability ** wr) * (latency_factor(m.ttft_p50_ms) ** wl)

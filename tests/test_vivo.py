@@ -34,7 +34,7 @@ async def _rutas_chatgpt_descubiertas(chatgpt) -> list:
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get(chatgpt.base_url.rstrip("/") + chatgpt.models_path)
     assert r.status_code == 200, "chatgpt-proxy dejo de responder /v1/models"
-    rutas = normalize("chatgpt", r.json(), priority=chatgpt.prioridad,
+    rutas = normalize("chatgpt", r.json(), priority=chatgpt.priority,
                       default_capabilities=chatgpt.default_capabilities)
     assert rutas, "el catalogo descubierto de chatgpt-proxy vino vacio"
     return rutas
@@ -53,9 +53,9 @@ async def test_chatgpt_proxy_responde_un_chat_real_si_esta_configurado():
     # el proxy real que sigue trayendo algo utilizable y que los alias/el id
     # reservado siguen sin colarse.
     rutas = await _rutas_chatgpt_descubiertas(chatgpt)
-    ids = {x.modelo_id for x in rutas}
+    ids = {x.model_id for x in rutas}
     assert not ids & _IDS_QUE_NO_DEBERIAN_APARECER
-    assert all(x.capacidades.tools is False for x in rutas)
+    assert all(x.capabilities.tools is False for x in rutas)
 
     # El id para el chat sale del catalogo QUE ACABA DE DESCUBRIR, no de una
     # constante en este archivo -- el mismo principio de "nada de ids
@@ -94,7 +94,7 @@ async def test_chatgpt_proxy_no_hace_function_calling_de_verdad():
     for ruta in rutas:
         async with httpx.AsyncClient(timeout=60) as c:
             r = await c.post(chatgpt.base_url.rstrip("/") + "/chat/completions",
-                             json={"model": ruta.modelo_id,
+                             json={"model": ruta.model_id,
                                    "messages": [{"role": "user",
                                                 "content": "Que clima hace en Bogota?"}],
                                    "tools": [WEATHER_TOOL], "tool_choice": "required"})
@@ -104,11 +104,11 @@ async def test_chatgpt_proxy_no_hace_function_calling_de_verdad():
         # code real dice si volvio el 500 viejo, si el id dejo de existir
         # (404), o algo distinto -- en vez de asumir una sola causa.
         assert r.status_code == 200, (
-            f"chatgpt-proxy devolvio HTTP {r.status_code} para {ruta.modelo_id} al "
+            f"chatgpt-proxy devolvio HTTP {r.status_code} para {ruta.model_id} al "
             "mandarle tools (revisar si volvio el 500 viejo o si el id ya no existe)")
         msg = r.json()["choices"][0]["message"]
         assert not msg.get("tool_calls"), (
-            f"chatgpt-proxy devolvio tool_calls para {ruta.modelo_id}: si esto paso, el "
+            f"chatgpt-proxy devolvio tool_calls para {ruta.model_id}: si esto paso, el "
             "backend anonimo empezo a soportar function calling de verdad en ese modelo "
             "y tools:false en proveedores.yaml deberia reconsiderarse")
         assert isinstance(msg.get("content"), str) and msg["content"].strip()
@@ -127,4 +127,4 @@ async def test_el_catalogo_de_kilo_trae_modelos_gratis_con_tools():
     async with httpx.AsyncClient(timeout=60) as c:
         r = await c.get("https://api.kilo.ai/api/gateway/models")
     rutas = normalize("kilo", r.json())
-    assert any(x.capacidades.tools for x in rutas)
+    assert any(x.capabilities.tools for x in rutas)

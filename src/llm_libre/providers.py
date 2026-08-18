@@ -4,7 +4,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 
-from llm_libre.modelos import Capacidades, Ruta
+from llm_libre.models import Capabilities, Route
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +16,7 @@ class Provider:
     NOTE ON NAMES: these fields may be renamed freely, but the YAML KEYS they are
     read from may not -- `load` below reads them as string literals, and
     tests/test_wire_contract.py freezes them. `prioridad` is the one field kept
-    in Spanish for now: `Ruta.prioridad` shares the name, and the two are renamed
+    in Spanish for now: `Ruta.priority` shares the name, and the two are renamed
     together when modelos.py is migrated.
     """
     id: str
@@ -31,7 +31,7 @@ class Provider:
     # (rapido|balanceado|potente): the manual order in which the router tries
     # providers before looking at score. Default 100 so a provider that does not
     # declare it lands last among its peers. See the long comment in modelos.Ruta.
-    prioridad: int = 100
+    priority: int = 100
     # A THIRD registration pattern, alongside "all discovered" (Kilo/OpenRouter,
     # via models_path) and "all declared" (MiniMax, via fixed_models): a provider
     # whose /models carries IDS but NO capability metadata (chatgpt-proxy).
@@ -40,7 +40,7 @@ class Provider:
     # discovers and skips the price/modality checks -- but the IDS still come
     # from /models, never from here: it is still discovery, not a hardcoded list
     # under another name.
-    default_capabilities: Capacidades | None = None
+    default_capabilities: Capabilities | None = None
     # Per-model-id overrides on `default_capabilities`: only the fields that
     # differ. See `_exceptions` for why.
     exceptions: dict = field(default_factory=dict)
@@ -132,12 +132,12 @@ def _resolve_base_url(p: dict, env: dict) -> str:
     return from_env
 
 
-def _default_capabilities(p: dict) -> Capacidades | None:
+def _default_capabilities(p: dict) -> Capabilities | None:
     data = p.get("capacidades_por_defecto")
     if not data:
         return None
-    return Capacidades(tools=bool(data["tools"]), vision=bool(data["vision"]),
-                       contexto=int(data["contexto"]), max_salida=int(data["max_salida"]))
+    return Capabilities(tools=bool(data["tools"]), vision=bool(data["vision"]),
+                       context=int(data["contexto"]), max_output=int(data["max_salida"]))
 
 
 def _exceptions(p: dict) -> dict:
@@ -169,7 +169,7 @@ def load(yaml_path: str, env: dict) -> list[Provider]:
         models_path=p.get("modelos_path", ""),
         extra_headers=p.get("cabeceras_extra", {}) or {},
         fixed_models=p.get("modelos_fijos", []) or [],
-        prioridad=int(p.get("prioridad", 100)),
+        priority=int(p.get("prioridad", 100)),
         default_capabilities=_default_capabilities(p),
         exceptions=_exceptions(p),
         unwraps_canvas=bool(p.get("desenvuelve_canvas", False)),
@@ -178,10 +178,10 @@ def load(yaml_path: str, env: dict) -> list[Provider]:
     ) for p in data["proveedores"]]
 
 
-def fixed_routes(p: Provider) -> list[Ruta]:
-    return [Ruta(p.id, m["id"], p.tier,
-                 Capacidades(tools=True if p.emulates_tools else bool(m["tools"]),
+def fixed_routes(p: Provider) -> list[Route]:
+    return [Route(p.id, m["id"], p.tier,
+                 Capabilities(tools=True if p.emulates_tools else bool(m["tools"]),
                              vision=bool(m["vision"]),
-                             contexto=int(m["contexto"]), max_salida=int(m["max_salida"])),
-                 prioridad=p.prioridad)
+                             context=int(m["contexto"]), max_output=int(m["max_salida"])),
+                 priority=p.priority)
             for m in p.fixed_models]

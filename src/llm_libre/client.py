@@ -1,5 +1,5 @@
 from llm_libre import tool_emulator as _emu
-from llm_libre.modelos import EXTENSIONES_GATEWAY
+from llm_libre.models import GATEWAY_EXTENSIONS
 from llm_libre.providers import Provider, join_path
 
 
@@ -8,7 +8,7 @@ def build_request(p: Provider, body: dict,
     """Return (url, headers, body) ready to POST to /chat/completions.
 
     The returned body is a SHALLOW copy of the original, minus this gateway's own
-    extensions (`x_*`, see EXTENSIONES_GATEWAY). Only top-level keys may be
+    extensions (`x_*`, see GATEWAY_EXTENSIONS). Only top-level keys may be
     reassigned by the caller without affecting the original; nested structures
     (such as `messages`) are shared with it and must be treated as read-only
     during retries.
@@ -25,7 +25,7 @@ def build_request(p: Provider, body: dict,
     # Empty key => do NOT send Authorization. Kilo's anonymous tier depends on this.
     if p.api_key.strip():
         headers["Authorization"] = "Bearer " + p.api_key
-    out = {k: v for k, v in body.items() if k not in EXTENSIONES_GATEWAY}
+    out = {k: v for k, v in body.items() if k not in GATEWAY_EXTENSIONS}
     if real_model is not None:
         out["model"] = real_model
     if p.emulates_tools and out.get("tools"):

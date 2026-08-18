@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from llm_libre.storage import Storage
 from llm_libre.api import Estado, crear_app, interpretar_pedido
-from llm_libre.modelos import EXTENSIONES_GATEWAY, Capacidades, Ruta
+from llm_libre.models import GATEWAY_EXTENSIONS, Capabilities, Route
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
 
@@ -38,7 +38,7 @@ def cliente():
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
@@ -124,21 +124,21 @@ def test_error_body_diagnostic_keys(cliente):
 # --- request-side vocabulary ---
 
 def test_gateway_extension_names():
-    assert EXTENSIONES_GATEWAY == frozenset(
+    assert GATEWAY_EXTENSIONS == frozenset(
         {"x_requiere", "x_min_contexto", "x_permitir_pago", "x_crudo"})
 
 
 def test_model_aliases_and_profiles():
-    assert interpretar_pedido({"model": "auto"}).perfil == "balanceado"
-    assert interpretar_pedido({"model": "auto:rapido"}).perfil == "rapido"
-    assert interpretar_pedido({"model": "auto:potente"}).perfil == "potente"
-    assert interpretar_pedido({"model": "auto:tools"}).requiere_tools is True
-    assert interpretar_pedido({"model": "auto:vision"}).requiere_vision is True
+    assert interpretar_pedido({"model": "auto"}).profile == "balanceado"
+    assert interpretar_pedido({"model": "auto:rapido"}).profile == "rapido"
+    assert interpretar_pedido({"model": "auto:potente"}).profile == "potente"
+    assert interpretar_pedido({"model": "auto:tools"}).needs_tools is True
+    assert interpretar_pedido({"model": "auto:vision"}).needs_vision is True
 
 
 def test_requiere_values_are_capability_names():
     p = interpretar_pedido({"model": "auto", "x_requiere": ["tools", "vision"]})
-    assert p.requiere_tools and p.requiere_vision
+    assert p.needs_tools and p.needs_vision
 
 
 # --- config file keys ---
@@ -151,7 +151,7 @@ def test_yaml_keys_are_still_understood():
     ds = next(p for p in provs if p.id == "deepseek")
     assert ds.tier == "gratis"
     assert ds.dialect == "openai"
-    assert ds.prioridad == 1
+    assert ds.priority == 1
     assert ds.emulates_tools is True
     assert ds.timeout_s == 60.0
     cg = next(p for p in provs if p.id == "chatgpt")

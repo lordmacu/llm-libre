@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from llm_libre.storage import Storage
 from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.auth import PerKeyRateLimiter
-from llm_libre.modelos import Capacidades, Ruta
+from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
 from llm_libre.proxy import (LIMITE_PROBE_BAJO_DEMANDA_S, TOPE_PENDIENTES,
                              UMBRAL_SOSPECHA, Proxy)
@@ -29,36 +29,36 @@ def _sse(*trozos: str) -> bytes:
 
 def test_auto_es_balanceado():
     p = interpretar_pedido({"model": "auto"})
-    assert p.modelo is None and p.perfil == "balanceado"
+    assert p.model is None and p.profile == "balanceado"
 
 
 def test_los_alias_de_perfil():
-    assert interpretar_pedido({"model": "auto:rapido"}).perfil == "rapido"
-    assert interpretar_pedido({"model": "auto:potente"}).perfil == "potente"
+    assert interpretar_pedido({"model": "auto:rapido"}).profile == "rapido"
+    assert interpretar_pedido({"model": "auto:potente"}).profile == "potente"
 
 
 def test_los_alias_de_capacidad_se_traducen_a_requisitos():
     p = interpretar_pedido({"model": "auto:tools"})
-    assert p.requiere_tools is True and p.perfil == "balanceado"
-    assert interpretar_pedido({"model": "auto:vision"}).requiere_vision is True
+    assert p.needs_tools is True and p.profile == "balanceado"
+    assert interpretar_pedido({"model": "auto:vision"}).needs_vision is True
 
 
 def test_un_modelo_real_se_conserva():
     p = interpretar_pedido({"model": "poolside/laguna-s-2.1:free"})
-    assert p.modelo == "poolside/laguna-s-2.1:free"
+    assert p.model == "poolside/laguna-s-2.1:free"
 
 
 def test_mandar_tools_exige_soporte_de_tools_aunque_no_se_pida():
     p = interpretar_pedido({"model": "auto", "tools": [{"type": "function"}]})
-    assert p.requiere_tools is True
+    assert p.needs_tools is True
 
 
 def test_las_extensiones_x_se_respetan():
     p = interpretar_pedido({"model": "auto", "x_requiere": ["tools", "vision"],
                             "x_min_contexto": 200000, "x_permitir_pago": False})
-    assert p.requiere_tools and p.requiere_vision
-    assert p.min_contexto == 200000
-    assert p.permitir_pago is False
+    assert p.needs_tools and p.needs_vision
+    assert p.min_context == 200000
+    assert p.allow_paid is False
 
 
 def test_model_de_solo_espacios_se_trata_como_ausente():
@@ -66,7 +66,7 @@ def test_model_de_solo_espacios_se_trata_como_ausente():
     # del "or auto" y quedaba vacio tras el strip -- un 404 confuso sobre el
     # modelo ''. Debe tratarse igual que "" / None / ausente: cae a "auto".
     p = interpretar_pedido({"model": "   "})
-    assert p.modelo is None and p.perfil == "balanceado"
+    assert p.model is None and p.profile == "balanceado"
 
 
 # --- Revision post-Task-14 (gate): tres defectos reales que el reviewer
@@ -89,14 +89,14 @@ def test_auto_liso_sigue_funcionando_tras_el_fix_de_sufijo_desconocido():
     # Regresion directa del fix de arriba: sufijo == "" (o sea "auto" sin
     # ":") NO debe entrar en la rama de rechazo.
     p = interpretar_pedido({"model": "auto"})
-    assert p.modelo is None and p.perfil == "balanceado"
+    assert p.model is None and p.profile == "balanceado"
 
 
 def test_auto_balanceado_sigue_siendo_un_alias_valido():
     # "balanceado" ESTA en PERFILES -- "auto:balanceado" es redundante con
     # "auto" liso, pero valido, y no debe caer en la rama de rechazo.
     p = interpretar_pedido({"model": "auto:balanceado"})
-    assert p.perfil == "balanceado"
+    assert p.profile == "balanceado"
 
 
 def test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor():
@@ -104,14 +104,14 @@ def test_x_requiere_como_string_suelto_se_acepta_como_un_solo_valor():
     # "tools" in exigidas daba False y la exigencia se ignoraba entera, sin
     # error. Un string suelto (en vez de una lista de uno) se acepta igual.
     p = interpretar_pedido({"model": "auto", "x_requiere": "tools"})
-    assert p.requiere_tools is True
-    assert p.requiere_vision is False
+    assert p.needs_tools is True
+    assert p.needs_vision is False
 
 
 def test_x_requiere_como_lista_sigue_funcionando_igual_que_antes():
     p = interpretar_pedido({"model": "auto", "x_requiere": ["vision"]})
-    assert p.requiere_vision is True
-    assert p.requiere_tools is False
+    assert p.needs_vision is True
+    assert p.needs_tools is False
 
 
 def test_x_min_contexto_no_numerico_da_400_nombrando_el_campo():
@@ -126,7 +126,7 @@ def test_x_min_contexto_numerico_como_string_sigue_funcionando():
     # int("100000") es valido -- el fix no debe volverse mas estricto de lo
     # que ya era para el caso que SI funcionaba.
     p = interpretar_pedido({"model": "auto", "x_min_contexto": "100000"})
-    assert p.min_contexto == 100000
+    assert p.min_context == 100000
 
 
 # --- Revision post-Task-14 (tercer gate): la MISMA familia de bug que
@@ -161,8 +161,8 @@ def test_model_no_string_da_400_nombrando_el_campo(valor):
 def test_model_ausente_o_nulo_sigue_cayendo_a_auto_sin_dar_400():
     # Regresion directa del fix de arriba: None (ausente) sigue siendo
     # valido -- solo un valor PRESENTE con el tipo equivocado debe dar 400.
-    assert interpretar_pedido({}).modelo is None
-    assert interpretar_pedido({"model": None}).modelo is None
+    assert interpretar_pedido({}).model is None
+    assert interpretar_pedido({"model": None}).model is None
 
 
 @pytest.fixture
@@ -170,7 +170,7 @@ def cliente():
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
@@ -188,7 +188,7 @@ def estado_cliente():
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
@@ -294,7 +294,7 @@ def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     estado = Estado(almacen=almacen, proxy=Proxy(prov, almacen, http),
@@ -307,7 +307,7 @@ def test_un_campo_desconocido_llega_al_proveedor_tal_cual():
         # Ni un campo estandar de OpenAI que el gateway no lista en su
         # documentacion (reasoning) ni uno inventado por el proveedor de
         # turno (safety_identifier) son EXTENSIONES DEL GATEWAY (x_*, ver
-        # EXTENSIONES_GATEWAY) -- el contrato es "pasa todo lo que no
+        # GATEWAY_EXTENSIONS) -- el contrato es "pasa todo lo que no
         # reconozcas", no una lista blanca.
         "reasoning": {"enabled": False},
         "safety_identifier": "algo-que-el-gateway-jamas-va-a-conocer",
@@ -374,14 +374,14 @@ def test_modelo_explicito_que_desaparecio_upstream_da_404_no_503(estado_cliente)
 # --- Round 7, LOW del gate: `_parecidos` corria contra `rutas_activas()`,
 #     que TODAVIA trae el id que se acaba de declarar muerto -- el cliente
 #     leia `"el modelo 'a:free' ya no existe"` con `sugerencias: ['a:free',
-#     ...]`. Se excluye el propio `pedido.modelo` de la lista antes de
+#     ...]`. Se excluye el propio `pedido.model` de la lista antes de
 #     buscar parecidos. ---
 
 def test_la_sugerencia_del_404_en_vivo_no_incluye_el_modelo_recien_declarado_muerto(estado_cliente):
     estado, cliente = estado_cliente
     estado.almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096)),
-         Ruta("kilo", "a:freebie", "gratis", Capacidades(True, False, 100000, 4096))],
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096)),
+         Route("kilo", "a:freebie", "gratis", Capabilities(True, False, 100000, 4096))],
         1.0)
     estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
@@ -394,7 +394,7 @@ def test_la_sugerencia_del_404_en_vivo_no_incluye_el_modelo_recien_declarado_mue
 
 
 def test_modelo_auto_con_404_upstream_sigue_siendo_503(estado_cliente):
-    # En modo "auto" no hay un id EXPLICITO que nombrar -- pedido.modelo es
+    # En modo "auto" no hay un id EXPLICITO que nombrar -- pedido.model es
     # None -- asi que este caso se queda con el 503 generico de siempre, no
     # con el 404 nuevo (que exige un modelo puntual sobre el cual sugerir).
     estado, cliente = estado_cliente
@@ -483,7 +483,7 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
 
 # --- Round 7, MEDIUM (calidad de test) del gate: el test de arriba no pinea
 #     el leg de cooldown de `_viva()` en api.py -- borrar del todo la
-#     condicion `m.en_cooldown_hasta <= ahora` deja la suite completa en
+#     condicion `m.cooldown_until <= ahora` deja la suite completa en
 #     verde, porque la ruta de ese test NO tiene evidencia de vida propia
 #     (nunca hubo un exito real): `tiene_evidencia_de_vida()` la tira sola,
 #     sin que el cooldown tenga que intervenir. Con el redisenio de round 6
@@ -544,7 +544,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_403_y_un_exito(tmp_path):
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     almacen1.record_event("kilo/a:free", True, 50, 200, ahora)
     for _ in range(30):
         almacen1.record_event("kilo/a:free", False, 0, 403, ahora)
@@ -577,7 +577,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_sin_exitos_ni_sonda(tmp_pa
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     for _ in range(10):
         almacen1.record_event("kilo/a:free", False, 0, 500, ahora)
     # Round 9: hacen falta DOS sondas fallidas consecutivas, no una.
@@ -619,7 +619,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_sin_telemetria(tmp_path):
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     estado1 = Estado(almacen=almacen1, proxy=Proxy({}, almacen1, httpx.AsyncClient()),
                      llaves={"buena"}, tope_pago_diario=200)
     cliente1 = TestClient(crear_app(estado1))
@@ -695,7 +695,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -794,7 +794,7 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -942,7 +942,7 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -979,7 +979,7 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
     almacen1 = Storage(ruta_db)
     almacen1.create_schema()
     almacen1.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
         {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
         almacen1, httpx.AsyncClient(transport=httpx.MockTransport(
@@ -1063,8 +1063,8 @@ def test_ranking_desglosa_los_componentes(cliente):
 def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
     estado, cliente = estado_cliente
     estado.almacen.upsert_routes([
-        Ruta("chatgpt", "gpt-5:free", "gratis", Capacidades(True, False, 100000, 4096),
-             prioridad=0),
+        Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
+             priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: prioridad maxima (0) pero puntaje MALO.
     estado.almacen.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
@@ -1093,8 +1093,8 @@ def test_ranking_manda_al_final_una_ruta_en_cooldown_aunque_puntue_mejor(estado_
     # puntaje.
     estado, cliente = estado_cliente
     estado.almacen.upsert_routes([
-        Ruta("chatgpt", "gpt-5:free", "gratis", Capacidades(True, False, 100000, 4096),
-             prioridad=0),
+        Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
+             priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: la mejor prioridad Y el mejor puntaje -- pero esta castigada.
     estado.almacen.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
@@ -1119,8 +1119,8 @@ def _estado_libre_y_pago(tope_pago_diario, hacer_resp_free, hacer_resp_paid):
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes([
-        Ruta("free_prov", "f:free", "gratis", Capacidades(True, False, 100000, 4096)),
-        Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
+        Route("free_prov", "f:free", "gratis", Capabilities(True, False, 100000, 4096)),
+        Route("paid_prov", "p:paid", "pago", Capabilities(True, False, 100000, 4096)),
     ], 1.0)
     prov = {
         "free_prov": Provider("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
@@ -1186,8 +1186,8 @@ def test_no_streaming_pago_factura_un_200_vacio_aunque_no_sirva():
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes([
-        Ruta("free_prov", "f:free", "gratis", Capacidades(True, False, 100000, 4096)),
-        Ruta("paid_prov", "p:paid", "pago", Capacidades(True, False, 100000, 4096)),
+        Route("free_prov", "f:free", "gratis", Capabilities(True, False, 100000, 4096)),
+        Route("paid_prov", "p:paid", "pago", Capabilities(True, False, 100000, 4096)),
     ], 1.0)
     prov = {
         "free_prov": Provider("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
@@ -1306,7 +1306,7 @@ def test_el_limite_por_minuto_cuenta_igual_sin_importar_la_cabecera_usada():
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
@@ -1446,7 +1446,7 @@ def _cliente_que_piensa(contenido):
     almacen = Storage(":memory:")
     almacen.create_schema()
     almacen.upsert_routes(
-        [Ruta("kilo", "a:free", "gratis", Capacidades(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
     prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "",
                               "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
@@ -1488,7 +1488,7 @@ def test_en_modo_crudo_no_hay_x_razonamiento_porque_sigue_en_el_content():
 #     contenedor como sano: el servicio no arrancaba nunca, por una constante.
 #
 #     Round 6, Parte 2: el mecanismo que este test protegia (comparar
-#     `CONFIABILIDAD_NEUTRA` contra `UMBRAL_CONFIABILIDAD_SALUD`) desaparecio
+#     `NEUTRAL_RELIABILITY` contra `UMBRAL_CONFIABILIDAD_SALUD`) desaparecio
 #     junto con `/health` basado en promedio -- `UMBRAL_CONFIABILIDAD_SALUD`
 #     ya no existe. El contrato que protegia ("una ruta sin telemetria cuenta
 #     como viva") sigue vivo, ahora en `Storage.tiene_evidencia_de_vida` (ver

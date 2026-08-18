@@ -532,15 +532,15 @@ async def test_deepseek_emulates_tool_call():
         pytest.skip("DEEPSEEK_PROXY_URL not set")
 
     from llm_libre.storage import Storage
-    from llm_libre.modelos import Capacidades, Ruta
+    from llm_libre.models import Capabilities, Route
     from llm_libre.providers import load
     from llm_libre.proxy import Proxy
 
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
     assert providers["deepseek"].emulates_tools, "deepseek.emulates_tools not active in YAML"
 
-    route = Ruta("deepseek", "deepseek-chat", "gratis",
-                 Capacidades(tools=True, vision=False, contexto=64000, max_salida=8192))
+    route = Route("deepseek", "deepseek-chat", "gratis",
+                 Capabilities(tools=True, vision=False, context=64000, max_output=8192))
     store = Storage(":memory:")
     store.create_schema()
 
@@ -574,13 +574,13 @@ async def test_deepseek_text_response_without_tools():
         pytest.skip("DEEPSEEK_PROXY_URL not set")
 
     from llm_libre.storage import Storage
-    from llm_libre.modelos import Capacidades, Ruta
+    from llm_libre.models import Capabilities, Route
     from llm_libre.providers import load
     from llm_libre.proxy import Proxy
 
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
-    route = Ruta("deepseek", "deepseek-chat", "gratis",
-                 Capacidades(tools=False, vision=False, contexto=64000, max_salida=8192))
+    route = Route("deepseek", "deepseek-chat", "gratis",
+                 Capabilities(tools=False, vision=False, context=64000, max_output=8192))
     store = Storage(":memory:")
     store.create_schema()
 

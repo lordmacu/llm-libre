@@ -5,7 +5,7 @@ import httpx
 
 from llm_libre.storage import Storage
 from llm_libre.api import Estado
-from llm_libre.modelos import Capacidades, Ruta
+from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
 from llm_libre.proxy import Proxy
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
@@ -24,8 +24,8 @@ def _almacen():
     return a
 
 
-def _ruta(modelo="x:free", tier="gratis", proveedor="kilo", tools=True):
-    return Ruta(proveedor, modelo, tier, Capacidades(tools, False, 1000, 100))
+def _ruta(modelo="x:free", tier="gratis", provider="kilo", tools=True):
+    return Route(provider, modelo, tier, Capabilities(tools, False, 1000, 100))
 
 
 def _proxy(handler):
@@ -39,7 +39,7 @@ async def test_sincronizar_guarda_las_rutas_descubiertas():
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/x:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/x:free"]
 
 
 async def test_sincronizar_no_astilla_un_query_string_en_base_url():
@@ -69,7 +69,7 @@ async def test_sincronizar_agrega_los_modelos_fijos_de_pago():
                             "contexto": 128000, "max_salida": 32768}])]
     await sync_catalogue(http, prov, almacen, now=100.0)
     rutas = almacen.active_routes()
-    assert [r.clave for r in rutas] == ["minimax/MiniMax-M3"]
+    assert [r.key for r in rutas] == ["minimax/MiniMax-M3"]
     assert rutas[0].tier == "pago"
 
 
@@ -78,10 +78,10 @@ async def test_sincronizar_propaga_la_prioridad_del_proveedor_a_las_rutas_descub
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
-                      prioridad=1)]
+                      priority=1)]
     await sync_catalogue(http, prov, almacen, now=100.0)
     rutas = almacen.active_routes()
-    assert rutas[0].prioridad == 1
+    assert rutas[0].priority == 1
 
 
 async def test_sincronizar_propaga_las_capacidades_por_defecto_del_proveedor():
@@ -95,14 +95,14 @@ async def test_sincronizar_propaga_las_capacidades_por_defecto_del_proveedor():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=catalogo_desnudo)))
     prov = [Provider("chatgpt", "gratis", "openai", "https://cg.test", "", "/models", {}, [],
-                      prioridad=0,
-                      default_capabilities=Capacidades(False, False, 128000, 8192))]
+                      priority=0,
+                      default_capabilities=Capabilities(False, False, 128000, 8192))]
     await sync_catalogue(http, prov, almacen, now=100.0)
     rutas = almacen.active_routes()
-    assert [r.clave for r in rutas] == ["chatgpt/gpt-5-3-mini"]
-    assert rutas[0].capacidades.tools is False
-    assert rutas[0].capacidades.contexto == 128000
-    assert rutas[0].prioridad == 0
+    assert [r.key for r in rutas] == ["chatgpt/gpt-5-3-mini"]
+    assert rutas[0].capabilities.tools is False
+    assert rutas[0].capabilities.context == 128000
+    assert rutas[0].priority == 0
 
 
 async def test_un_proveedor_caido_no_borra_el_catalogo_de_los_demas():
@@ -163,7 +163,7 @@ async def test_un_200_con_data_vacia_no_borra_las_rutas_previas():
         lambda req: httpx.Response(200, json=CATALOGO_VACIO)))
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/previa:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/previa:free"]
 
 
 async def test_un_200_cuyos_modelos_quedan_todos_filtrados_no_borra_las_rutas_previas():
@@ -173,12 +173,12 @@ async def test_un_200_cuyos_modelos_quedan_todos_filtrados_no_borra_las_rutas_pr
         lambda req: httpx.Response(200, json=CATALOGO_TODO_FILTRADO)))
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/previa:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/previa:free"]
 
 
 async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio():
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("previa:free", proveedor="vacio")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("previa:free", provider="vacio")], timestamp=50.0)
 
     def handler(req):
         if "k.test" in str(req.url):
@@ -191,7 +191,7 @@ async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio
         Provider("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    claves = {r.clave for r in almacen.active_routes()}
+    claves = {r.key for r in almacen.active_routes()}
     assert "kilo/x:free" in claves          # el proveedor que si respondio se actualizo
     assert "vacio/previa:free" in claves    # el vacio conservo lo que ya tenia
 
@@ -202,8 +202,8 @@ async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este
     # responde 200 sin modelos. Que vacio este vacio no debe frenar la baja de
     # kilo/old:free: kilo respondio bien y su propia desaparicion es real.
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("old:free", proveedor="kilo")], timestamp=50.0)
-    almacen.upsert_routes([_ruta("previa:free", proveedor="vacio")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("old:free", provider="kilo")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("previa:free", provider="vacio")], timestamp=50.0)
 
     def handler(req):
         if "k.test" in str(req.url):
@@ -216,7 +216,7 @@ async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este
         Provider("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    claves = {r.clave for r in almacen.active_routes()}
+    claves = {r.key for r in almacen.active_routes()}
     assert claves == {"kilo/x:free", "vacio/previa:free"}
     assert "kilo/old:free" not in claves    # se desactivo: kilo respondio, y ya no la trae
 
@@ -231,7 +231,7 @@ async def test_un_proveedor_sano_no_desactiva_rutas_de_otro_proveedor():
     # tests aparte mas abajo) la apagaria por una razon DISTINTA, y este
     # test dejaria de aislar lo que dice probar.
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("vieja:free", proveedor="otro")], timestamp=10.0)
+    almacen.upsert_routes([_ruta("vieja:free", provider="otro")], timestamp=10.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [
@@ -239,7 +239,7 @@ async def test_un_proveedor_sano_no_desactiva_rutas_de_otro_proveedor():
         Provider("otro", "gratis", "openai", "https://otro.test", "", "", {}, []),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    claves = {r.clave for r in almacen.active_routes()}
+    claves = {r.key for r in almacen.active_routes()}
     assert claves == {"kilo/x:free", "otro/vieja:free"}
 
 
@@ -254,8 +254,8 @@ async def test_el_mismo_modelo_en_dos_proveedores_el_que_lo_pierde_se_apaga_el_q
     # dos proveedores como dos filas independientes (claves distintas). Si uno
     # lo deja de ofrecer y el otro lo mantiene, deben tratarse por separado.
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("shared:free", proveedor="kilo")], timestamp=50.0)
-    almacen.upsert_routes([_ruta("shared:free", proveedor="otro")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("shared:free", provider="kilo")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("shared:free", provider="otro")], timestamp=50.0)
 
     def handler(req):
         if "k.test" in str(req.url):
@@ -268,7 +268,7 @@ async def test_el_mismo_modelo_en_dos_proveedores_el_que_lo_pierde_se_apaga_el_q
         Provider("otro", "gratis", "openai", "https://o.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    claves = {r.clave for r in almacen.active_routes()}
+    claves = {r.key for r in almacen.active_routes()}
     assert "kilo/shared:free" not in claves   # kilo lo perdio: se apaga
     assert "otro/shared:free" in claves       # otro lo conserva: sigue activa
     assert "kilo/x:free" in claves
@@ -291,7 +291,7 @@ async def test_un_200_con_cuerpo_no_json_se_trata_como_fallo_y_no_frena_a_los_de
         Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/x:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/x:free"]
 
 
 async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_demas():
@@ -311,7 +311,7 @@ async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_
         Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/x:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/x:free"]
 
 
 # --- Sacar un proveedor de proveedores.yaml (caso real: openrouter, sin
@@ -324,14 +324,14 @@ async def test_un_200_con_forma_inesperada_se_trata_como_fallo_y_no_frena_a_los_
 
 async def test_sincronizar_desactiva_las_rutas_de_un_proveedor_que_se_saco_del_registro():
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("previa:free", proveedor="openrouter")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("previa:free", provider="openrouter")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     # openrouter YA NO esta en la lista que carga proveedores.load() --
     # simula haberlo sacado de proveedores.yaml.
     prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    claves = {r.clave for r in almacen.active_routes()}
+    claves = {r.key for r in almacen.active_routes()}
     assert claves == {"kilo/x:free"}
     fila = almacen._con.execute(
         "SELECT activa FROM rutas WHERE clave = 'openrouter/previa:free'").fetchone()
@@ -346,7 +346,7 @@ async def test_sincronizar_no_desactiva_rutas_de_proveedores_que_siguen_registra
     # de que el barrido de huerfanos (`desactivar_proveedores_no_registrados`)
     # no la toco, no de que "justo volvio a aparecer en el catalogo".
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("previa:free", proveedor="openrouter")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("previa:free", provider="openrouter")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     prov = [
@@ -356,7 +356,7 @@ async def test_sincronizar_no_desactiva_rutas_de_proveedores_que_siguen_registra
                     "contexto": 128000, "max_salida": 32768}]),
     ]
     await sync_catalogue(http, prov, almacen, now=100.0)
-    claves = {r.clave for r in almacen.active_routes()}
+    claves = {r.key for r in almacen.active_routes()}
     # kilo se descubrio de nuevo, minimax (modelos_fijos, SIGUE registrado)
     # sigue activa, y openrouter (sacado del registro) desaparecio -- las
     # tres cosas a la vez, sin que ninguna se confunda con la otra.
@@ -369,11 +369,11 @@ async def test_sincronizar_con_registro_vacio_no_apaga_el_catalogo_entero():
     # proposito) no debe disparar el barrido de huerfanos -- ver el guard en
     # Storage.desactivar_proveedores_no_registrados.
     almacen = _almacen()
-    almacen.upsert_routes([_ruta("previa:free", proveedor="kilo")], timestamp=50.0)
+    almacen.upsert_routes([_ruta("previa:free", provider="kilo")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGO)))
     await sync_catalogue(http, [], almacen, now=100.0)
-    assert {r.clave for r in almacen.active_routes()} == {"kilo/previa:free"}
+    assert {r.key for r in almacen.active_routes()} == {"kilo/previa:free"}
 
 
 async def test_sync_catalogue_no_deja_escapar_la_excepcion_de_un_proveedor_roto():
@@ -399,7 +399,7 @@ async def test_sync_catalogue_no_deja_escapar_la_excepcion_de_un_proveedor_roto(
     ]
     total = await sync_catalogue(http, prov, almacen, now=100.0)
     assert total == 1
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/x:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/x:free"]
 
 
 async def test_la_sonda_de_salud_registra_exito():
@@ -500,7 +500,7 @@ async def test_ciclo_sincroniza_sondea_salud_y_sondea_calidad_en_el_ciclo_cero()
     estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
                     proveedores=prov, http=http)
     await cycle(estado, counter=0)
-    assert [r.clave for r in almacen.active_routes()] == ["kilo/x:free"]
+    assert [r.key for r in almacen.active_routes()] == ["kilo/x:free"]
     tipos = {t for (t,) in almacen._con.execute("SELECT tipo FROM sondas").fetchall()}
     assert tipos == {"salud", "calidad"}
 
@@ -575,7 +575,7 @@ async def test_el_ciclo_completo_no_sondea_la_ruta_de_pago():
     estado = Estado(almacen=almacen, proxy=proxy, llaves=set(), tope_pago_diario=0,
                     proveedores=prov, http=http)
     await cycle(estado, counter=1)   # contador 1: salud si, calidad no
-    assert {r.clave for r in almacen.active_routes()} == {"kilo/x:free", "minimax/MiniMax-M3"}
+    assert {r.key for r in almacen.active_routes()} == {"kilo/x:free", "minimax/MiniMax-M3"}
     assert not any("m.test" in u for u in llamadas), "se le pego a la ruta de pago"
 
 

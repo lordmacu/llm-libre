@@ -48,13 +48,13 @@ ALL_TOOLS = [WEATHER_TOOL, SEARCH_TOOL, CALC_TOOL]
 
 def _build_proxy(url: str):
     from llm_libre.storage import Storage
-    from llm_libre.modelos import Capacidades, Ruta
+    from llm_libre.models import Capabilities, Route
     from llm_libre.providers import load
     from llm_libre.proxy import Proxy
 
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
-    route = Ruta("deepseek", "deepseek-chat", "gratis",
-                 Capacidades(tools=True, vision=False, contexto=64000, max_salida=8192))
+    route = Route("deepseek", "deepseek-chat", "gratis",
+                 Capabilities(tools=True, vision=False, context=64000, max_output=8192))
     store = Storage(":memory:")
     store.create_schema()
     return providers, route, store

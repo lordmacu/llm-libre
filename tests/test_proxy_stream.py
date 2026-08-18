@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 
 from llm_libre.storage import Storage
-from llm_libre.modelos import Capacidades, Ruta
+from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import Proxy
 
@@ -16,8 +16,8 @@ YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 CUERPO = {"model": "auto", "messages": [], "stream": True}
 
 
-def _ruta(modelo="a:free", proveedor="kilo"):
-    return Ruta(proveedor, modelo, "gratis", Capacidades(True, False, 100000, 4096))
+def _ruta(modelo="a:free", provider="kilo"):
+    return Route(provider, modelo, "gratis", Capabilities(True, False, 100000, 4096))
 
 
 def _sse(*trozos):
@@ -112,7 +112,7 @@ async def test_desenvuelve_la_cerca_de_canvas_partida_entre_chunks():
     p = _proxy(lambda req: httpx.Response(
         200, content=_sse_json(':::writing{title="x"}\n', 'ho', 'la\n', ':::')),
         canvas={"chatgpt"})
-    texto = await _juntar(p.completar_stream([_ruta(proveedor="chatgpt")], CUERPO, 0.0))
+    texto = await _juntar(p.completar_stream([_ruta(provider="chatgpt")], CUERPO, 0.0))
     assert texto == "hola\n"
 
 
@@ -124,7 +124,7 @@ async def test_desenvuelve_la_cerca_de_canvas_partida_entre_chunks():
 async def test_un_proveedor_sin_desenvuelve_canvas_no_toca_marcas_en_streaming():
     p = _proxy(lambda req: httpx.Response(
         200, content=_sse_json(":::note\n", "Guarda el ", "token en el .env.\n", ":::")))
-    texto = await _juntar(p.completar_stream([_ruta(proveedor="kilo")], CUERPO, 0.0))
+    texto = await _juntar(p.completar_stream([_ruta(provider="kilo")], CUERPO, 0.0))
     assert texto == ":::note\nGuarda el token en el .env.\n:::"
 
 
@@ -587,7 +587,7 @@ async def test_usa_el_timeout_propio_del_proveedor_en_streaming():
     lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    [l async for l in p.completar_stream([_ruta(proveedor="lento")], CUERPO, 0.0)]
+    [l async for l in p.completar_stream([_ruta(provider="lento")], CUERPO, 0.0)]
     assert vistos[0]["read"] == 20.0
 
 
@@ -599,7 +599,7 @@ async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)   # kilo, sin timeout_s declarado
-    [l async for l in p.completar_stream([_ruta(proveedor="kilo")], CUERPO, 0.0)]
+    [l async for l in p.completar_stream([_ruta(provider="kilo")], CUERPO, 0.0)]
     assert vistos[0]["read"] == 90.0   # TIMEOUT_S
 
 
@@ -623,7 +623,7 @@ async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real_en_stre
     p = Proxy({"chatgpt": chatgpt}, almacen,
              httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     [l async for l in p.completar_stream(
-        [_ruta("gpt-5-3-mini", proveedor="chatgpt")], CUERPO, 0.0)]
+        [_ruta("gpt-5-3-mini", provider="chatgpt")], CUERPO, 0.0)]
     assert vistos[0]["read"] == chatgpt.timeout_s
 
 

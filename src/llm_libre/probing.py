@@ -5,7 +5,7 @@ import time
 import httpx
 
 from llm_libre.catalog import normalize
-from llm_libre.modelos import Ruta
+from llm_libre.models import Route
 from llm_libre.providers import Provider, fixed_routes, join_path
 from llm_libre.proxy import PING
 from llm_libre.quality_suite import CASES, evaluate
@@ -96,7 +96,7 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
                         p.id, p.models_path, r.status_code)
             continue
         try:
-            fresh = normalize(p.id, r.json(), p.prioridad, p.default_capabilities,
+            fresh = normalize(p.id, r.json(), p.priority, p.default_capabilities,
                               p.exceptions, emulates_tools=p.emulates_tools)
         except (ValueError, TypeError, AttributeError, KeyError) as e:
             # A non-JSON body (ValueError/JSONDecodeError) or JSON of an
@@ -123,7 +123,7 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     return total
 
 
-async def probe_health(proxy, store, routes: list[Ruta], now: float) -> None:
+async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
     # Same as probe_quality: PAID routes are NOT probed (design section 8). This
     # function receives active_routes(), which includes minimax/MiniMax-M3, and
     # every pass used to hit it: ~5 billable calls a day that also bypass
@@ -159,17 +159,17 @@ async def probe_health(proxy, store, routes: list[Ruta], now: float) -> None:
         # has_liveness_evidence (round 9) to declare it dead -- a momentary
         # capacity signal is not evidence of death.
         if r.codigo_upstream != 429:
-            store.record_probe(route.clave, "salud", r.estado == 200, ms, 0,
+            store.record_probe(route.key, "salud", r.estado == 200, ms, 0,
                                r.codigo_upstream, 0, 0, now)
 
 
-async def probe_quality(proxy, store, routes: list[Ruta], now: float) -> None:
+async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
     # Paid routes are not probed: there is no sense in spending money scoring the
     # emergency escape hatch.
     for route in (r for r in routes if r.tier == "gratis"):
         results = []
         for case in CASES:
-            if case.name == "tools" and not route.capacidades.tools:
+            if case.name == "tools" and not route.capabilities.tools:
                 # This route does not declare tool support (see Capacidades, it
                 # comes from /models or from the fixed-models YAML): asking for it
                 # anyway would only burn free quota for a guaranteed failure, and
@@ -190,7 +190,7 @@ async def probe_quality(proxy, store, routes: list[Ruta], now: float) -> None:
             r = await proxy.completar([route], body, now, es_sonda=True)
             results.append(r.estado == 200 and case.check(r.json))
         passed, total = evaluate(results)
-        store.record_probe(route.clave, "calidad", passed > 0, 0, 0, 200,
+        store.record_probe(route.key, "calidad", passed > 0, 0, 0, 200,
                            passed, total, now)
 
 

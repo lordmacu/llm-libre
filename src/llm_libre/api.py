@@ -7,7 +7,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from llm_libre.auth import PerKeyRateLimiter
-from llm_libre.modelos import METRICAS_NEUTRAS, Pedido
+from llm_libre.models import NEUTRAL_METRICS, RouteRequest
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPCION, HEALTH_DOCS,
                                MODELOS_DOCS, RANKING_DOCS, RESUMEN, TITULO, USO_DOCS,
                                VERSION, personalizar_openapi)
@@ -83,7 +83,7 @@ def _hay_imagen(cuerpo: dict) -> bool:
     return False
 
 
-def interpretar_pedido(cuerpo: dict) -> Pedido:
+def interpretar_pedido(cuerpo: dict) -> RouteRequest:
     # Un "model" de solo espacios es, a todo efecto practico, ausente: no debe
     # colarse como si fuera un id explicito (quedaria vacio tras el strip y
     # produciria un 404 confuso sobre el modelo '').
@@ -149,13 +149,13 @@ def interpretar_pedido(cuerpo: dict) -> Pedido:
         "x_min_contexto debe ser un numero entero",
         lambda: int(x_min_contexto_bruto) if x_min_contexto_bruto else 0)
 
-    return Pedido(
-        modelo=modelo,
-        requiere_tools=requiere_tools or "tools" in exigidas,
-        requiere_vision=requiere_vision or "vision" in exigidas,
-        min_contexto=min_contexto,
-        perfil=perfil,
-        permitir_pago=bool(cuerpo.get("x_permitir_pago", True)),
+    return RouteRequest(
+        model=modelo,
+        needs_tools=requiere_tools or "tools" in exigidas,
+        needs_vision=requiere_vision or "vision" in exigidas,
+        min_context=min_contexto,
+        profile=perfil,
+        allow_paid=bool(cuerpo.get("x_permitir_pago", True)),
     )
 
 
@@ -218,16 +218,16 @@ def crear_app(estado: Estado) -> FastAPI:
         activas = estado.almacen.active_routes()
         # Un id explicito que ya no existe merece un 404 con pistas, no un 400 generico:
         # es exactamente el fallo que este proyecto existe para evitar.
-        if pedido.modelo is not None and not any(r.modelo_id == pedido.modelo for r in activas):
+        if pedido.model is not None and not any(r.model_id == pedido.model for r in activas):
             raise HTTPException(404, {
-                "message": f"el modelo '{pedido.modelo}' ya no existe",
-                "sugerencias": _parecidos(pedido.modelo, activas),
+                "message": f"el modelo '{pedido.model}' ya no existe",
+                "sugerencias": _parecidos(pedido.model, activas),
             })
         tope_alcanzado = False
-        if pedido.permitir_pago:
+        if pedido.allow_paid:
             dia = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             if estado.almacen.paid_usage(llave, dia) >= estado.tope_pago_diario:
-                pedido = replace(pedido, permitir_pago=False)
+                pedido = replace(pedido, allow_paid=False)
                 tope_alcanzado = True
         ahora = time.time()
         metricas = _metricas(estado, ahora)
@@ -267,9 +267,9 @@ def crear_app(estado: Estado) -> FastAPI:
                 media_type="text/event-stream")
         r = await estado.proxy.completar(rutas, cuerpo, ahora, crudo,
                                          en_intento_facturable=_contar_uso_pago)
-        if r.estado == 503 and r.codigo_upstream == 404 and pedido.modelo is not None:
+        if r.estado == 503 and r.codigo_upstream == 404 and pedido.model is not None:
             # ALSO de la revision round 6 -- literalmente la razon de ser
-            # del proyecto: `pedido.modelo` SIGUE en nuestro catalogo (paso
+            # del proyecto: `pedido.model` SIGUE en nuestro catalogo (paso
             # el check 404 de `_rutas_para`, mas arriba) pero el proveedor
             # real ya no lo tiene: un 404 genuino, en vivo. La ruta ya se
             # llevo el golpe de confiabilidad (404 es evidencia de la ruta
@@ -280,7 +280,7 @@ def crear_app(estado: Estado) -> FastAPI:
             # 5h antes del proximo sync de catalogo (nunca para rutas de
             # pago, que no se sondean).
             #
-            # Solo con un modelo EXPLICITO: en modo "auto" `pedido.modelo`
+            # Solo con un modelo EXPLICITO: en modo "auto" `pedido.model`
             # es None, no hay un id puntual sobre el cual sugerir, y la ruta
             # que fallo no es necesariamente la unica candidata razonable --
             # ese caso se queda con el 503 de siempre.
@@ -289,12 +289,12 @@ def crear_app(estado: Estado) -> FastAPI:
             # cabeceras SSE ya salieron antes de que el proxy sepa si la
             # ruta sirvio, asi que no hay margen HTTP para cambiarlo a 404.
             raise HTTPException(404, {
-                "message": f"el modelo '{pedido.modelo}' ya no existe",
-                "sugerencias": _parecidos(pedido.modelo, estado.almacen.active_routes()),
+                "message": f"el modelo '{pedido.model}' ya no existe",
+                "sugerencias": _parecidos(pedido.model, estado.almacen.active_routes()),
             })
         cabeceras = {"X-Intentos": str(r.intentos)}
         if r.ruta is not None:
-            cabeceras["X-Ruta-Usada"] = r.ruta.clave
+            cabeceras["X-Ruta-Usada"] = r.ruta.key
             cabeceras["X-Tier"] = r.ruta.tier
         cuerpo_resp = r.json
         if r.estado == 200 and r.razonamiento and isinstance(cuerpo_resp, dict):
@@ -317,7 +317,7 @@ def crear_app(estado: Estado) -> FastAPI:
     @app.get("/v1/models", **MODELOS_DOCS)
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
         exigir_llave(x_api_key, authorization)
-        datos = [{"id": r.modelo_id, "object": "model", "owned_by": r.proveedor}
+        datos = [{"id": r.model_id, "object": "model", "owned_by": r.provider}
                  for r in estado.almacen.active_routes()]
         datos += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIAS]
         return {"object": "list", "data": datos}
@@ -337,34 +337,34 @@ def crear_app(estado: Estado) -> FastAPI:
         # tabla. `en_cooldown_hasta` sigue expuesto por fila para
         # diagnostico; lo que cambia es el ORDEN.
         activas = sorted(estado.almacen.active_routes(),
-                         key=lambda r: sort_key(r, metricas[r.clave], "balanceado", ahora))
+                         key=lambda r: sort_key(r, metricas[r.key], "balanceado", ahora))
         filas = []
         for r in activas:
-            m = metricas[r.clave]
-            medida = m.calidad_medida_en is not None
-            filas.append({"clave": r.clave, "tier": r.tier, "prioridad": r.prioridad,
+            m = metricas[r.key]
+            medida = m.quality_measured_at is not None
+            filas.append({"clave": r.key, "tier": r.tier, "prioridad": r.priority,
                           "puntaje": round(score(m, "balanceado"), 4),
                           # "nunca medida" se dice, no se disfraza: mostrar el
                           # neutro en `calidad` como si alguien lo hubiera
                           # medido es lo que hacia invisible que `auto` estaba
                           # ordenando por un supuesto. El valor que SI entro al
                           # puntaje va aparte, en `calidad_asumida`.
-                          "calidad": round(m.calidad, 3) if medida else None,
+                          "calidad": round(m.quality, 3) if medida else None,
                           "calidad_medida": medida,
-                          "calidad_asumida": None if medida else round(m.calidad, 3),
-                          "ultima_sonda_calidad": _iso(m.calidad_medida_en),
-                          "ultima_sonda": _iso(m.ultima_sonda_en),
-                          "confiabilidad": round(m.confiabilidad, 3),
+                          "calidad_asumida": None if medida else round(m.quality, 3),
+                          "ultima_sonda_calidad": _iso(m.quality_measured_at),
+                          "ultima_sonda": _iso(m.last_probe_at),
+                          "confiabilidad": round(m.reliability, 3),
                           # Dos numeros distintos a proposito: ttft_p50_ms es
                           # tiempo al primer token (solo lo mide el streaming, y
                           # es lo que pesa en el puntaje); latencia_p50_ms es el
                           # round-trip completo (no-streaming y sondas). Antes
                           # compartian columna y el promedio no significaba nada.
                           "ttft_p50_ms": m.ttft_p50_ms,
-                          "latencia_p50_ms": m.latencia_p50_ms,
-                          "en_cooldown_hasta": m.en_cooldown_hasta,
-                          "tools": r.capacidades.tools, "vision": r.capacidades.vision,
-                          "contexto": r.capacidades.contexto})
+                          "latencia_p50_ms": m.latency_p50_ms,
+                          "en_cooldown_hasta": m.cooldown_until,
+                          "tools": r.capabilities.tools, "vision": r.capabilities.vision,
+                          "contexto": r.capabilities.context})
         return {"rutas": filas}
 
     @app.get("/v1/uso", **USO_DOCS)
@@ -414,9 +414,9 @@ def crear_app(estado: Estado) -> FastAPI:
         metricas = _metricas(estado, ahora)
 
         def _viva(r) -> bool:
-            m = metricas.get(r.clave, METRICAS_NEUTRAS)
-            return (m.en_cooldown_hasta <= ahora
-                    and estado.almacen.has_liveness_evidence(r.clave, ahora))
+            m = metricas.get(r.key, NEUTRAL_METRICS)
+            return (m.cooldown_until <= ahora
+                    and estado.almacen.has_liveness_evidence(r.key, ahora))
 
         libres = [r for r in activas if _viva(r)]
         gratis = [r for r in libres if r.tier == "gratis"]
@@ -461,14 +461,14 @@ def _sin_rutas(activas: list, pedido, metricas: dict, ahora: float,
     if not compat:
         raise HTTPException(400, {
             "message": "ninguna ruta cumple lo pedido",
-            "pedido": pedido.__dict__,
+            "pedido": pedido.as_wire(),
             "rutas_activas": len(activas),
         })
-    liberaciones = [metricas[r.clave].en_cooldown_hasta for r in compat
-                    if r.clave in metricas and metricas[r.clave].en_cooldown_hasta > ahora]
+    liberaciones = [metricas[r.key].cooldown_until for r in compat
+                    if r.key in metricas and metricas[r.key].cooldown_until > ahora]
     raise HTTPException(503, {
         "message": "todas las rutas que podrian servir estan caidas o en cooldown",
-        "pedido": pedido.__dict__,
+        "pedido": pedido.as_wire(),
         "rutas_compatibles": len(compat),
         # Cuando se libera la PRIMERA de ellas. None = ninguna esta en castigo
         # (estan descartadas por otra razon, p.ej. el tope de pago).
@@ -487,7 +487,7 @@ def _parecidos(pedido: str, activas: list) -> list[str]:
     # existe"` con `sugerencias: ['a:free', ...]`. Se excluye ACA, en la
     # funcion, y no en cada llamador: una lista de sugerencias nunca debe
     # poder sugerir el mismo id que se acaba de declarar muerto.
-    candidatos = [r.modelo_id for r in activas if r.modelo_id != pedido]
+    candidatos = [r.model_id for r in activas if r.model_id != pedido]
     return difflib.get_close_matches(pedido, candidatos, n=3, cutoff=0.3)
 
 
@@ -504,5 +504,5 @@ def _metricas(estado: Estado, ahora: float) -> dict:
             # `replace` y no `type(m)(...)` posicional: reconstruir a mano deja
             # afuera cualquier campo nuevo de Metricas (p.ej. calidad_medida_en),
             # y una ruta en cooldown pasaria a parecer "nunca medida".
-            base[clave] = replace(base[clave], en_cooldown_hasta=hasta)
+            base[clave] = replace(base[clave], cooldown_until=hasta)
     return base

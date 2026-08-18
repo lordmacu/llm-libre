@@ -5,7 +5,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from llm_libre.modelos import Capacidades, Ruta
+from llm_libre.models import Capabilities, Route
 from llm_libre.storage import Storage
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAXIMO_S,
@@ -19,8 +19,8 @@ YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 CUERPO = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
 
-def _ruta(modelo, proveedor="kilo", tier="gratis"):
-    return Ruta(proveedor, modelo, tier, Capacidades(True, False, 100000, 4096))
+def _ruta(modelo, provider="kilo", tier="gratis"):
+    return Route(provider, modelo, tier, Capabilities(True, False, 100000, 4096))
 
 
 def _prov(pid="kilo", tier="gratis", unwraps_canvas=False):
@@ -44,7 +44,7 @@ async def test_devuelve_la_primera_ruta_que_responde():
     p = _proxy(lambda req: httpx.Response(200, json=_ok()))
     r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
     assert r.estado == 200
-    assert r.ruta.modelo_id == "a:free"
+    assert r.ruta.model_id == "a:free"
     assert r.intentos == 1
 
 
@@ -58,7 +58,7 @@ async def test_un_429_manda_la_ruta_a_cooldown_y_pasa_a_la_siguiente():
     p = _proxy(handler)
     r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=100.0)
     assert r.estado == 200
-    assert r.ruta.modelo_id == "b:free"
+    assert r.ruta.model_id == "b:free"
     assert r.intentos == 2
     assert p.cooldowns["kilo/a:free"] > 100.0
 
@@ -145,7 +145,7 @@ async def test_desenvuelve_la_cerca_de_canvas_en_el_camino_no_streaming():
     cerca = (':::writing{title="x"}\nhola\n:::')
     p = _proxy(lambda req: httpx.Response(200, json=_ok(cerca)),
               proveedores=("chatgpt",), canvas={"chatgpt"})
-    r = await p.completar([_ruta("a:free", proveedor="chatgpt")], CUERPO, ahora=0.0)
+    r = await p.completar([_ruta("a:free", provider="chatgpt")], CUERPO, ahora=0.0)
     assert r.json["choices"][0]["message"]["content"] == "hola\n"
 
 
@@ -210,7 +210,7 @@ async def test_un_200_con_cuerpo_invalido_pasa_a_la_siguiente_ruta():
     p = _proxy(handler)
     r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
     assert r.estado == 200
-    assert r.ruta.modelo_id == "b:free"
+    assert r.ruta.model_id == "b:free"
     assert r.intentos == 2
 
 
@@ -250,7 +250,7 @@ async def test_un_200_sin_contenido_pasa_a_la_siguiente_ruta():
     p = _proxy(handler)
     r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
     assert r.estado == 200
-    assert r.ruta.modelo_id == "b:free"
+    assert r.ruta.model_id == "b:free"
     assert r.intentos == 2
 
 
@@ -279,7 +279,7 @@ async def test_un_200_con_solo_tool_calls_sigue_siendo_exito():
     p = _proxy(lambda req: httpx.Response(200, json=datos))
     r = await p.completar([_ruta("a:free")], CUERPO, ahora=0.0)
     assert r.estado == 200
-    assert r.ruta.modelo_id == "a:free"
+    assert r.ruta.model_id == "a:free"
 
 
 async def test_un_200_que_es_todo_razonamiento_no_cuenta_como_exito():
@@ -370,7 +370,7 @@ async def test_un_200_con_json_que_no_es_objeto_pasa_a_la_siguiente_ruta():
 
     p = _proxy(handler)
     r = await p.completar([_ruta("a:free"), _ruta("b:free")], CUERPO, ahora=0.0)
-    assert r.estado == 200 and r.ruta.modelo_id == "b:free"
+    assert r.estado == 200 and r.ruta.model_id == "b:free"
 
 
 # --- Hallazgo 2 de la revision de Task 13, y su rediseno final en round 8.
@@ -502,7 +502,7 @@ async def test_usa_el_timeout_propio_del_proveedor_si_lo_declara():
     lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    await p.completar([_ruta("a:free", proveedor="lento")], CUERPO, ahora=0.0)
+    await p.completar([_ruta("a:free", provider="lento")], CUERPO, ahora=0.0)
     assert vistos[0]["read"] == 20.0
 
 
@@ -526,7 +526,7 @@ async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real():
     almacen.create_schema()
     p = Proxy({"chatgpt": chatgpt}, almacen,
              httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    await p.completar([_ruta("gpt-5-3-mini", proveedor="chatgpt")], CUERPO, ahora=0.0)
+    await p.completar([_ruta("gpt-5-3-mini", provider="chatgpt")], CUERPO, ahora=0.0)
     assert vistos[0]["read"] == chatgpt.timeout_s
 
 
@@ -895,7 +895,7 @@ async def test_un_pool_genuinamente_caido_se_excluye_sin_esperar_horas():
         await p.completar(rutas, CUERPO, ahora=float(i))
     await p.esperar_sondas_pendientes()
     for ruta in rutas:
-        assert ruta.clave in p.cooldowns, ruta.clave
+        assert ruta.key in p.cooldowns, ruta.key
 
 
 async def test_429_en_una_cadena_que_falla_entera_sigue_castigando_de_inmediato():
@@ -999,7 +999,7 @@ async def test_un_exito_reinicia_el_contador_de_sospecha_no_el_reloj():
 
 async def test_las_rutas_de_pago_castigan_directo_sin_ninguna_sonda():
     p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
-    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     for i in range(UMBRAL_SOSPECHA):
         await p.completar([ruta_pago], CUERPO, ahora=float(i))
     await p.esperar_sondas_pendientes()
@@ -1023,7 +1023,7 @@ async def test_el_castigo_directo_de_pago_es_flat_no_escala_con_golpes_repetidos
     # escalara (round 9's _castigar), la segunda ronda saldria a 120s, muy
     # por fuera de una tolerancia de medio segundo.
     p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
-    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     ahora = 0.0
     for i in range(UMBRAL_SOSPECHA):
         await p.completar([ruta_pago], CUERPO, ahora=ahora + i)
@@ -1039,7 +1039,7 @@ async def test_el_castigo_directo_de_pago_es_flat_no_escala_con_golpes_repetidos
 
 async def test_menos_del_umbral_no_castiga_una_ruta_de_pago():
     p = _proxy(lambda req: httpx.Response(500), proveedores=("minimax",))
-    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     for i in range(UMBRAL_SOSPECHA - 1):
         await p.completar([ruta_pago], CUERPO, ahora=float(i))
     await p.esperar_sondas_pendientes()
@@ -1056,7 +1056,7 @@ async def test_un_exito_de_pago_limpia_el_contador_de_fallos_de_pago():
         return httpx.Response(200, json=_ok())
 
     p = _proxy(handler, proveedores=("minimax",))
-    ruta_pago = _ruta("m1", proveedor="minimax", tier="pago")
+    ruta_pago = _ruta("m1", provider="minimax", tier="pago")
     for i in range(UMBRAL_SOSPECHA - 1):
         await p.completar([ruta_pago], CUERPO, ahora=float(i))
     await p.completar([ruta_pago], CUERPO, ahora=float(UMBRAL_SOSPECHA))  # exito

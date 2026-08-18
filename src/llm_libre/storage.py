@@ -1,7 +1,7 @@
 import sqlite3
 
-from llm_libre.modelos import (CALIDAD_NEUTRA, CONFIABILIDAD_NEUTRA, TTFT_NEUTRO_MS,
-                               Capacidades, Metricas, Ruta)
+from llm_libre.models import (NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS,
+                               Capabilities, Metrics, Route)
 
 # The SQL below is FROZEN. The database lives on disk in production (the /datos
 # volume, which deliberately survives redeploys), so renaming a table or a column
@@ -80,7 +80,7 @@ class Storage:
         """`CREATE TABLE IF NOT EXISTS` does not add columns to a table that
         already exists: a live database (the /datos volume, which deliberately
         survives redeploys) would be left without `eventos.latencia_ms` -- or,
-        since Task 13, without `rutas.prioridad` or `eventos.es_error_cliente`.
+        since Task 13, without `rutas.priority` or `eventos.es_error_cliente`.
         Same pattern for all three: detect the missing column and add it with a
         default that does not break existing rows. OLD `eventos` rows (written
         before the distinction existed) migrate to `es_error_cliente=0` -- they
@@ -98,11 +98,11 @@ class Storage:
             self._con.execute(
                 "ALTER TABLE rutas ADD COLUMN prioridad INTEGER NOT NULL DEFAULT 100")
 
-    def upsert_routes(self, routes: list[Ruta], timestamp: float,
+    def upsert_routes(self, routes: list[Route], timestamp: float,
                       deactivate_missing: bool = True,
                       provider: str | None = None) -> None:
         for r in routes:
-            c = r.capacidades
+            c = r.capabilities
             self._con.execute(
                 """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
                        contexto, max_salida, visto_por_ultima_vez, activa, prioridad)
@@ -112,8 +112,8 @@ class Storage:
                        contexto=excluded.contexto, max_salida=excluded.max_salida,
                        visto_por_ultima_vez=excluded.visto_por_ultima_vez, activa=1,
                        prioridad=excluded.prioridad""",
-                (r.clave, r.proveedor, r.modelo_id, r.tier, int(c.tools), int(c.vision),
-                 c.contexto, c.max_salida, timestamp, r.prioridad))
+                (r.key, r.provider, r.model_id, r.tier, int(c.tools), int(c.vision),
+                 c.context, c.max_output, timestamp, r.priority))
         # What was not seen in this pass is deactivated, not deleted: the history
         # is what makes it possible to detect a model rename. This step can be
         # skipped when the caller only brings a subset (e.g. syncing a single
@@ -192,12 +192,12 @@ class Storage:
         self._con.commit()
         return cur.rowcount
 
-    def active_routes(self) -> list[Ruta]:
+    def active_routes(self) -> list[Route]:
         rows = self._con.execute(
             """SELECT proveedor, modelo_id, tier, tools, vision, contexto, max_salida,
                       prioridad
                FROM rutas WHERE activa = 1 ORDER BY clave""").fetchall()
-        return [Ruta(p, m, t, Capacidades(bool(to), bool(vi), cx, ms), prioridad=pr)
+        return [Route(p, m, t, Capabilities(bool(to), bool(vi), cx, ms), priority=pr)
                 for p, m, t, to, vi, cx, ms, pr in rows]
 
     def record_probe(self, key: str, kind: str, ok: bool, latency_ms: int,
@@ -238,18 +238,18 @@ class Storage:
             (key, timestamp, int(ok), ttft_ms, http_code, latency_ms, int(is_client_error)))
         self._con.commit()
 
-    def metrics(self) -> dict[str, Metricas]:
-        out: dict[str, Metricas] = {}
+    def metrics(self) -> dict[str, Metrics]:
+        out: dict[str, Metrics] = {}
         for (key,) in self._con.execute("SELECT clave FROM rutas WHERE activa = 1"):
             quality, measured_at = self._quality(key)
-            out[key] = Metricas(
-                calidad=quality,
-                confiabilidad=self._reliability(key),
+            out[key] = Metrics(
+                quality=quality,
+                reliability=self._reliability(key),
                 ttft_p50_ms=self._ttft_p50(key),
-                en_cooldown_hasta=0.0,  # cooldown lives in the proxy's memory
-                calidad_medida_en=measured_at,
-                ultima_sonda_en=self._last_probe(key),
-                latencia_p50_ms=self._latency_p50(key),
+                cooldown_until=0.0,  # cooldown lives in the proxy's memory
+                quality_measured_at=measured_at,
+                last_probe_at=self._last_probe(key),
+                latency_p50_ms=self._latency_p50(key),
             )
         return out
 
@@ -263,7 +263,7 @@ class Storage:
                WHERE clave = ? AND tipo = 'calidad' AND casos_totales > 0
                ORDER BY momento DESC LIMIT 1""", (key,)).fetchone()
         if not row:
-            return CALIDAD_NEUTRA, None
+            return NEUTRAL_QUALITY, None
         return row[0] / row[1], row[2]
 
     def _last_probe(self, key: str) -> float | None:
@@ -286,7 +286,7 @@ class Storage:
                    WHERE clave = ? AND es_error_cliente = 0
                ) ORDER BY momento DESC LIMIT ?""", (key, key, WINDOW)).fetchall()
         if not rows:
-            return CONFIABILIDAD_NEUTRA
+            return NEUTRAL_RELIABILITY
         return sum(f[0] for f in rows) / len(rows)
 
     def has_liveness_evidence(self, key: str, now: float) -> bool:
@@ -409,7 +409,7 @@ class Storage:
                ) WHERE ttft_ms > 0 ORDER BY momento DESC LIMIT ?""",
             (key, key, WINDOW)).fetchall()
         if not rows:
-            return TTFT_NEUTRO_MS
+            return NEUTRAL_TTFT_MS
         values = sorted(f[0] for f in rows)
         return float(values[len(values) // 2])
 

@@ -3,11 +3,11 @@ import logging
 from pathlib import Path
 
 from llm_libre.catalog import normalize
-from llm_libre.modelos import Capacidades
+from llm_libre.models import Capabilities
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-_CHATGPT_DEFAULTS = Capacidades(tools=False, vision=False, contexto=128000, max_salida=8192)
+_CHATGPT_DEFAULTS = Capabilities(tools=False, vision=False, context=128000, max_output=8192)
 
 
 def _load(name):
@@ -42,7 +42,7 @@ def test_normalize_stamps_the_providers_priority():
          "supported_parameters": ["max_tokens"]},
     ]}
     routes = normalize("kilo", data, priority=1)
-    assert routes[0].prioridad == 1
+    assert routes[0].priority == 1
 
 
 def test_normalize_without_a_declared_priority_uses_the_default_of_one_hundred():
@@ -51,7 +51,7 @@ def test_normalize_without_a_declared_priority_uses_the_default_of_one_hundred()
          "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
          "supported_parameters": ["max_tokens"]},
     ]}
-    assert normalize("kilo", data)[0].prioridad == 100
+    assert normalize("kilo", data)[0].priority == 100
 
 
 def test_multimodal_input_is_accepted_as_long_as_output_is_text():
@@ -65,10 +65,10 @@ def test_multimodal_input_is_accepted_as_long_as_output_is_text():
     ]}
     routes = normalize("kilo", data)
     assert len(routes) == 1
-    assert routes[0].capacidades.vision is True
-    assert routes[0].capacidades.tools is True
-    assert routes[0].capacidades.contexto == 256000
-    assert routes[0].capacidades.max_salida == 8192
+    assert routes[0].capabilities.vision is True
+    assert routes[0].capabilities.tools is True
+    assert routes[0].capabilities.context == 256000
+    assert routes[0].capabilities.max_output == 8192
     assert routes[0].tier == "gratis"
 
 
@@ -78,7 +78,7 @@ def test_absence_of_tools_is_detected():
          "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
          "supported_parameters": ["max_tokens", "temperature"]},
     ]}
-    assert normalize("kilo", data)[0].capacidades.tools is False
+    assert normalize("kilo", data)[0].capabilities.tools is False
 
 
 def test_an_unreadable_price_is_treated_as_paid():
@@ -91,15 +91,15 @@ def test_against_the_real_kilo_catalogue():
     routes = normalize("kilo", _load("kilo_models.json"))
     assert len(routes) > 5
     assert all(r.tier == "gratis" for r in routes)
-    assert all(r.proveedor == "kilo" for r in routes)
-    assert not any("lyria" in r.modelo_id for r in routes)
-    assert any(r.capacidades.tools for r in routes)
+    assert all(r.provider == "kilo" for r in routes)
+    assert not any("lyria" in r.model_id for r in routes)
+    assert any(r.capabilities.tools for r in routes)
 
 
 def test_against_the_real_openrouter_catalogue():
     routes = normalize("openrouter", _load("openrouter_models.json"))
     assert len(routes) > 5
-    assert not any("lyria" in r.modelo_id for r in routes)
+    assert not any("lyria" in r.model_id for r in routes)
 
 
 # --- Fix round 3, B2 (Blocking): in a fresh install EVERY route starts at
@@ -153,7 +153,7 @@ def test_an_ordinary_chat_model_is_not_discarded():
         "A 120B-parameter open hybrid MoE model, activating just 12B parameters "
         "for maximum compute efficiency and accuracy in complex multi-agent "
         "applications.")]}
-    assert [r.modelo_id for r in normalize("kilo", data)] == ["nvidia/nemotron-3-super:free"]
+    assert [r.model_id for r in normalize("kilo", data)] == ["nvidia/nemotron-3-super:free"]
 
 
 def test_a_model_without_name_or_description_is_not_discarded():
@@ -162,11 +162,11 @@ def test_a_model_without_name_or_description_is_not_discarded():
     data = {"data": [{"id": "pelado:free", "pricing": {"prompt": "0"},
                       "context_length": 4096,
                       "architecture": {"output_modalities": ["text"]}}]}
-    assert [r.modelo_id for r in normalize("kilo", data)] == ["pelado:free"]
+    assert [r.model_id for r in normalize("kilo", data)] == ["pelado:free"]
 
 
 def test_the_real_kilo_catalogue_no_longer_carries_the_classifier_or_meta_routers():
-    ids = {r.modelo_id for r in normalize("kilo", _load("kilo_models.json"))}
+    ids = {r.model_id for r in normalize("kilo", _load("kilo_models.json"))}
     assert "nvidia/nemotron-3.5-content-safety:free" not in ids
     assert "kilo-auto/free" not in ids
     assert "openrouter/free" not in ids
@@ -177,7 +177,7 @@ def test_the_real_kilo_catalogue_no_longer_carries_the_classifier_or_meta_router
 
 
 def test_the_real_openrouter_catalogue_no_longer_carries_the_classifier_or_meta_router():
-    ids = {r.modelo_id for r in normalize("openrouter", _load("openrouter_models.json"))}
+    ids = {r.model_id for r in normalize("openrouter", _load("openrouter_models.json"))}
     assert "nvidia/nemotron-3.5-content-safety:free" not in ids
     assert "openrouter/free" not in ids
     assert "google/gemma-4-31b-it:free" in ids
@@ -197,7 +197,7 @@ def test_an_entry_without_an_id_is_skipped_without_blowing_up_and_is_logged(capl
     ]}
     with caplog.at_level(logging.WARNING, logger="llm_libre.catalog"):
         routes = normalize("kilo", data)
-    assert [r.modelo_id for r in routes] == ["bueno:free"]
+    assert [r.model_id for r in routes] == ["bueno:free"]
     assert "without 'id'" in caplog.text
 
 
@@ -218,21 +218,21 @@ def test_chatgpt_discovers_the_five_real_ids_in_the_fixture():
     routes = normalize("chatgpt", _load("chatgpt_models.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
     assert len(routes) == 5
-    assert {r.modelo_id for r in routes} == {
+    assert {r.model_id for r in routes} == {
         "gpt-5-5", "gpt-5-6", "gpt-5-3-mini", "gpt-5-5-mini", "gpt-5-6-mini"}
 
 
 def test_chatgpt_discards_the_legacy_aliases_by_their_own_description():
     routes = normalize("chatgpt", _load("chatgpt_models.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
-    ids = {r.modelo_id for r in routes}
+    ids = {r.model_id for r in routes}
     assert not ids & {"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"}
 
 
 def test_chatgpt_discards_auto_because_it_is_a_reserved_id():
     routes = normalize("chatgpt", _load("chatgpt_models.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
-    assert "auto" not in {r.modelo_id for r in routes}
+    assert "auto" not in {r.model_id for r in routes}
 
 
 # --- INFO from the round 6 review: RESERVED_IDS only excluded the LITERAL id
@@ -242,7 +242,7 @@ def test_chatgpt_discards_auto_because_it_is_a_reserved_id():
 #     "auto:" as an alias, never as a literal id). A provider publishing a real
 #     model called, say, "auto:rapido" created a PERMANENTLY unreachable route:
 #     no request with `model: "auto:rapido"` ever reaches
-#     `pedido.modelo == "auto:rapido"`, because interpretar_pedido resolves it
+#     `pedido.model == "auto:rapido"`, because interpretar_pedido resolves it
 #     first as profile "rapido" with modelo=None. ---
 
 def test_the_compound_auto_aliases_are_discarded_too():
@@ -253,7 +253,7 @@ def test_the_compound_auto_aliases_are_discarded_too():
         {"id": "auto:vision", "name": "Collides with the compound alias"},
         {"id": "un-modelo-real", "name": "Real model"},
     ], default_capabilities=_CHATGPT_DEFAULTS)
-    ids = {r.modelo_id for r in routes}
+    ids = {r.model_id for r in routes}
     assert ids == {"un-modelo-real"}
 
 
@@ -263,7 +263,7 @@ def test_a_new_model_from_the_proxy_appears_without_touching_the_yaml():
     # its own, without anyone editing proveedores.yaml or this test.
     routes = normalize("chatgpt", _load("chatgpt_models_con_modelo_nuevo.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
-    ids = {r.modelo_id for r in routes}
+    ids = {r.model_id for r in routes}
     assert "gpt-5-7" in ids
     assert len(ids) == 6
 
@@ -272,8 +272,8 @@ def test_the_default_capabilities_are_applied_to_every_discovered_id():
     routes = normalize("chatgpt", _load("chatgpt_models.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
     assert len(routes) == 5
-    assert all(r.capacidades == _CHATGPT_DEFAULTS for r in routes)
-    assert all(r.capacidades.tools is False for r in routes)   # mandatory: no function calling
+    assert all(r.capabilities == _CHATGPT_DEFAULTS for r in routes)
+    assert all(r.capabilities.tools is False for r in routes)   # mandatory: no function calling
 
 
 def test_default_capabilities_skip_price_and_output_modality():
@@ -285,8 +285,8 @@ def test_default_capabilities_skip_price_and_output_modality():
         {"id": "modelo-sin-metadatos", "description": "Un Modelo"},
     ]}
     routes = normalize("chatgpt", data, default_capabilities=_CHATGPT_DEFAULTS)
-    assert [r.modelo_id for r in routes] == ["modelo-sin-metadatos"]
-    assert routes[0].capacidades == _CHATGPT_DEFAULTS
+    assert [r.model_id for r in routes] == ["modelo-sin-metadatos"]
+    assert routes[0].capabilities == _CHATGPT_DEFAULTS
 
 
 def test_default_capabilities_do_not_disable_the_speciality_filter():
@@ -317,5 +317,5 @@ def test_against_the_real_chatgpt_proxy_catalogue():
     routes = normalize("chatgpt", _load("chatgpt_models.json"),
                        default_capabilities=_CHATGPT_DEFAULTS)
     assert len(routes) == 5
-    assert all(r.proveedor == "chatgpt" for r in routes)
+    assert all(r.provider == "chatgpt" for r in routes)
     assert all(r.tier == "gratis" for r in routes)

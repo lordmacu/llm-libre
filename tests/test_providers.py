@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from llm_libre.modelos import Capacidades
+from llm_libre.models import Capabilities
 from llm_libre.providers import fixed_routes, load
 
 YAML = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
@@ -34,8 +34,8 @@ def test_perplexity_declara_una_sola_ruta_sin_tools():
     pplx = next(p for p in load(YAML, {}) if p.id == "perplexity")
     assert pplx.emulates_tools is False
     rutas = fixed_routes(pplx)
-    assert [r.clave for r in rutas] == ["perplexity/turbo"]
-    assert rutas[0].capacidades.tools is False
+    assert [r.key for r in rutas] == ["perplexity/turbo"]
+    assert rutas[0].capabilities.tools is False
     assert rutas[0].tier == "gratis"
     assert pplx.base_url.endswith("/v1")   # sin el /v1 todo da 404
 
@@ -76,17 +76,17 @@ def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
     minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
     rutas = fixed_routes(minimax)
     assert len(rutas) == 1
-    assert rutas[0].clave == "minimax/MiniMax-M3"
+    assert rutas[0].key == "minimax/MiniMax-M3"
     assert rutas[0].tier == "pago"
-    assert rutas[0].capacidades.tools is True
+    assert rutas[0].capabilities.tools is True
     # vision paso a True el 2026-08-18: estaba en False solo porque nadie lo
     # habia medido. El barrido de capacidades mostro que nombra correctamente
     # el color de un PNG rojo, asi que era una capacidad real que el router
     # descartaba por una declaracion conservadora.
-    assert rutas[0].capacidades.vision is True
-    assert rutas[0].capacidades.contexto == 128000
-    assert rutas[0].capacidades.max_salida == 32768
-    assert rutas[0].prioridad == 2   # la de minimax en el YAML, no una constante
+    assert rutas[0].capabilities.vision is True
+    assert rutas[0].capabilities.context == 128000
+    assert rutas[0].capabilities.max_output == 32768
+    assert rutas[0].priority == 2   # la de minimax en el YAML, no una constante
 
 
 def test_un_proveedor_gratis_no_tiene_modelos_fijos():
@@ -107,17 +107,17 @@ def test_clave_de_solo_espacios_se_normaliza_a_vacia():
 def test_chatgpt_tiene_prioridad_cero_y_es_gratis():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.tier == "gratis"
-    assert chatgpt.prioridad == 0
+    assert chatgpt.priority == 0
 
 
 def test_kilo_queda_en_prioridad_uno():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
-    assert kilo.prioridad == 1
+    assert kilo.priority == 1
 
 
 def test_minimax_queda_en_prioridad_dos():
     minimax = next(p for p in load(YAML, {}) if p.id == "minimax")
-    assert minimax.prioridad == 2
+    assert minimax.priority == 2
 
 
 def test_un_proveedor_sin_prioridad_en_el_yaml_usa_el_default_cien(tmp_path):
@@ -130,7 +130,7 @@ def test_un_proveedor_sin_prioridad_en_el_yaml_usa_el_default_cien(tmp_path):
         "    base_url: https://suelto.test\n"
         "    modelos_path: /models\n")
     p = load(str(yaml_sin_prioridad), {})[0]
-    assert p.prioridad == 100
+    assert p.priority == 100
 
 
 def test_base_url_env_usa_la_variable_de_entorno_si_esta_definida():
@@ -171,8 +171,8 @@ def test_chatgpt_se_descubre_por_modelos_path_no_por_modelos_fijos():
 
 def test_chatgpt_declara_capacidades_por_defecto_con_tools_false():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
-    assert chatgpt.default_capabilities == Capacidades(
-        tools=False, vision=False, contexto=128000, max_salida=8192)
+    assert chatgpt.default_capabilities == Capabilities(
+        tools=False, vision=False, context=128000, max_output=8192)
 
 
 def test_kilo_no_declara_capacidades_por_defecto():
@@ -203,7 +203,7 @@ def test_un_proveedor_sin_capacidades_por_defecto_en_el_yaml_queda_en_none(tmp_p
 
 # --- Revision del follow-up: rungs sin pinnear ---
 #
-# `fixed_routes` estampando `prioridad=p.prioridad` no tenia NINGUN test que
+# `fixed_routes` estampando `priority=p.priority` no tenia NINGUN test que
 # distinguiera "toma la prioridad real del proveedor" de "siempre pone la
 # misma constante" -- inerte hoy porque minimax es el unico modelos_fijos y
 # es de pago, pero el registro invita a futuros proveedores gratis
@@ -393,7 +393,7 @@ def test_fixed_routes_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_p
     p = load(str(yaml_prioridad_rara), {})[0]
     rutas = fixed_routes(p)
     assert len(rutas) == 1
-    assert rutas[0].prioridad == 77
+    assert rutas[0].priority == 77
 
 
 def test_deepseek_declara_dos_rutas_con_tools_emuladas():
@@ -404,8 +404,8 @@ def test_deepseek_declara_dos_rutas_con_tools_emuladas():
     ds = next(p for p in load(YAML, {}) if p.id == "deepseek")
     assert ds.emulates_tools is True
     rutas = fixed_routes(ds)
-    assert [r.modelo_id for r in rutas] == ["deepseek-chat", "deepseek-reasoner"]
-    assert all(r.capacidades.tools is True for r in rutas)
-    assert all(r.capacidades.vision is False for r in rutas)
+    assert [r.model_id for r in rutas] == ["deepseek-chat", "deepseek-reasoner"]
+    assert all(r.capabilities.tools is True for r in rutas)
+    assert all(r.capabilities.vision is False for r in rutas)
     assert ds.base_url.endswith("/v1")
     assert ds.timeout_s == 60.0   # el proof-of-work en WASM suma tiempo variable

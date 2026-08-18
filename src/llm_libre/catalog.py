@@ -3,7 +3,7 @@ import re
 
 from dataclasses import replace
 
-from llm_libre.modelos import Capacidades, Ruta
+from llm_libre.models import Capabilities, Route
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ _DISCARD = re.compile("|".join(_SPECIALITY + _META_ROUTER), re.IGNORECASE)
 # INFO from the round 6 review: the literal "auto" is not enough. `ALIAS` in
 # api.py (and `interpretar_pedido`) also treats as a reserved alias ANY id of the
 # form "auto:<suffix>" -- "auto:rapido", "auto:potente", "auto:tools",
-# "auto:vision" -- resolving it ALWAYS before comparing against `pedido.modelo`.
+# "auto:vision" -- resolving it ALWAYS before comparing against `pedido.model`.
 # A provider publishing a real model under one of those ids (or any other
 # "auto:*" api.py adds tomorrow) created a permanently unreachable route, by
 # exactly the mechanism that already justified reserving "auto". That is why
@@ -93,12 +93,12 @@ def _is_alias(m: dict) -> bool:
 
 
 def normalize(provider: str, data: dict | list, priority: int = 100,
-              default_capabilities: Capacidades | None = None,
+              default_capabilities: Capabilities | None = None,
               exceptions: dict | None = None,
-              emulates_tools: bool = False) -> list[Ruta]:
+              emulates_tools: bool = False) -> list[Route]:
     """Turn a /models response into usable free chat routes.
 
-    `priority` belongs to the PROVIDER (see Provider.prioridad), not to anything
+    `priority` belongs to the PROVIDER (see Provider.priority), not to anything
     /models could carry: it is stamped identically onto every discovered route so
     the router can order them without consulting the registry again.
 
@@ -116,7 +116,7 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
     from the registry.
     """
     items = data.get("data", data) if isinstance(data, dict) else data
-    routes: list[Ruta] = []
+    routes: list[Route] = []
     for m in items:
         # An entry with no `id` (or that is not even a dict) used to blow up with
         # KeyError/AttributeError; sondeo.py swallowed it and that provider's
@@ -158,20 +158,20 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
                 continue
             supported = m.get("supported_parameters") or []
             top = m.get("top_provider") or {}
-            capabilities = Capacidades(
+            capabilities = Capabilities(
                 tools="tools" in supported,
                 vision="image" in (arch.get("input_modalities") or []),
-                contexto=int(m.get("context_length") or top.get("context_length") or 0),
-                max_salida=int(top.get("max_completion_tokens") or 0),
+                context=int(m.get("context_length") or top.get("context_length") or 0),
+                max_output=int(top.get("max_completion_tokens") or 0),
             )
         if emulates_tools:
             capabilities = replace(capabilities, tools=True)
-        routes.append(Ruta(
-            proveedor=provider,
-            modelo_id=m["id"],
+        routes.append(Route(
+            provider=provider,
+            model_id=m["id"],
             tier="gratis",
-            capacidades=capabilities,
-            prioridad=priority,
+            capabilities=capabilities,
+            priority=priority,
         ))
     return routes
 
