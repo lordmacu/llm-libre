@@ -51,16 +51,35 @@ proveedores:
                                 # content -- ':::nota{...}' tambien es sintaxis Docusaurus/MDX
                                 # legitima, y aplicarla a ciegas le arranca las marcas a Kilo/
                                 # OpenRouter (verificado en vivo).
-    # emula_tools: inject_into_body convierte `tools` en instrucciones de texto
-    # antes de mandar al proxy; el proxy nunca ve el campo `tools`. La advertencia
-    # anterior ("tools:false OBLIGATORIO") ya no aplica: la barrera esta en la capa
-    # de emulacion, no en declarar la capacidad como false.
-    emula_tools: true
+    # emula_tools stays OFF here, and this was MEASURED, not assumed.
+    #
+    # Turning it on (2026-08-18) was a mistake worth recording so nobody repeats
+    # it. The proxy does honour a system message -- asked to reply "BANANA" it
+    # replies BANANA -- so the injected instructions do reach the model. It just
+    # ignores them: given a weather tool it answered from its own knowledge with
+    # web-search citations, and given a tool it demonstrably could NOT answer
+    # (a private order database) it returned mangled output and said outright
+    # that it cannot access the function. Measured 0/3 tool_calls, twice.
+    #
+    # The damage was not merely "it does not help". This provider has
+    # `prioridad: 0`, so it is the FIRST route tried for EVERY request: claiming
+    # tools=True made it intercept every tool call in the gateway and answer
+    # prose to agentic clients that were waiting for a structured call. That is
+    # exactly the silent failure that declaring tools:false exists to prevent --
+    # a 500 fails honestly and triggers failover, prose does not.
     capacidades_por_defecto:
-      # Su /v1/models SI es dinamico pero NUNCA trae metadatos de capacidad;
-      # capacidades se declaran aca y catalogo.normalizar las aplica a cada id.
-      # tools:false en el catalogo — emula_tools:true lo eleva a true via la capa
-      # de emulacion (ver tool_emulator.py y catalogo.normalizar).
+      # Its /v1/models IS dynamic but never carries capability metadata, so
+      # capabilities are declared once here and catalogo.normalizar applies them
+      # to every discovered id.
+      #
+      # tools:false is MANDATORY -- re-confirmed 2026-08-18. The proxy no longer
+      # returns HTTP 500 when handed tools, but it still has no function calling:
+      # with tool_choice:"required" it returns tool_calls:None and plain prose.
+      # Its own docs draw the same distinction -- "advanced tools: bookings,
+      # shopping, widgets, canvas" (supported) vs "function calling / tool_calls
+      # in the response: not supported on the anonymous backend" (not) -- and
+      # llm-libre's `tools` capability means the second one. This declaration is
+      # the only barrier keeping tool-calling traffic away from this provider.
       tools: false
       vision: false
       contexto: 128000
@@ -87,10 +106,12 @@ proveedores:
     # propio modelo respondiendo "Perplexity". Declarar las 124 seria mentirle al
     # ranking: mediria 124 nombres que son el mismo modelo y gastaria 124 veces la
     # cuota de sondeo. Por eso va UNA ruta declarada, no catalogo descubierto.
-    # emula_tools: tool calling via prompt injection, mismo mecanismo que deepseek.
-    emula_tools: true
+    # emula_tools stays OFF: measured 0/3 tool_calls through the emulation layer
+    # on 2026-08-18, same as chatgpt (see the long note there for why claiming a
+    # capability this provider does not have is worse than admitting it lacks
+    # one). Only deepseek passed that test.
     modelos_fijos:
-      # tools:false nativo verificado; emula_tools:true lo eleva via la capa de emulacion.
+      # tools:false verified natively AND through emulation -- neither works.
       # vision:false: no soporta imagenes de entrada.
       # contexto: piso conservador, el proxy ignora max_tokens de todas formas.
       - id: turbo

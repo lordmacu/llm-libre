@@ -25,14 +25,17 @@ def test_carga_los_proveedores_registrados():
                                   "kilo", "minimax"]
 
 
-def test_perplexity_declara_una_sola_ruta_con_tools_emuladas():
-    # No native tool calling, but emula_tools:true makes the route report tools=True
-    # via prompt-injection emulation (see tool_emulator.py).
+def test_perplexity_declara_una_sola_ruta_sin_tools():
+    # No native tool calling, and emulation does not work either: measured 0/3
+    # tool_calls through the emulation layer (2026-08-18). Claiming the capability
+    # would route tool requests here only to answer prose -- so a request with
+    # tools must NEVER land on this provider, and this declaration is what
+    # guarantees it.
     pplx = next(p for p in cargar(YAML, {}) if p.id == "perplexity")
-    assert pplx.emula_tools is True
+    assert pplx.emula_tools is False
     rutas = rutas_fijas(pplx)
     assert [r.clave for r in rutas] == ["perplexity/turbo"]
-    assert rutas[0].capacidades.tools is True
+    assert rutas[0].capacidades.tools is False
     assert rutas[0].tier == "gratis"
     assert pplx.base_url.endswith("/v1")   # sin el /v1 todo da 404
 
