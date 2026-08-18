@@ -254,11 +254,16 @@ def test_the_registry_declares_exactly_the_measured_generators():
     # routes would advertise a capability only three of them have.
     assert grok.default_capabilities.images is False
     assert all(e.get("images") is True for e in grok.exceptions.values())
-    # mistral: the SAME route that chats also generates (Le Chat drives it with a
-    # feature flag on one model), so one route carries images and vision at once.
+    # mistral does NOT claim it, and that is a measurement rather than an
+    # oversight: the model invokes generate_image but the black_forest
+    # integration returns success:false and no image ever arrives, on both
+    # configured accounts. See the note in providers.yaml. Its `vision` (image
+    # INPUT) is unaffected and stays true -- which is exactly why the two are
+    # separate axes.
     mistral = next(p for p in provs if p.id == "mistral")
     caps = fixed_routes(mistral)[0].capabilities
-    assert caps.images is True and caps.vision is True
+    assert caps.images is False
+    assert caps.vision is True
     # Everyone else: no claim. A provider gains the capability by claiming it.
     for pid in ("chatgpt", "perplexity", "deepseek", "kilo", "minimax"):
         p = next(x for x in provs if x.id == pid)
