@@ -15,6 +15,11 @@
       "key": "api_key",
       "value": "REPLACE_ME",
       "type": "string"
+    },
+    {
+      "key": "asset_id",
+      "value": "paste-an-id-from-an-images-generations-response",
+      "type": "string"
     }
   ],
   "item": [
@@ -480,6 +485,116 @@
                 }
               ]
             }
+          },
+          "response": []
+        },
+        {
+          "name": "vision — describe an image",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/chat/completions",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "chat",
+                "completions"
+              ]
+            },
+            "description": "Image INPUT (vision), OpenAI format. Sending an `image_url` (a data URI or an https URL) makes the gateway set needs_vision automatically and route only to a vision-capable route (mistral, grok, minimax) -- the client does not have to announce it. Multiple images plus text in one message are supported.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"auto\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": [\n        {\n          \"type\": \"text\",\n          \"text\": \"What is in this image? Answer in one sentence.\"\n        },\n        {\n          \"type\": \"image_url\",\n          \"image_url\": {\n            \"url\": \"https://upload.wikimedia.org/wikipedia/commons/thumb/4/47/PNG_transparency_demonstration_1.png/280px-PNG_transparency_demonstration_1.png\"\n          }\n        }\n      ]\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Images",
+      "item": [
+        {
+          "name": "generate an image",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/images/generations",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "images",
+                "generations"
+              ]
+            },
+            "description": "OpenAI's image-generation contract. The gateway routes ONLY to routes that declare the `images` capability (today mistral and grok's imagine-agent-mode); a chat-only model is never tried. The returned `url` points at THIS gateway (/v1/assets/{id}), not at the provider -- the image is downloaded and re-hosted, so it does not expire when the provider's signed URL does. Check X-Route-Used to see who generated it.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"prompt\": \"a red apple on a white background, flat vector\",\n  \"n\": 1\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "fetch a generated asset",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-API-Key",
+                "value": "{{api_key}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/v1/assets/{{asset_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "v1",
+                "assets",
+                "{{asset_id}}"
+              ]
+            },
+            "description": "Serves a re-hosted image by its content id (the sha256 of the bytes, so the id IS the content). Returned by /v1/images/generations. No API key required -- it is meant to work in an <img src> tag -- and it is immutable/cacheable. Set the `asset_id` collection variable from a generations response to try it."
           },
           "response": []
         }
