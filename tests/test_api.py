@@ -1058,7 +1058,7 @@ def test_ranking_desglosa_los_componentes(cliente):
 #     arriba de todo mientras X-Ruta-Usada decia chatgpt/gpt-5-0 -- el
 #     endpoint que el README describe como el lugar para auditar POR QUE el
 #     router eligio lo que eligio dejaba de explicarlo. Ahora ordena con la
-#     MISMA clave que router.ordenar (via router.clave_de_orden). ---
+#     MISMA clave que router.order_routes (via router.sort_key). ---
 
 def test_ranking_ordena_por_prioridad_no_solo_por_puntaje(estado_cliente):
     estado, cliente = estado_cliente

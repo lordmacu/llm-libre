@@ -2,7 +2,7 @@
 el cliente tenga que avisar con x_requiere ni con el alias auto:vision."""
 from llm_libre.api import _hay_imagen, interpretar_pedido
 from llm_libre.modelos import Capacidades, Pedido, Ruta
-from llm_libre.router import ordenar
+from llm_libre.router import order_routes
 
 IMG = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR"}}
 
@@ -45,7 +45,7 @@ def test_la_imagen_saca_las_rutas_sin_vision():
     pedido = interpretar_pedido({"model": "auto", "messages": [
         {"role": "user", "content": [{"type": "text", "text": "?"}, IMG]}]})
     assert pedido.requiere_vision is True
-    assert [x.clave for x in ordenar(rutas, {}, pedido, 0.0)] == ["kilo/ve"]
+    assert [x.clave for x in order_routes(rutas, {}, pedido, 0.0)] == ["kilo/ve"]
 
 
 def test_sin_imagen_las_ciegas_siguen_sirviendo():
@@ -53,7 +53,7 @@ def test_sin_imagen_las_ciegas_siguen_sirviendo():
     pedido = interpretar_pedido({"model": "auto",
                                  "messages": [{"role": "user", "content": "hola"}]})
     assert pedido.requiere_vision is False
-    assert len(ordenar(rutas, {}, pedido, 0.0)) == 2
+    assert len(order_routes(rutas, {}, pedido, 0.0)) == 2
 
 
 def test_tools_en_el_cuerpo_ya_exigia_tools():

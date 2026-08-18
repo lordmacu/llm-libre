@@ -430,7 +430,7 @@ async def test_una_ruta_en_cooldown_por_sonda_se_salta_en_el_siguiente_pedido():
     ahora = float(UMBRAL_SOSPECHA)
     assert p.cooldowns["kilo/a:free"] > ahora
     await p.completar([_ruta("a:free")], CUERPO, ahora=ahora)
-    # completar() no filtra por cooldown (eso lo hace router.ordenar sobre
+    # completar() no filtra por cooldown (eso lo hace router.order_routes sobre
     # las metricas fusionadas, ver test_router.py) -- lo que se prueba aca es
     # que el cooldown SIGUE activo, sin que este ultimo intento lo reinicie.
     assert p.cooldowns["kilo/a:free"] > ahora
@@ -1146,7 +1146,7 @@ async def test_una_sonda_no_arranca_si_la_ruta_ya_esta_en_cooldown():
 #     orden de llegada -- pero `completar()` recorre la cadena SIEMPRE en
 #     el mismo orden (prioridad, confiabilidad), asi que las primeras N
 #     rutas de la cadena se llevaban el cupo SIEMPRE, y una ruta con la
-#     confiabilidad colapsada (que `clave_de_orden` manda al FINAL) podia
+#     confiabilidad colapsada (que `sort_key` manda al FINAL) podia
 #     no conseguir sonda NUNCA. Medido: victima en la posicion 5 de 6 o 11
 #     de 12, cero sondas en 60 minutos simulados -- el 5h periodico como
 #     unico backstop, degradando la deteccion de ~2s a horas. ---

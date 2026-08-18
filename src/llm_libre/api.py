@@ -12,7 +12,7 @@ from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPCION, HEALTH_DOCS,
                                MODELOS_DOCS, RANKING_DOCS, RESUMEN, TITULO, USO_DOCS,
                                VERSION, personalizar_openapi)
 from llm_libre.ranking import score
-from llm_libre.router import clave_de_orden, compatibles, ordenar
+from llm_libre.router import compatible_routes, order_routes, sort_key
 
 PERFILES = {"rapido", "balanceado", "potente"}
 ALIAS = ["auto", "auto:rapido", "auto:potente", "auto:tools", "auto:vision"]
@@ -168,7 +168,7 @@ class Estado:
     limitador: PerKeyRateLimiter = field(default_factory=lambda: PerKeyRateLimiter(60))
     proveedores: list = field(default_factory=list)   # lo usa el planificador
     http: object = None                                # cliente httpx compartido
-    # Generador para el sorteo entre rutas empatadas (ver router.rotar_empates).
+    # Generador para el sorteo entre rutas empatadas (ver router.shuffle_ties).
     # None = sin sorteo, orden estrictamente determinista. Se inyecta desde
     # principal.crear_estado() segun ROTAR_EMPATES para que los tests puedan
     # armar un Estado determinista sin pasar por variables de entorno.
@@ -231,7 +231,7 @@ def crear_app(estado: Estado) -> FastAPI:
                 tope_alcanzado = True
         ahora = time.time()
         metricas = _metricas(estado, ahora)
-        rutas = ordenar(activas, metricas, pedido, ahora, estado.aleatorio)
+        rutas = order_routes(activas, metricas, pedido, ahora, estado.aleatorio)
         if not rutas:
             _sin_rutas(activas, pedido, metricas, ahora, tope_alcanzado)   # siempre levanta
         return rutas, pedido
@@ -327,7 +327,7 @@ def crear_app(estado: Estado) -> FastAPI:
         exigir_llave(x_api_key, authorization)
         ahora = time.time()
         metricas = _metricas(estado, ahora)
-        # Ordenado con la MISMA clave que usa router.ordenar (perfil
+        # Ordenado con la MISMA clave que usa router.order_routes (perfil
         # "balanceado", el que tambien usa el puntaje de cada fila) -- no un
         # sort propio por puntaje: este endpoint es para auditar POR QUE el
         # router eligio lo que eligio (README), y antes podia mostrar una
@@ -337,7 +337,7 @@ def crear_app(estado: Estado) -> FastAPI:
         # tabla. `en_cooldown_hasta` sigue expuesto por fila para
         # diagnostico; lo que cambia es el ORDEN.
         activas = sorted(estado.almacen.rutas_activas(),
-                         key=lambda r: clave_de_orden(r, metricas[r.clave], "balanceado", ahora))
+                         key=lambda r: sort_key(r, metricas[r.clave], "balanceado", ahora))
         filas = []
         for r in activas:
             m = metricas[r.clave]
@@ -457,7 +457,7 @@ def _sin_rutas(activas: list, pedido, metricas: dict, ahora: float,
     pago y se queda sin rutas gratis vivas esta en el caso de
     indisponibilidad (503, reintentable), no en el de peticion invalida.
     """
-    compat = compatibles(activas, pedido)
+    compat = compatible_routes(activas, pedido)
     if not compat:
         raise HTTPException(400, {
             "message": "ninguna ruta cumple lo pedido",

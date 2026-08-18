@@ -1,5 +1,5 @@
 from llm_libre.modelos import Capacidades, Metricas, Pedido, Ruta
-from llm_libre.router import ordenar
+from llm_libre.router import order_routes
 
 
 def r(modelo, proveedor="kilo", tier="gratis", tools=True, vision=False, contexto=100000):
@@ -13,26 +13,26 @@ def m(calidad=0.8, confiabilidad=0.9, ttft=500, cooldown=0.0, medida_en=1000.0):
 
 def test_descarta_las_rutas_que_no_soportan_tools_cuando_se_piden():
     rutas = [r("con:free", tools=True), r("sin:free", tools=False)]
-    salida = ordenar(rutas, {}, Pedido(requiere_tools=True), ahora=0.0)
+    salida = order_routes(rutas, {}, Pedido(requiere_tools=True), now=0.0)
     assert [x.modelo_id for x in salida] == ["con:free"]
 
 
 def test_descarta_las_rutas_sin_vision_cuando_se_pide():
     rutas = [r("ve:free", vision=True), r("ciego:free", vision=False)]
-    salida = ordenar(rutas, {}, Pedido(requiere_vision=True), ahora=0.0)
+    salida = order_routes(rutas, {}, Pedido(requiere_vision=True), now=0.0)
     assert [x.modelo_id for x in salida] == ["ve:free"]
 
 
 def test_descarta_las_rutas_con_contexto_insuficiente():
     rutas = [r("grande:free", contexto=200000), r("chico:free", contexto=8000)]
-    salida = ordenar(rutas, {}, Pedido(min_contexto=100000), ahora=0.0)
+    salida = order_routes(rutas, {}, Pedido(min_contexto=100000), now=0.0)
     assert [x.modelo_id for x in salida] == ["grande:free"]
 
 
 def test_ordena_por_puntaje_descendente():
     rutas = [r("malo:free"), r("bueno:free")]
     metricas = {"kilo/malo:free": m(calidad=0.3), "kilo/bueno:free": m(calidad=0.95)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["bueno:free", "malo:free"]
 
 
@@ -40,13 +40,13 @@ def test_las_rutas_de_pago_van_siempre_al_final_aunque_puntuen_mejor():
     rutas = [r("MiniMax-M3", proveedor="minimax", tier="pago"), r("flojo:free")]
     metricas = {"minimax/MiniMax-M3": m(calidad=1.0, confiabilidad=1.0, ttft=100),
                 "kilo/flojo:free": m(calidad=0.2, confiabilidad=0.3, ttft=5000)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.tier for x in salida] == ["gratis", "pago"]
 
 
 def test_permitir_pago_falso_saca_las_rutas_de_pago():
     rutas = [r("MiniMax-M3", proveedor="minimax", tier="pago"), r("g:free")]
-    salida = ordenar(rutas, {}, Pedido(permitir_pago=False), ahora=0.0)
+    salida = order_routes(rutas, {}, Pedido(permitir_pago=False), now=0.0)
     assert [x.tier for x in salida] == ["gratis"]
 
 
@@ -54,7 +54,7 @@ def test_excluye_las_rutas_en_cooldown_pero_no_las_vencidas():
     rutas = [r("castigada:free"), r("vencida:free")]
     metricas = {"kilo/castigada:free": m(cooldown=500.0),
                 "kilo/vencida:free": m(cooldown=50.0)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=100.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=100.0)
     assert [x.modelo_id for x in salida] == ["vencida:free"]
 
 
@@ -62,13 +62,13 @@ def test_un_modelo_explicito_filtra_pero_conserva_los_dos_proveedores():
     rutas = [r("comun:free", proveedor="kilo"),
              r("comun:free", proveedor="openrouter"),
              r("otro:free", proveedor="kilo")]
-    salida = ordenar(rutas, {}, Pedido(modelo="comun:free"), ahora=0.0)
+    salida = order_routes(rutas, {}, Pedido(modelo="comun:free"), now=0.0)
     assert len(salida) == 2
     assert {x.proveedor for x in salida} == {"kilo", "openrouter"}
 
 
 def test_sin_candidatas_devuelve_lista_vacia():
-    salida = ordenar([r("sin:free", tools=False)], {}, Pedido(requiere_tools=True), ahora=0.0)
+    salida = order_routes([r("sin:free", tools=False)], {}, Pedido(requiere_tools=True), now=0.0)
     assert salida == []
 
 
@@ -86,7 +86,7 @@ def test_una_ruta_sin_metricas_usa_las_neutras_y_no_ceros():
     rutas = [r("conocida:free"), r("nueva:free")]
     metricas = {"kilo/conocida:free": m(calidad=0.3, confiabilidad=0.5, ttft=1500,
                                         medida_en=None)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["nueva:free", "conocida:free"]
 
 
@@ -106,14 +106,14 @@ def test_una_ruta_nunca_sondeada_va_despues_de_una_con_calidad_medida():
         "kilo/medida:free": m(calidad=0.35, ttft=500, medida_en=1000.0),
         "kilo/nueva:free": m(calidad=0.6, ttft=200, medida_en=None),
     }
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["medida:free", "nueva:free"]
 
 
 def test_una_ruta_nunca_sondeada_sigue_en_la_cadena_para_poder_medirse():
     rutas = [r("nueva:free"), r("medida:free")]
     metricas = {"kilo/medida:free": m(calidad=0.9, medida_en=1000.0)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert "nueva:free" in [x.modelo_id for x in salida]
 
 
@@ -121,7 +121,7 @@ def test_entre_dos_nunca_sondeadas_sigue_mandando_el_puntaje():
     rutas = [x for x in (r("lenta:free"), r("rapida:free"))]
     metricas = {"kilo/lenta:free": m(ttft=5000, medida_en=None),
                 "kilo/rapida:free": m(ttft=100, medida_en=None)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["rapida:free", "lenta:free"]
 
 
@@ -140,7 +140,7 @@ def test_la_prioridad_ordena_dentro_del_mismo_tier_por_encima_del_puntaje():
     rutas = [_rp("chatgpt:free", 0, proveedor="chatgpt"), _rp("normal:free", 1)]
     metricas = {"chatgpt/chatgpt:free": m(calidad=0.3, confiabilidad=0.3, ttft=3000),
                 "kilo/normal:free": m(calidad=0.99, confiabilidad=0.99, ttft=50)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["chatgpt:free", "normal:free"]
 
 
@@ -153,13 +153,13 @@ def test_la_prioridad_no_rompe_el_invariante_de_pago_al_final():
              _rp("mediocre:free", 100)]
     metricas = {"minimax/MiniMax-M3": m(calidad=1.0, confiabilidad=1.0, ttft=50),
                 "kilo/mediocre:free": m(calidad=0.2, confiabilidad=0.3, ttft=5000)}
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.tier for x in salida] == ["gratis", "pago"]
     assert [x.modelo_id for x in salida] == ["mediocre:free", "MiniMax-M3"]
 
 
 # --- Hallazgo 2 de la revision de Task 13: `prioridad` no tenia escape para
-#     una ruta persistentemente rota -- con chatgpt en prioridad 0, ordenar()
+#     una ruta persistentemente rota -- con chatgpt en prioridad 0, order_routes()
 #     la seguia poniendo primero SIEMPRE, sin mirar su salud, mientras el
 #     cooldown (round 8: lo dispara un 429 de inmediato o una SONDA que
 #     confirma la ruta rota, ver proxy.Proxy._sospechar) sea la UNICA salida
@@ -184,7 +184,7 @@ def test_la_prioridad_decide_antes_que_medida_vs_no_medida():
         "chatgpt/chatgpt:free": m(medida_en=None),
         "kilo/normal:free": m(medida_en=1000.0),
     }
-    salida = ordenar(rutas, metricas, Pedido(), ahora=0.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["chatgpt:free", "normal:free"]
 
 
@@ -197,7 +197,7 @@ def test_una_ruta_en_cooldown_se_salta_aunque_tenga_la_maxima_prioridad():
                                   cooldown=500.0),
         "kilo/normal:free": m(calidad=0.2, confiabilidad=0.3, ttft=5000),
     }
-    salida = ordenar(rutas, metricas, Pedido(), ahora=100.0)
+    salida = order_routes(rutas, metricas, Pedido(), now=100.0)
     assert [x.modelo_id for x in salida] == ["normal:free"]
 
 
@@ -206,7 +206,7 @@ def test_un_modelo_explicito_se_sirve_aunque_no_sea_el_de_mayor_prioridad():
     # pedir un id real evita el ordenamiento por completo, prioridad incluida.
     rutas = [_rp("prioritario:free", 0, proveedor="chatgpt"),
              _rp("elegido-a-mano:free", 1)]
-    salida = ordenar(rutas, {}, Pedido(modelo="elegido-a-mano:free"), ahora=0.0)
+    salida = order_routes(rutas, {}, Pedido(modelo="elegido-a-mano:free"), now=0.0)
     assert [x.modelo_id for x in salida] == ["elegido-a-mano:free"]
 
 
@@ -218,7 +218,7 @@ def test_un_modelo_explicito_se_sirve_aunque_no_sea_el_de_mayor_prioridad():
 def test_una_peticion_con_tools_nunca_enruta_a_chatgpt():
     chatgpt = _rp("gpt-5-3-mini", 0, proveedor="chatgpt", tools=False)
     kilo = _rp("con-tools:free", 1, tools=True)
-    salida = ordenar([chatgpt, kilo], {}, Pedido(requiere_tools=True), ahora=0.0)
+    salida = order_routes([chatgpt, kilo], {}, Pedido(requiere_tools=True), now=0.0)
     assert [x.modelo_id for x in salida] == ["con-tools:free"]
 
 
@@ -227,20 +227,20 @@ def test_una_peticion_sin_tools_prefiere_chatgpt_por_su_prioridad():
     # tools=False, porque nadie lo esta pidiendo.
     chatgpt = _rp("gpt-5-3-mini", 0, proveedor="chatgpt", tools=False)
     kilo = _rp("normal:free", 1, tools=True)
-    salida = ordenar([chatgpt, kilo], {}, Pedido(), ahora=0.0)
+    salida = order_routes([chatgpt, kilo], {}, Pedido(), now=0.0)
     assert [x.modelo_id for x in salida] == ["gpt-5-3-mini", "normal:free"]
 
 
 def test_un_id_de_chatgpt_elegido_a_mano_sigue_ruteando_directo():
     chatgpt = _rp("gpt-5-3-mini", 0, proveedor="chatgpt", tools=False)
     kilo = _rp("otro:free", 1)
-    salida = ordenar([chatgpt, kilo], {}, Pedido(modelo="gpt-5-3-mini"), ahora=0.0)
+    salida = order_routes([chatgpt, kilo], {}, Pedido(modelo="gpt-5-3-mini"), now=0.0)
     assert [x.modelo_id for x in salida] == ["gpt-5-3-mini"]
 
 
 def test_una_ruta_de_chatgpt_descubierta_de_verdad_rutea_directo_al_pedirla():
     # Integra catalog.normalize (donde chatgpt DESCUBRE sus ids, con
-    # capacidades_por_defecto) con router.ordenar: prueba el camino
+    # capacidades_por_defecto) con router.order_routes: prueba el camino
     # completo, no rutas armadas a mano.
     from llm_libre.catalog import normalize
     defaults = Capacidades(tools=False, vision=False, contexto=128000, max_salida=8192)
@@ -249,5 +249,5 @@ def test_una_ruta_de_chatgpt_descubierta_de_verdad_rutea_directo_al_pedirla():
         {"data": [{"id": "gpt-5-3-mini", "description": "GPT-5.3 Mini"},
                   {"id": "gpt-5-5", "description": "GPT-5.5"}]},
         priority=0, default_capabilities=defaults)
-    salida = ordenar(descubiertas, {}, Pedido(modelo="gpt-5-3-mini"), ahora=0.0)
+    salida = order_routes(descubiertas, {}, Pedido(modelo="gpt-5-3-mini"), now=0.0)
     assert [x.modelo_id for x in salida] == ["gpt-5-3-mini"]

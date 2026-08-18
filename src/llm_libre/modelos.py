@@ -38,7 +38,7 @@ class Ruta:
     # proposito -- para que una ruta sin prioridad declarada quede ultima
     # entre sus pares, en vez de colarse antes que las que si la declararon.
     # NO participa en el invariante de tier: una ruta de pago con prioridad 0
-    # sigue yendo al final (ver router.ordenar).
+    # sigue yendo al final (ver router.order_routes).
     prioridad: int = 100
 
     @property

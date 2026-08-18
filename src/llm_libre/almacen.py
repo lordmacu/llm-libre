@@ -344,7 +344,7 @@ class Almacen:
         trafico.
 
         `/v1/ranking` NO usa esta senal -- sigue con `confiabilidad`
-        exactamente como antes (y tambien la usa `router.ordenar`, que
+        exactamente como antes (y tambien la usa `router.order_routes`, que
         ordena la cadena de intentos real -- no es SOLO el endpoint de
         diagnostico): una ruta que puntua mal solo pierde posicion y se
         autocorrige; una ruta que `/health` declara muerta REINICIA EL
