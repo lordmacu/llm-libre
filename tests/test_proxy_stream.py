@@ -13,526 +13,521 @@ from llm_libre.proxy import Proxy
 
 YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 
-CUERPO = {"model": "auto", "messages": [], "stream": True}
+BODY = {"model": "auto", "messages": [], "stream": True}
 
 
-def _ruta(modelo="a:free", provider="kilo"):
-    return Route(provider, modelo, "gratis", Capabilities(True, False, 100000, 4096))
+def _route(model="a:free", provider="kilo"):
+    return Route(provider, model, "gratis", Capabilities(True, False, 100000, 4096))
 
 
-def _sse(*trozos):
-    lineas = []
-    for t in trozos:
-        lineas.append('data: {"choices":[{"delta":{"content":"%s"}}]}\n\n' % t)
-    lineas.append("data: [DONE]\n\n")
-    return "".join(lineas).encode()
+def _sse(*chunks):
+    lines = []
+    for t in chunks:
+        lines.append('data: {"choices":[{"delta":{"content":"%s"}}]}\n\n' % t)
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
 
 
-def _sse_json(*trozos):
-    # Como _sse, pero codificando el content con json.dumps: hace falta para
-    # trozos que traen comillas o saltos de linea de VERDAD (p.ej. una marca
-    # de cerca de canvas), que _sse rompe al interpolarlos crudos dentro del
-    # JSON.
-    lineas = [f'data: {{"choices":[{{"delta":{{"content":{json.dumps(t)}}}}}]}}\n\n'
-             for t in trozos]
-    lineas.append("data: [DONE]\n\n")
-    return "".join(lineas).encode()
+def _sse_json(*chunks):
+    # Like _sse, but encoding the content with json.dumps: needed for chunks
+    # carrying REAL quotes or newlines (e.g. a canvas fence marker), which _sse
+    # breaks by interpolating them raw inside the JSON.
+    lines = [f'data: {{"choices":[{{"delta":{{"content":{json.dumps(t)}}}}}]}}\n\n'
+             for t in chunks]
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
 
 
 def _proxy(handler, canvas=frozenset()):
-    almacen = Storage(":memory:")
-    almacen.create_schema()
+    store = Storage(":memory:")
+    store.create_schema()
     prov = {
         "kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
                           unwraps_canvas="kilo" in canvas),
         "chatgpt": Provider("chatgpt", "gratis", "openai", "https://cg.test", "", "/models",
                              {}, [], unwraps_canvas="chatgpt" in canvas),
     }
-    return Proxy(prov, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    return Proxy(prov, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
-async def _juntar(gen):
-    texto = ""
-    async for linea in gen:
-        if not linea.startswith("data: ") or "[DONE]" in linea:
+async def _collect(gen):
+    text = ""
+    async for line in gen:
+        if not line.startswith("data: ") or "[DONE]" in line:
             continue
-        obj = json.loads(linea[6:])
-        texto += (obj.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
-    return texto
+        obj = json.loads(line[6:])
+        text += (obj.get("choices", [{}])[0].get("delta", {}) or {}).get("content", "")
+    return text
 
 
-class _FlujoQuebrado(httpx.AsyncByteStream):
-    """Simula una conexion que entrega un trozo real y despues se corta."""
+class _BrokenStream(httpx.AsyncByteStream):
+    """Simulates a connection that delivers one real chunk and then drops."""
 
-    def __init__(self, trozo: bytes):
-        self._trozo = trozo
+    def __init__(self, chunk: bytes):
+        self._chunk = chunk
 
     async def __aiter__(self):
-        yield self._trozo
+        yield self._chunk
         raise httpx.ReadError("conexion cortada a mitad de stream")
 
 
-class _FlujoConDemora(httpx.AsyncByteStream):
-    """Deja pasar tiempo real antes del primer chunk y de nuevo antes de [DONE],
-    para poder distinguir en un test si el ttft se mide en el primer token o en
-    el cierre del stream."""
+class _DelayedStream(httpx.AsyncByteStream):
+    """Lets real time pass before the first chunk and again before [DONE], so a
+    test can tell whether ttft is measured at the first token or at the stream's
+    close."""
 
-    def __init__(self, demora_antes: float, demora_despues: float):
-        self._demora_antes = demora_antes
-        self._demora_despues = demora_despues
+    def __init__(self, delay_before: float, delay_after: float):
+        self._delay_before = delay_before
+        self._delay_after = delay_after
 
     async def __aiter__(self):
-        await asyncio.sleep(self._demora_antes)
+        await asyncio.sleep(self._delay_before)
         yield b'data: {"choices":[{"delta":{"content":"hola"}}]}\n\n'
-        await asyncio.sleep(self._demora_despues)
+        await asyncio.sleep(self._delay_after)
         yield b"data: [DONE]\n\n"
 
 
-async def test_pasa_el_contenido_completo():
+async def test_it_passes_the_full_content_through():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("ho", "la")))
-    assert await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0)) == "hola"
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "hola"
 
 
-async def test_recorta_el_razonamiento_partido_entre_chunks():
+async def test_it_trims_reasoning_split_across_chunks():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("ho", "<thi", "nk>zz</think>", "la")))
-    assert await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0)) == "hola"
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "hola"
 
 
-async def test_una_etiqueta_que_nunca_cierra_no_cuelga_el_stream():
+async def test_a_tag_that_never_closes_does_not_hang_the_stream():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("ok", "<think>", "sin cerrar")))
-    assert await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0)) == "ok"
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == "ok"
 
 
-async def test_desenvuelve_la_cerca_de_canvas_partida_entre_chunks():
-    # chatgpt-proxy (Task 13) filtra el modo canvas de ChatGPT: la marca de
-    # apertura/cierre viaja partida entre chunks igual que <think>, pero acá
-    # el contenido de adentro ES la respuesta -- no se pierde. Solo pasa
-    # porque la ruta es de "chatgpt" (canvas={"chatgpt"}, ver el hallazgo 1
-    # de la revision mas abajo).
+async def test_it_unwraps_a_canvas_fence_split_across_chunks():
+    # chatgpt-proxy (Task 13) leaks ChatGPT's canvas mode: the opening/closing
+    # marker travels split across chunks just like <think>, but here the content
+    # INSIDE is the answer -- it is not lost. This only happens because the route
+    # belongs to "chatgpt" (canvas={"chatgpt"}, see finding 1 of the review
+    # below).
     p = _proxy(lambda req: httpx.Response(
         200, content=_sse_json(':::writing{title="x"}\n', 'ho', 'la\n', ':::')),
         canvas={"chatgpt"})
-    texto = await _juntar(p.complete_stream([_ruta(provider="chatgpt")], CUERPO, 0.0))
-    assert texto == "hola\n"
+    text = await _collect(p.complete_stream([_route(provider="chatgpt")], BODY, 0.0))
+    assert text == "hola\n"
 
 
-# --- Hallazgo 1 de la revision: mismo caso, pero en streaming y con una ruta
-#     SIN desenvuelve_canvas (kilo, el default) -- las marcas de
-#     documentacion Docusaurus/MDX deben sobrevivir intactas, partidas entre
-#     chunks incluido. ---
+# --- Finding 1 of the review: the same case, but streaming and with a route
+#     WITHOUT canvas unwrapping (kilo, the default) -- the Docusaurus/MDX
+#     documentation markers must survive intact, split across chunks included. ---
 
-async def test_un_proveedor_sin_desenvuelve_canvas_no_toca_marcas_en_streaming():
+async def test_a_provider_without_canvas_unwrapping_leaves_markers_alone_when_streaming():
     p = _proxy(lambda req: httpx.Response(
         200, content=_sse_json(":::note\n", "Guarda el ", "token en el .env.\n", ":::")))
-    texto = await _juntar(p.complete_stream([_ruta(provider="kilo")], CUERPO, 0.0))
-    assert texto == ":::note\nGuarda el token en el .env.\n:::"
+    text = await _collect(p.complete_stream([_route(provider="kilo")], BODY, 0.0))
+    assert text == ":::note\nGuarda el token en el .env.\n:::"
 
 
-async def test_hace_failover_si_la_primera_ruta_falla_antes_de_emitir():
-    llamadas = []
+async def test_it_fails_over_when_the_first_route_fails_before_emitting():
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        if len(llamadas) == 1:
+        calls.append(1)
+        if len(calls) == 1:
             return httpx.Response(429)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    assert await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0)) == "bien"
+    assert await _collect(p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0)) == "bien"
 
 
-async def test_termina_siempre_con_done():
+async def test_it_always_ends_with_done():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("x")))
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
-    assert lineas[-1].strip() == "data: [DONE]"
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
+    assert lines[-1].strip() == "data: [DONE]"
 
 
-async def test_no_routes_emite_un_error_y_cierra():
+async def test_no_routes_emits_an_error_and_closes():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("x")))
-    lineas = [l async for l in p.complete_stream([], CUERPO, 0.0)]
-    assert any("error" in l for l in lineas)
-    assert lineas[-1].strip() == "data: [DONE]"
+    lines = [l async for l in p.complete_stream([], BODY, 0.0)]
+    assert any("error" in l for l in lines)
+    assert lines[-1].strip() == "data: [DONE]"
 
 
-async def test_crudo_no_recorta_el_contenido():
+async def test_raw_mode_does_not_trim_the_content():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>hola")))
-    texto = await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0, raw=True))
-    assert texto == "<think>mmm</think>hola"
+    text = await _collect(p.complete_stream([_route()], BODY, 0.0, raw=True))
+    assert text == "<think>mmm</think>hola"
 
 
-async def test_no_descarta_un_chunk_de_tool_calls_con_contenido_vacio():
-    # En streaming estilo OpenAI un chunk de tool_calls suele viajar con
-    # content="". El bug del brief original lo descartaba por completo con un
-    # `continue` que solo miraba si el contenido recortado quedaba vacio.
-    cuerpo = (b'data: {"choices":[{"delta":{"content":"",'
+async def test_it_does_not_discard_a_tool_calls_chunk_with_empty_content():
+    # In OpenAI-style streaming a tool_calls chunk usually travels with
+    # content="". The original brief's bug discarded it entirely with a `continue`
+    # that only looked at whether the trimmed content came out empty.
+    body = (b'data: {"choices":[{"delta":{"content":"",'
              b'"tool_calls":[{"index":0,"id":"call_1","function":{"name":"buscar"}}]}}]}\n\n'
              b'data: [DONE]\n\n')
-    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
-    utiles = [l for l in lineas if "[DONE]" not in l]
-    assert len(utiles) == 1
-    obj = json.loads(utiles[0][len("data: "):])
+    p = _proxy(lambda req: httpx.Response(200, content=body))
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
+    useful = [l for l in lines if "[DONE]" not in l]
+    assert len(useful) == 1
+    obj = json.loads(useful[0][len("data: "):])
     assert obj["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "buscar"
 
 
-async def test_no_descarta_un_chunk_con_finish_reason_y_contenido_vacio():
-    # El chunk final de un stream normal trae content vacio y solo
-    # finish_reason: no debe perderse. (Fix round 3, B1: antes este test
-    # mandaba SOLO ese chunk, un stream sin ninguna respuesta adentro, que hoy
-    # cuenta como intento fallido -- por eso ahora va precedido de contenido
-    # real, que es la forma en que el caso ocurre de verdad.)
+async def test_it_does_not_discard_a_chunk_with_finish_reason_and_empty_content():
+    # The final chunk of a normal stream carries empty content and only
+    # finish_reason: it must not be lost. (Fix round 3, B1: this test used to send
+    # ONLY that chunk, a stream with no answer inside, which today counts as a
+    # failed attempt -- which is why it is now preceded by real content, the way
+    # the case actually occurs.)
     #
-    # Fix round 4, N2: ademas usaba una forma que el protocolo real de OpenAI
-    # NO produce -- `finish_reason` DENTRO del delta. En el protocolo real es
-    # HERMANO de `delta`, y con esa forma el chunk se estaba perdiendo. Por eso
-    # el bug paso desapercibido: el unico test que lo cubria no usaba la forma
-    # de verdad. Ahora si.
-    cuerpo = (b'data: {"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
+    # Fix round 4, N2: it also used a shape OpenAI's real protocol does NOT
+    # produce -- `finish_reason` INSIDE the delta. In the real protocol it is a
+    # SIBLING of `delta`, and with that shape the chunk was being lost. That is why
+    # the bug went unnoticed: the only test covering it did not use the real
+    # shape. Now it does.
+    body = (b'data: {"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
              b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
              b'data: [DONE]\n\n')
-    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
-    utiles = [l for l in lineas if "[DONE]" not in l]
-    assert len(utiles) == 2
-    obj = json.loads(utiles[-1][len("data: "):])
+    p = _proxy(lambda req: httpx.Response(200, content=body))
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
+    useful = [l for l in lines if "[DONE]" not in l]
+    assert len(useful) == 2
+    obj = json.loads(useful[-1][len("data: "):])
     assert obj["choices"][0]["finish_reason"] == "stop"   # hermano de delta
 
 
-async def test_no_hace_failover_si_la_conexion_se_corta_despues_de_emitir():
-    llamadas = []
+async def test_it_does_not_fail_over_when_the_connection_drops_after_emitting():
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        trozo = b'data: {"choices":[{"delta":{"content":"real"}}]}\n\n'
-        return httpx.Response(200, stream=_FlujoQuebrado(trozo))
+        calls.append(1)
+        chunk = b'data: {"choices":[{"delta":{"content":"real"}}]}\n\n'
+        return httpx.Response(200, stream=_BrokenStream(chunk))
 
     p = _proxy(handler)
-    lineas = [l async for l in p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0)]
-    # Solo se intento la primera ruta: una vez que le llego contenido real al
-    # cliente no se puede saltar a la segunda ruta sin mezclar dos respuestas.
-    assert len(llamadas) == 1
-    assert any("real" in l for l in lineas)
-    assert lineas[-1].strip() == "data: [DONE]"
-    # Y la falla posterior a la emision no debe sumar un segundo evento encima
-    # del que ya se registro cuando salio el primer chunk util.
-    filas = p.store._con.execute("SELECT ok FROM eventos WHERE clave = ?",
+    lines = [l async for l in p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0)]
+    # Only the first route was tried: once real content has reached the client,
+    # switching to the second route would mix two responses.
+    assert len(calls) == 1
+    assert any("real" in l for l in lines)
+    assert lines[-1].strip() == "data: [DONE]"
+    # And the failure after emitting must not add a second event on top of the
+    # one already recorded when the first useful chunk went out.
+    rows = p.store._con.execute("SELECT ok FROM eventos WHERE clave = ?",
                                    ("kilo/a:free",)).fetchall()
-    assert filas == [(1,)]
+    assert rows == [(1,)]
 
 
-async def test_no_descarta_un_chunk_con_tool_calls_vacio_pero_presente():
-    # "tool_calls": [] es un valor falsy, pero la CLAVE esta presente: filtrar
-    # por verdad del valor (en vez de por presencia de la clave) lo tiraria
-    # igual que si no llevara nada, perdiendo la senal de que hay una tool call
-    # en curso.
-    cuerpo = (b'data: {"choices":[{"delta":{"content":"","tool_calls":[]}}]}\n\n'
+async def test_it_does_not_discard_a_chunk_with_an_empty_but_present_tool_calls():
+    # "tool_calls": [] is a falsy value, but the KEY is present: filtering by the
+    # value's truthiness (instead of by the key's presence) would throw it away as
+    # if it carried nothing, losing the signal that a tool call is in progress.
+    body = (b'data: {"choices":[{"delta":{"content":"","tool_calls":[]}}]}\n\n'
              b'data: [DONE]\n\n')
-    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
-    utiles = [l for l in lineas if "[DONE]" not in l]
-    assert len(utiles) == 1
-    obj = json.loads(utiles[0][len("data: "):])
+    p = _proxy(lambda req: httpx.Response(200, content=body))
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
+    useful = [l for l in lines if "[DONE]" not in l]
+    assert len(useful) == 1
+    obj = json.loads(useful[0][len("data: "):])
     assert obj["choices"][0]["delta"]["tool_calls"] == []
 
 
-async def test_stream_de_puro_razonamiento_registra_un_evento_fallido():
-    # Fix round 3, B1 (Blocking). Este test afirmaba lo contrario: que un
-    # stream que no entrega NADA util igual cuenta como exito porque "la
-    # llamada HTTP si funciono". Eso es justo el agujero: el cliente se queda
-    # sin respuesta mientras la confiabilidad de la ruta SUBE, /health sigue en
-    # "ok" y no hay failover. Lo que cuenta como exito es haber entregado
-    # contenido o tool_calls, no haber recibido un 200.
+async def test_a_pure_reasoning_stream_records_a_failed_event():
+    # Fix round 3, B1 (Blocking). This test used to assert the opposite: that a
+    # stream delivering NOTHING useful still counts as a success because "the HTTP
+    # call did work". That is exactly the hole: the client is left with no answer
+    # while the route's reliability GOES UP, /health stays "ok" and there is no
+    # failover. What counts as success is having delivered content or tool_calls,
+    # not having received a 200.
     p = _proxy(lambda req: httpx.Response(
         200, content=_sse("<think>solo razonamiento</think>")))
-    texto = await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0))
-    assert texto == ""
-    filas = p.store._con.execute("SELECT ok FROM eventos").fetchall()
-    assert filas == [(0,)]
+    text = await _collect(p.complete_stream([_route()], BODY, 0.0))
+    assert text == ""
+    rows = p.store._con.execute("SELECT ok FROM eventos").fetchall()
+    assert rows == [(0,)]
 
 
-async def test_un_stream_sin_contenido_util_hace_failover():
-    # El 200 vacio de un modelo de razonamiento en streaming: chunks de role y
-    # de finish_reason, ni una letra de contenido. Debe caer a la ruta
-    # siguiente, no cerrarse con [DONE] como si hubiera respondido.
-    llamadas = []
-    vacio = (b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
+async def test_a_stream_without_useful_content_fails_over():
+    # A reasoning model's empty 200 when streaming: role and finish_reason
+    # chunks, not one letter of content. It must fall through to the next route,
+    # not close with [DONE] as if it had answered.
+    calls = []
+    empty_stream = (b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
              b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
              b'data: [DONE]\n\n')
 
     def handler(req):
-        llamadas.append(1)
-        if len(llamadas) == 1:
-            return httpx.Response(200, content=vacio)
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=empty_stream)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    texto = await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
-    assert texto == "bien"
-    assert len(llamadas) == 2
+    text = await _collect(p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0))
+    assert text == "bien"
+    assert len(calls) == 2
 
 
-async def test_un_stream_sin_contenido_util_registra_fallo_en_esa_ruta():
-    vacio = (b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
+async def test_a_stream_without_useful_content_records_a_failure_on_that_route():
+    empty_stream = (b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n'
              b'data: [DONE]\n\n')
 
     def handler(req):
         if "a:free" in req.content.decode():
-            return httpx.Response(200, content=vacio)
+            return httpx.Response(200, content=empty_stream)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
-    filas = p.store._con.execute(
+    await _collect(p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0))
+    rows = p.store._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
-    assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
+    assert rows == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
 
-async def test_un_stream_de_solo_tool_calls_sigue_contando_como_exito():
-    # Caso legitimo que NO debe romperse: un stream de function calling puede
-    # no traer ni una letra de content.
-    cuerpo = (b'data: {"choices":[{"delta":{"role":"assistant","content":"",'
+async def test_a_tool_calls_only_stream_still_counts_as_a_success():
+    # A legitimate case that must NOT break: a function-calling stream may carry
+    # not one letter of content.
+    body = (b'data: {"choices":[{"delta":{"role":"assistant","content":"",'
               b'"tool_calls":[{"index":0,"id":"c1","function":{"name":"buscar"}}]}}]}\n\n'
               b'data: [DONE]\n\n')
-    llamadas = []
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        return httpx.Response(200, content=cuerpo)
+        calls.append(1)
+        return httpx.Response(200, content=body)
 
     p = _proxy(handler)
-    lineas = [l async for l in p.complete_stream([_ruta("a:free"), _ruta("b:free")],
-                                                  CUERPO, 0.0)]
-    assert len(llamadas) == 1          # no hubo failover
-    assert any("buscar" in l for l in lineas)
-    filas = p.store._con.execute("SELECT ok FROM eventos").fetchall()
-    assert filas == [(1,)]
+    lines = [l async for l in p.complete_stream([_route("a:free"), _route("b:free")],
+                                                  BODY, 0.0)]
+    assert len(calls) == 1          # no failover happened
+    assert any("buscar" in l for l in lines)
+    rows = p.store._con.execute("SELECT ok FROM eventos").fetchall()
+    assert rows == [(1,)]
 
 
-async def test_un_stream_crudo_de_puro_razonamiento_sigue_siendo_exito():
-    # Con x_crudo el cliente pidio el texto tal cual: el <think> ES la respuesta.
+async def test_a_raw_pure_reasoning_stream_is_still_a_success():
+    # With x_crudo the client asked for the text verbatim: the <think> IS the answer.
     p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>")))
-    texto = await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0, raw=True))
-    assert texto == "<think>mmm</think>"
-    filas = p.store._con.execute("SELECT ok FROM eventos").fetchall()
-    assert filas == [(1,)]
+    text = await _collect(p.complete_stream([_route()], BODY, 0.0, raw=True))
+    assert text == "<think>mmm</think>"
+    rows = p.store._con.execute("SELECT ok FROM eventos").fetchall()
+    assert rows == [(1,)]
 
 
-async def test_falla_antes_de_emitir_registra_el_evento_una_sola_vez():
-    llamadas = []
+async def test_failing_before_emitting_records_the_event_only_once():
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        if len(llamadas) == 1:
+        calls.append(1)
+        if len(calls) == 1:
             return httpx.Response(429)
         return httpx.Response(200, content=_sse("ok"))
 
     p = _proxy(handler)
-    await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")], CUERPO, 0.0))
-    filas = p.store._con.execute(
+    await _collect(p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0))
+    rows = p.store._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
-    assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
+    assert rows == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
 
-async def test_ttft_mide_el_primer_token_no_el_fin_del_stream():
-    demora_antes, demora_despues = 0.05, 0.2
+async def test_ttft_measures_the_first_token_not_the_end_of_the_stream():
+    delay_before, delay_after = 0.05, 0.2
 
     def handler(req):
-        return httpx.Response(200, stream=_FlujoConDemora(demora_antes, demora_despues))
+        return httpx.Response(200, stream=_DelayedStream(delay_before, delay_after))
 
     p = _proxy(handler)
     t0 = time.monotonic()
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
-    duracion_total_ms = (time.monotonic() - t0) * 1000
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
+    total_duration_ms = (time.monotonic() - t0) * 1000
 
-    assert any("hola" in l for l in lineas)
-    assert lineas[-1].strip() == "data: [DONE]"
+    assert any("hola" in l for l in lines)
+    assert lines[-1].strip() == "data: [DONE]"
 
-    filas = p.store._con.execute("SELECT ok, ttft_ms FROM eventos").fetchall()
-    assert filas == [(1, filas[0][1])]  # exactamente un evento
-    ttft_ms = filas[0][1]
+    rows = p.store._con.execute("SELECT ok, ttft_ms FROM eventos").fetchall()
+    assert rows == [(1, rows[0][1])]  # exactly one event
+    ttft_ms = rows[0][1]
 
-    # El stream completo tarda ~(demora_antes + demora_despues) = 250ms, pero el
-    # primer token sale a los ~50ms. Si el ttft se hubiera medido al final del
-    # stream (la regresion que este test detecta) quedaria pegado a
-    # duracion_total_ms en vez de quedarse cerca de demora_antes.
-    assert ttft_ms < duracion_total_ms - 100
-    assert ttft_ms < (demora_antes * 1000) + 100
+    # The whole stream takes ~(delay_before + delay_after) = 250ms, but the first
+    # token comes out at ~50ms. If the ttft had been measured at the end of the
+    # stream (the regression this test detects) would sit close to
+    # total_duration_ms instead of staying near delay_before.
+    assert ttft_ms < total_duration_ms - 100
+    assert ttft_ms < (delay_before * 1000) + 100
 
 
-async def test_el_camino_streaming_si_escribe_ttft():
-    # La contracara de I5: aca el ttft SI se puede medir, y es el unico camino
-    # que escribe esa columna.
+async def test_the_streaming_path_does_write_a_ttft():
+    # The flip side of I5: here the ttft CAN be measured, and it is the only path
+    # that writes that column.
     p = _proxy(lambda req: httpx.Response(200, content=_sse("hola")))
-    await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0))
-    fila = p.store._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
-    assert fila[0] >= 0 and fila[1] is None
+    await _collect(p.complete_stream([_route()], BODY, 0.0))
+    row = p.store._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
+    assert row[0] >= 0 and row[1] is None
 
 
-async def test_un_chunk_de_solo_espacios_no_se_pierde():
+async def test_a_whitespace_only_chunk_is_not_lost():
     # Los deltas de streaming vienen partidos y muchos son " " o "\n" sueltos.
-    # No cuentan como "respuesta util" para decidir el exito, pero SI son texto
-    # del cliente: no se pueden tirar. Se retienen y salen, en orden, junto al
-    # primer chunk con contenido de verdad.
+    # They do not count as a "useful response" when deciding success, but they
+    # ARE client-facing text: they cannot be thrown away. They are held back and
+    # go out, in order, alongside the first chunk with real content.
     p = _proxy(lambda req: httpx.Response(200, content=_sse(" ", "hola", " ", "mundo")))
-    assert await _juntar(p.complete_stream([_ruta()], CUERPO, 0.0)) == " hola mundo"
+    assert await _collect(p.complete_stream([_route()], BODY, 0.0)) == " hola mundo"
 
 
-async def test_un_stream_de_puros_espacios_no_es_una_respuesta():
-    llamadas = []
+async def test_a_pure_whitespace_stream_is_not_a_response():
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        if len(llamadas) == 1:
+        calls.append(1)
+        if len(calls) == 1:
             return httpx.Response(200, content=_sse(" ", "\n", "  "))
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    assert await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")],
-                                            CUERPO, 0.0)) == "bien"
+    assert await _collect(p.complete_stream([_route("a:free"), _route("b:free")],
+                                            BODY, 0.0)) == "bien"
 
 
-# --- Fix round 4, N2: el guard de "chunk sin nada util" solo miraba dentro de
-#     `delta`. En el protocolo real de OpenAI, `finish_reason` es HERMANO de
-#     `delta` y el chunk de `usage` viene con `choices: []`, asi que los dos
-#     se estaban descartando en silencio. No mordia con Kilo ni OpenRouter
-#     porque ambos meten `role` en cada delta, pero si muerde con cualquier
-#     proveedor estricto -- el dialecto OpenAI de MiniMax, o los Groq/Cerebras
-#     que el diseno planea sumar. Perdida silenciosa de datos en un contrato
-#     cuya premisa entera es "cambia solo base_url". ---
+# --- Fix round 4, N2: the "chunk with nothing useful" guard only looked inside
+#     `delta`. In OpenAI's real protocol, `finish_reason` is a SIBLING of `delta`
+#     and the `usage` chunk arrives with `choices: []`, so both were being
+#     discarded silently. It did not bite with Kilo or OpenRouter because both put
+#     `role` in every delta, but it does bite with any strict provider -- MiniMax's
+#     OpenAI dialect, or the Groq/Cerebras the design plans to add. Silent data
+#     loss in a contract whose entire premise is "change only base_url". ---
 
-SOBRE = '"id":"c1","object":"chat.completion.chunk","created":1,"model":"m"'
+ENVELOPE = '"id":"c1","object":"chat.completion.chunk","created":1,"model":"m"'
 
 
-async def test_no_pierde_el_chunk_final_real_de_openai():
-    cuerpo = (b'data: {' + SOBRE.encode() +
+async def test_it_does_not_lose_openais_real_final_chunk():
+    body = (b'data: {' + ENVELOPE.encode() +
               b',"choices":[{"index":0,"delta":{"role":"assistant","content":"hola"}}]}\n\n'
-              b'data: {' + SOBRE.encode() +
+              b'data: {' + ENVELOPE.encode() +
               b',"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
               b'data: [DONE]\n\n')
-    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
+    p = _proxy(lambda req: httpx.Response(200, content=body))
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
     assert any('"finish_reason": "stop"' in l or '"finish_reason":"stop"' in l
-               for l in lineas), "se perdio el chunk de finish_reason"
+               for l in lines), "se perdio el chunk de finish_reason"
 
 
-async def test_no_pierde_el_chunk_de_usage():
-    # stream_options.include_usage manda un chunk final con choices vacio.
-    cuerpo = (b'data: {' + SOBRE.encode() +
+async def test_it_does_not_lose_the_usage_chunk():
+    # stream_options.include_usage sends a final chunk with empty choices.
+    body = (b'data: {' + ENVELOPE.encode() +
               b',"choices":[{"index":0,"delta":{"content":"hola"}}]}\n\n'
-              b'data: {' + SOBRE.encode() +
+              b'data: {' + ENVELOPE.encode() +
               b',"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":1,'
               b'"total_tokens":4}}\n\n'
               b'data: [DONE]\n\n')
-    p = _proxy(lambda req: httpx.Response(200, content=cuerpo))
-    lineas = [l async for l in p.complete_stream([_ruta()], CUERPO, 0.0)]
-    assert any("total_tokens" in l for l in lineas), "se perdio el chunk de usage"
+    p = _proxy(lambda req: httpx.Response(200, content=body))
+    lines = [l async for l in p.complete_stream([_route()], BODY, 0.0)]
+    assert any("total_tokens" in l for l in lines), "the usage chunk was lost"
 
 
-async def test_el_sobre_repetido_no_convierte_en_util_a_un_chunk_de_razonamiento():
-    # La contracara: si "trae algo mas que content" se midiera sobre el chunk
-    # entero, las claves de sobre (id/object/created/model/index) -- que se
-    # repiten IDENTICAS en cada chunk -- harian que todo chunk de razonamiento
-    # ya recortado pareciera util. El stream de puro razonamiento dejaria de
-    # hacer failover (regresion de B1) y el buffer se llenaria al pedo.
-    razonar = b"".join(
-        b'data: {' + SOBRE.encode() +
+async def test_the_repeated_envelope_does_not_make_a_reasoning_chunk_useful():
+    # The flip side: if "carries something besides content" were measured on the
+    # chunk
+    # whole, the envelope keys (id/object/created/model/index) -- which repeat
+    # IDENTICALLY in every chunk -- would make every already-trimmed reasoning
+    # chunk look useful. A pure-reasoning stream would stop failing over (a
+    # regression of B1) and the buffer would fill up for nothing.
+    reasoning_stream = b"".join(
+        b'data: {' + ENVELOPE.encode() +
         b',"choices":[{"index":0,"delta":{"content":"' + t + b'"}}]}\n\n'
         for t in (b"<think>", b"pienso ", b"y pienso", b"</think>"))
-    llamadas = []
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        if len(llamadas) == 1:
-            return httpx.Response(200, content=razonar + b"data: [DONE]\n\n")
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=reasoning_stream + b"data: [DONE]\n\n")
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
-    texto = await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")],
-                                             CUERPO, 0.0))
-    assert texto == "bien"
-    assert len(llamadas) == 2
-    filas = p.store._con.execute(
+    text = await _collect(p.complete_stream([_route("a:free"), _route("b:free")],
+                                             BODY, 0.0))
+    assert text == "bien"
+    assert len(calls) == 2
+    rows = p.store._con.execute(
         "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
-    assert filas == [("kilo/a:free", 0), ("kilo/b:free", 1)]
+    assert rows == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
 
 # --- Fix round 4, Minor: descartar chunks retenidos deja de ser silencioso. ---
 
-async def test_avisa_cuando_descarta_los_chunks_retenidos_de_un_intento_fallido(caplog):
-    vacio = (b'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n'
+async def test_it_warns_when_discarding_the_held_chunks_of_a_failed_attempt(caplog):
+    empty_stream = (b'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n'
              b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n'
              b'data: [DONE]\n\n')
-    llamadas = []
+    calls = []
 
     def handler(req):
-        llamadas.append(1)
-        if len(llamadas) == 1:
-            return httpx.Response(200, content=vacio)
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=empty_stream)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
     with caplog.at_level(logging.INFO, logger="llm_libre.proxy"):
-        texto = await _juntar(p.complete_stream([_ruta("a:free"), _ruta("b:free")],
-                                                 CUERPO, 0.0))
-    assert texto == "bien"
+        text = await _collect(p.complete_stream([_route("a:free"), _route("b:free")],
+                                                 BODY, 0.0))
+    assert text == "bien"
     assert "kilo/a:free" in caplog.text
     assert "discarding" in caplog.text
 
 
-async def test_avisa_cuando_la_retencion_se_desborda(caplog):
-    # Mas de PENDING_CAP chunks sin contenido: se sueltan y el intento ya
-    # no puede hacer failover limpio. Eso tiene que quedar dicho.
+async def test_it_warns_when_the_retention_buffer_overflows(caplog):
+    # More than PENDING_CAP contentless chunks: they are released and the attempt
+    # can no longer fail over cleanly. That has to be said out loud.
     from llm_libre.proxy import PENDING_CAP
-    ruido = b"".join(
+    noise = b"".join(
         b'data: {"choices":[{"index":0,"delta":{"reasoning":"x"}}]}\n\n'
         for _ in range(PENDING_CAP + 5))
-    p = _proxy(lambda req: httpx.Response(200, content=ruido + b"data: [DONE]\n\n"))
+    p = _proxy(lambda req: httpx.Response(200, content=noise + b"data: [DONE]\n\n"))
     with caplog.at_level(logging.INFO, logger="llm_libre.proxy"):
-        [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, 0.0)]
+        [l async for l in p.complete_stream([_route("a:free")], BODY, 0.0)]
     assert "kilo/a:free" in caplog.text
 
 
-# --- Hallazgo 2 de la revision (streaming), y su rediseno final en round 8
-#     -- ver el comentario de cabecera de SUSPICION_THRESHOLD en proxy.py para
-#     la regla completa. Probado sobre los TRES caminos de falla de
-#     completar_stream (status != 200, stream sin contenido util, error de
-#     red): ningun fallo de trafico real castiga directo, solo acumula
-#     sospecha; cruzar el umbral dispara una sonda propia en segundo plano,
-#     que es la que decide. ---
+# --- Finding 2 of the review (streaming), and its final redesign in round 8 --
+#     see the header comment of SUSPICION_THRESHOLD in proxy.py for the complete
+#     rule. Exercised over ALL THREE failure paths of complete_stream (non-200
+#     status, a stream with no useful content, a network error): no real-traffic
+#     failure punishes directly, it only accumulates suspicion; crossing the
+#     threshold fires our own probe in the background, and that probe decides. ---
 
 def _ok():
     return {"choices": [{"message": {"role": "assistant", "content": "hola"}}]}
 
 
-def _ping(cuerpo: bytes) -> bool:
-    """True si el pedido que le llego al mock es la sonda -- el mismo
-    payload fijo `PING` (proxy.py). La sonda bajo demanda usa completar()
-    (NO streaming), asi que la respuesta que le corresponde es un JSON
-    normal, no un cuerpo SSE."""
-    mensajes = json.loads(cuerpo).get("messages") or []
-    return bool(mensajes) and mensajes[0].get("content") == "ping"
+def _ping(body: bytes) -> bool:
+    """True if the request that reached the mock is the probe -- the same fixed
+    `PING` payload (proxy.py). The on-demand probe uses complete() (NOT
+    streaming), so the response it deserves is ordinary JSON, not an SSE body."""
+    messages = json.loads(body).get("messages") or []
+    return bool(messages) and messages[0].get("content") == "ping"
 
 
-async def test_n_status_no_200_seguidos_en_streaming_castiga_via_sonda():
+async def test_n_consecutive_non_200_statuses_when_streaming_punish_via_a_probe():
     from llm_libre.proxy import SUSPICION_THRESHOLD
-    p = _proxy(lambda req: httpx.Response(500))   # rota para CUALQUIER payload
+    p = _proxy(lambda req: httpx.Response(500))   # broken for ANY payload
     for i in range(SUSPICION_THRESHOLD):
-        [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, float(i))]
+        [l async for l in p.complete_stream([_route("a:free")], BODY, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns["kilo/a:free"] > 0.0
 
 
-async def test_n_streams_sin_contenido_util_seguidos_castiga_via_sonda():
+async def test_n_consecutive_streams_without_useful_content_punish_via_a_probe():
     from llm_libre.proxy import SUSPICION_THRESHOLD
-    vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
-    p = _proxy(lambda req: httpx.Response(200, content=vacio))
+    empty_stream = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
+    p = _proxy(lambda req: httpx.Response(200, content=empty_stream))
     for i in range(SUSPICION_THRESHOLD):
-        [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, float(i))]
+        [l async for l in p.complete_stream([_route("a:free")], BODY, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns["kilo/a:free"] > 0.0
 
 
-async def test_un_exito_en_streaming_limpia_la_sospecha_acumulada():
+async def test_a_streaming_success_clears_the_accumulated_suspicion():
     from llm_libre.proxy import SUSPICION_THRESHOLD
     estado = {"n": 0}
 
@@ -544,115 +539,114 @@ async def test_un_exito_en_streaming_limpia_la_sospecha_acumulada():
 
     p = _proxy(handler)
     for i in range(SUSPICION_THRESHOLD):
-        [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, float(i))]
+        [l async for l in p.complete_stream([_route("a:free")], BODY, float(i))]
     await p.wait_for_pending_probes()
     assert "kilo/a:free" not in p.cooldowns
 
 
-async def test_tres_400_seguidos_en_streaming_no_disparan_sospecha():
-    # Misma correccion HIGH que en completar(): un 4xx (no 429) es un error
-    # DETERMINISTA del cliente, no una senal de que la ruta este rota.
+async def test_three_consecutive_400s_when_streaming_do_not_trigger_suspicion():
+    # The same HIGH correction as in complete(): a 4xx (not 429) is a
+    # DETERMINISTIC client error, not a signal that the route is broken.
     from llm_libre.proxy import SUSPICION_THRESHOLD
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
     for i in range(SUSPICION_THRESHOLD):
-        [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, float(i))]
+        [l async for l in p.complete_stream([_route("a:free")], BODY, float(i))]
     await p.wait_for_pending_probes()
     assert "kilo/a:free" not in p.cooldowns
 
 
-async def test_un_400_en_streaming_se_registra_marcado_como_error_del_cliente():
-    # Round 4: el mismo agujero de confiabilidad/health del lado streaming.
+async def test_a_400_when_streaming_is_recorded_flagged_as_a_client_error():
+    # Round 4: the same reliability/health hole on the streaming side.
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
-    [l async for l in p.complete_stream([_ruta("a:free")], CUERPO, 0.0)]
-    fila = p.store._con.execute(
+    [l async for l in p.complete_stream([_route("a:free")], BODY, 0.0)]
+    row = p.store._con.execute(
         "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
-    assert fila == (0, 1)
+    assert row == (0, 1)
 
 
-# --- Re-revision: hallazgo MEDIUM. completar_stream() seguia usando el
-#     TIMEOUT_S global fijo, ignorando Provider.timeout_s -- streaming es el
-#     default de los clientes de chat, y es precisamente el camino del
-#     escenario "proxy colgado" que motivo el timeout por proveedor. Un knob
-#     que no hace nada es peor que no tener knob. ---
+# --- Re-review: a MEDIUM finding. complete_stream() was still using the fixed
+#     global TIMEOUT_S, ignoring Provider.timeout_s -- streaming is the default for
+#     chat clients, and it is precisely the path of the "hung proxy" scenario that
+#     motivated the per-provider timeout. A knob that does nothing is worse than no
+#     knob at all. ---
 
-async def test_usa_el_timeout_propio_del_proveedor_en_streaming():
-    vistos = []
+async def test_it_uses_the_providers_own_timeout_when_streaming():
+    seen = []
 
     def handler(req):
-        vistos.append(req.extensions.get("timeout"))
+        seen.append(req.extensions.get("timeout"))
         return httpx.Response(200, content=_sse("bien"))
 
-    almacen = Storage(":memory:")
-    almacen.create_schema()
+    store = Storage(":memory:")
+    store.create_schema()
     lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
-    p = Proxy({"lento": lento}, almacen, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    [l async for l in p.complete_stream([_ruta(provider="lento")], CUERPO, 0.0)]
-    assert vistos[0]["read"] == 20.0
+    p = Proxy({"lento": lento}, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    [l async for l in p.complete_stream([_route(provider="lento")], BODY, 0.0)]
+    assert seen[0]["read"] == 20.0
 
 
-async def test_usa_el_timeout_global_en_streaming_si_el_proveedor_no_declara_el_suyo():
-    vistos = []
+async def test_it_uses_the_global_timeout_when_streaming_if_the_provider_declares_none():
+    seen = []
 
     def handler(req):
-        vistos.append(req.extensions.get("timeout"))
+        seen.append(req.extensions.get("timeout"))
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)   # kilo, sin timeout_s declarado
-    [l async for l in p.complete_stream([_ruta(provider="kilo")], CUERPO, 0.0)]
-    assert vistos[0]["read"] == 90.0   # TIMEOUT_S
+    [l async for l in p.complete_stream([_route(provider="kilo")], BODY, 0.0)]
+    assert seen[0]["read"] == 90.0   # TIMEOUT_S
 
 
-# --- Task 14: mismo test que el de test_proxy.py pero en el camino de
-#     streaming, con la config REAL de chatgpt (proveedores.yaml, cargada con
-#     proveedores.cargar -- el mismo camino de produccion), no un proveedor
-#     sintetico. Se pone rojo si el YAML pierde timeout_s o si
-#     completar_stream deja de leer Provider.timeout_s por esa ruta. ---
+# --- Task 14: the same test as the one in test_proxy.py but on the streaming
+#     path, with chatgpt's REAL config (proveedores.yaml, loaded with
+#     providers.load -- the same path as production), not a synthetic provider. It
+#     goes red if the YAML loses timeout_s or if complete_stream stops reading
+#     Provider.timeout_s for that route. ---
 
-async def test_chatgpt_usa_su_propio_timeout_configurado_en_el_yaml_real_en_streaming():
-    vistos = []
+async def test_chatgpt_uses_its_own_timeout_from_the_real_yaml_when_streaming():
+    seen = []
 
     def handler(req):
-        vistos.append(req.extensions.get("timeout"))
+        seen.append(req.extensions.get("timeout"))
         return httpx.Response(200, content=_sse("bien"))
 
     chatgpt = next(p for p in load(YAML_REAL, {}) if p.id == "chatgpt")
     assert chatgpt.timeout_s is not None   # si esto falla, el YAML perdio timeout_s
-    almacen = Storage(":memory:")
-    almacen.create_schema()
-    p = Proxy({"chatgpt": chatgpt}, almacen,
+    store = Storage(":memory:")
+    store.create_schema()
+    p = Proxy({"chatgpt": chatgpt}, store,
              httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     [l async for l in p.complete_stream(
-        [_ruta("gpt-5-3-mini", provider="chatgpt")], CUERPO, 0.0)]
-    assert vistos[0]["read"] == chatgpt.timeout_s
+        [_route("gpt-5-3-mini", provider="chatgpt")], BODY, 0.0)]
+    assert seen[0]["read"] == chatgpt.timeout_s
 
 
 def _multi(*modelos):
-    return [_ruta(m) for m in modelos]
+    return [_route(m) for m in modelos]
 
 
-# --- Round 8. El gate encontro DOS vectores que round 7 no cerraba, los dos
-#     escotillas del propio diseno de esa ronda:
+# --- Round 8. The gate found TWO vectors round 7 did not close, both escape
+#     hatches of that round's own design:
 #
-#     1. Una cadena de UNA sola ruta -- el cliente la fuerza con `model`
-#        explicito o `x_min_contexto` (publicado por ruta en /v1/ranking),
-#        sin ningun conocimiento interno.
-#     2. La rama `if emitido:` de mas abajo (el force-flush de
-#        PENDING_CAP): commiteaba de inmediato SIN chequear si habia
-#        una hermana con exito y SIN mirar la longitud de la cadena --
-#        alcanzaba con `{"model":"auto","stream":true}` (nada de
-#        extensiones, ningun id) y un prompt que agota el presupuesto de
-#        razonamiento sin emitir texto nunca: 15 pedidos, apagon total, en
-#        una cadena de 5 rutas SANAS.
+#     1. A chain of a SINGLE route -- the client forces it with an explicit
+#        `model` or with `x_min_contexto` (published per route in /v1/ranking),
+#        with no internal knowledge required.
+#     2. The `if emitido:` branch below (PENDING_CAP's force-flush): it committed
+#        immediately WITHOUT checking whether a sibling had succeeded and WITHOUT
+#        looking at the chain's length -- `{"model":"auto","stream":true}` (no
+#        extensions, no id) plus a prompt that burns the reasoning budget without
+#        ever emitting text was enough: 15 requests, total blackout, across a
+#        chain of 5 HEALTHY routes.
 #
-#     Round 8 saca el eje de "cuantas rutas hay" y "por que rama salio":
-#     CUALQUIER fallo de trafico real, en CUALQUIER rama (incluida
-#     `if emitido:`), solo acumula sospecha -- nunca castiga directo. Los
-#     tests de abajo reproducen los dos vectores con el mock devolviendole a
-#     la SONDA (payload fijo, no streaming: la sonda bajo demanda usa
-#     completar()) una respuesta distinta de la que le da al cliente. ---
+#     Round 8 removes both "how many routes are there" and "which branch did it
+#     leave by" from the axis: ANY real-traffic failure, in ANY branch (including
+#     `if emitido:`), only accumulates suspicion -- it never punishes directly.
+#     The tests below reproduce both vectors with the mock returning the PROBE
+#     (fixed payload, not streaming: the on-demand probe uses complete()) a
+#     different response from the one it gives the client. ---
 
-async def test_status_no_200_identico_en_cadena_de_una_sola_ruta_no_castiga_sana():
+async def test_an_identical_non_200_in_a_single_route_chain_does_not_punish_a_healthy_route():
     def handler(req):
         if _ping(req.content):
             return httpx.Response(200, json=_ok())
@@ -660,27 +654,27 @@ async def test_status_no_200_identico_en_cadena_de_una_sola_ruta_no_castiga_sana
 
     p = _proxy(handler)
     for i in range(15):
-        [l async for l in p.complete_stream(_multi("a:free"), CUERPO, float(i))]
+        [l async for l in p.complete_stream(_multi("a:free"), BODY, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns == {}
 
 
-async def test_stream_sin_contenido_util_identico_en_cadena_de_una_sola_ruta_no_castiga():
-    vacio = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
+async def test_an_identical_useless_stream_in_a_single_route_chain_does_not_punish():
+    empty_stream = b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\ndata: [DONE]\n\n'
 
     def handler(req):
         if _ping(req.content):
             return httpx.Response(200, json=_ok())
-        return httpx.Response(200, content=vacio)
+        return httpx.Response(200, content=empty_stream)
 
     p = _proxy(handler)
     for i in range(15):
-        [l async for l in p.complete_stream(_multi("a:free"), CUERPO, float(i))]
+        [l async for l in p.complete_stream(_multi("a:free"), BODY, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns == {}
 
 
-async def test_error_de_red_identico_en_cadena_de_una_sola_ruta_no_castiga_en_streaming():
+async def test_an_identical_network_error_in_a_single_route_chain_does_not_punish_when_streaming():
     def handler(req):
         if _ping(req.content):
             return httpx.Response(200, json=_ok())
@@ -688,36 +682,35 @@ async def test_error_de_red_identico_en_cadena_de_una_sola_ruta_no_castiga_en_st
 
     p = _proxy(handler)
     for i in range(15):
-        [l async for l in p.complete_stream(_multi("a:free"), CUERPO, float(i))]
+        [l async for l in p.complete_stream(_multi("a:free"), BODY, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns == {}
 
 
-def _sse_solo_estructura(n: int) -> bytes:
-    """`n` chunks de streaming reales que solo traen senal estructural
-    (`finish_reason` presente, aunque null -- exactamente como lo manda un
-    proveedor real en cada chunk intermedio) y JAMAS contenido visible: el
-    patron de un modelo de razonamiento que se gasta el presupuesto
-    pensando sin llegar a emitir texto nunca. Con `n > PENDING_CAP`
-    dispara el force-flush (`emitido=True`) sin pasar nunca por
-    `util=True` -- exactamente la rama `if emitido:` que este round deja
-    de tratar como una excepcion."""
-    lineas = ['data: {"choices":[{"index":0,"delta":{"content":""},'
+def _sse_structure_only(n: int) -> bytes:
+    """`n` real streaming chunks carrying nothing but structural signal
+    (`finish_reason` present, though null -- exactly as sent by a real provider in
+    every intermediate chunk) and NEVER visible content: the
+    pattern of a reasoning model that burns its budget thinking without ever
+    getting to emit text. With `n > PENDING_CAP` it triggers the force-flush
+    (`emitido=True`) without ever passing through `util=True` -- exactly the
+    `if emitido:` branch this round stops treating as an exception."""
+    lines = ['data: {"choices":[{"index":0,"delta":{"content":""},'
              '"finish_reason":null}]}\n\n' for _ in range(n)]
-    lineas.append("data: [DONE]\n\n")
-    return "".join(lineas).encode()
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
 
 
-async def test_flood_de_chunks_sin_contenido_util_no_castiga_una_ruta_sana():
-    # El vector 2 exacto del gate: ni siquiera hace falta narrows la cadena
-    # -- "auto", sin extensiones, contra 5 rutas sanas.
+async def test_a_flood_of_useless_chunks_does_not_punish_a_healthy_route():
+    # The gate's exact vector 2: the chain does not even need narrowing --
+    # "auto", no extensions, against 5 healthy routes.
     from llm_libre.proxy import PENDING_CAP
-    payload_sin_contenido = _sse_solo_estructura(PENDING_CAP + 6)
+    contentless_payload = _sse_structure_only(PENDING_CAP + 6)
 
     def handler(req):
         if _ping(req.content):
             return httpx.Response(200, json=_ok())
-        return httpx.Response(200, content=payload_sin_contenido)
+        return httpx.Response(200, content=contentless_payload)
 
     rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
     p = _proxy(handler)
@@ -729,30 +722,30 @@ async def test_flood_de_chunks_sin_contenido_util_no_castiga_una_ruta_sana():
     assert p.cooldowns == {}
 
 
-async def test_una_ruta_rota_de_verdad_con_hermana_sana_sigue_castigando_rapido_en_streaming():
+async def test_a_genuinely_broken_route_with_a_healthy_sibling_is_still_punished_quickly():
     from llm_libre.proxy import SUSPICION_THRESHOLD
 
     def handler(req):
         if _ping(req.content):
-            return httpx.Response(500)   # la sonda tambien la ve rota
-        cuerpo = json.loads(req.content)
-        if cuerpo["model"] == "a:free":
+            return httpx.Response(500)   # the probe sees it broken too
+        body = json.loads(req.content)
+        if body["model"] == "a:free":
             return httpx.Response(500)
         return httpx.Response(200, content=_sse("bien"))
 
     p = _proxy(handler)
     for i in range(SUSPICION_THRESHOLD):
-        texto = await _juntar(p.complete_stream(_multi("a:free", "b:free"), CUERPO, float(i)))
-        assert texto == "bien"
+        text = await _collect(p.complete_stream(_multi("a:free", "b:free"), BODY, float(i)))
+        assert text == "bien"
     await p.wait_for_pending_probes()
     assert "kilo/a:free" in p.cooldowns
     assert "kilo/b:free" not in p.cooldowns
 
 
-async def test_una_ruta_rota_de_verdad_en_cadena_de_una_sola_ruta_se_enfria_rapido_en_streaming():
+async def test_a_genuinely_broken_route_in_a_single_route_chain_cools_down_quickly():
     from llm_libre.proxy import SUSPICION_THRESHOLD
-    p = _proxy(lambda req: httpx.Response(500))   # rota para CUALQUIER payload
+    p = _proxy(lambda req: httpx.Response(500))   # broken for ANY payload
     for i in range(SUSPICION_THRESHOLD):
-        [l async for l in p.complete_stream(_multi("a:free"), CUERPO, float(i))]
+        [l async for l in p.complete_stream(_multi("a:free"), BODY, float(i))]
     await p.wait_for_pending_probes()
     assert "kilo/a:free" in p.cooldowns
