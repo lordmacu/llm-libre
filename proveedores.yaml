@@ -158,32 +158,36 @@ proveedores:
     # alias "auto" de llm-libre. No hace falta hacer nada: catalogo.es_id_reservado
     # ya lo descarta, que es exactamente para lo que existe.
     capacidades_por_defecto:
-      # tools: true VERIFICADO -- 25 de los 31 modelos devuelven un tool_call
-      # real (get_weather con city=Bogota). Los 6 que no, abajo en excepciones.
+      # tools Y vision en TRUE, y el camino hasta este valor merece quedar
+      # escrito porque casi nos cuesta 30 rutas utiles.
+      #
+      # Grok NO es un catalogo de 31 modelos: es un POOL con alias. En
+      # grok_backend.resolve_model, un id que no esta en MODELS_CATALOG cae en
+      # `_rotator.next()` -- round-robin. O sea que "gpt-4o" o "claude-3-opus"
+      # no identifican un backend: cada llamada aterriza en uno distinto. Por
+      # eso medir UNA vez por id da resultados contradictorios (grok-420 dio
+      # tools=SI en un barrido y 0/3 al repetirlo tres veces): no se estaba
+      # midiendo un modelo sino la ruleta.
+      #
+      # vision: el proxy resuelve esto SOLO. resolve_vision_model() detecta la
+      # imagen y, si el backend pedido no ve, la manda al VISION_POOL. Medido:
+      # 30 de 31 rutas leyeron un codigo de 4 digitos de una imagen de
+      # 488x232. Las que no, abajo.
       tools: true
-      # vision: FALSE, y esta correccion vale la pena contarla. Primero declare
-      # true porque probe grok-4.5 con un PNG de 1x1 en BLANCO y respondio "No
-      # veo nada": lo lei como "describe bien una imagen vacia". Significaba
-      # literalmente que no le habia llegado ninguna imagen. El barrido del
-      # 2026-08-18 con un PNG ROJO lo zanjo: las 31 rutas fallan en nombrar el
-      # color. Moraleja: una sonda de vision necesita una imagen con contenido
-      # RECONOCIBLE, o mide su propia ambiguedad.
-      vision: false
-      # Piso conservador, mismo criterio que perplexity/turbo: /models no
-      # declara context_length, y es preferible que el router descarte a grok
-      # de un pedido de contexto enorme a que se lo mande y falle a mitad.
+      vision: true
       contexto: 128000
       max_salida: 8192
-    # Medidos uno por uno el 2026-08-18: estos 6 NO devuelven tool_call, a
-    # diferencia de los otros 25. Sin esta lista habria que mentir sobre ellos
-    # o renunciar al descubrimiento dinamico.
+    # La familia imagine-agent-mode es lo unico realmente distinto: son
+    # agentes de generacion de imagenes, no de chat. 0/3 en tool_calls al
+    # repetir, y el propio grok_backend lo dice: "imagine-agent-mode* NO
+    # tienen vision via f6". Medicion y codigo coinciden, que es la unica
+    # razon por la que esta excepcion se declara y las otras cinco que
+    # sospeche NO: claude-3-opus, gpt-4o y grok-4-1-thinking-1129 dieron 3/3
+    # al repetir, su "no" original era la ruleta.
     excepciones:
-      claude-3-opus:              {tools: false}
-      gpt-4o:                     {tools: false}
-      grok-4-1-thinking-1129:     {tools: false}
-      imagine-agent-mode:         {tools: false}
-      imagine-agent-mode-dev:     {tools: false}
-      imagine-agent-mode-grok-4-5: {tools: false}
+      imagine-agent-mode:          {tools: false, vision: false}
+      imagine-agent-mode-dev:      {tools: false, vision: false}
+      imagine-agent-mode-grok-4-5: {tools: false, vision: false}
 
   - id: kilo
     tier: gratis

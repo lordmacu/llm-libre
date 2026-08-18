@@ -49,12 +49,16 @@ def test_el_yaml_declara_las_6_excepciones_de_grok():
     provs = cargar("proveedores.yaml", dict(os.environ))
     grok = [p for p in provs if p.id == "grok"][0]
     assert grok.capacidades_por_defecto.tools is True
-    # La correccion del 2026-08-18: NINGUNA ruta de grok ve imagenes.
-    assert grok.capacidades_por_defecto.vision is False
+    # vision True: el proxy resuelve la imagen por su cuenta
+    # (resolve_vision_model manda al VISION_POOL lo que no ve), y 30 de 31
+    # rutas leyeron un codigo de 4 digitos en una imagen de 488x232.
+    assert grok.capacidades_por_defecto.vision is True
+    # Solo la familia imagine-agent-mode queda afuera: son agentes de
+    # generacion de imagenes, 0/3 en tool_calls al repetir, y el propio
+    # grok_backend documenta que no tienen vision.
     assert set(grok.excepciones) == {
-        "claude-3-opus", "gpt-4o", "grok-4-1-thinking-1129",
         "imagine-agent-mode", "imagine-agent-mode-dev", "imagine-agent-mode-grok-4-5"}
-    assert all(v == {"tools": False} for v in grok.excepciones.values())
+    assert all(v == {"tools": False, "vision": False} for v in grok.excepciones.values())
 
 
 def test_minimax_declara_vision_medida():
