@@ -165,7 +165,7 @@ class State:
     http: object = None                             # shared httpx client
     # Generator for the draw between tied routes (see router.shuffle_ties).
     # None = no draw, strictly deterministic order. It is injected from
-    # principal.crear_estado() according to ROTAR_EMPATES so tests can build a
+    # main.build_state() according to ROTAR_EMPATES so tests can build a
     # deterministic State without going through environment variables.
     rng: object = None
 

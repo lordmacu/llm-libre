@@ -158,7 +158,7 @@ class Storage:
         moment -- not a fixed list inside this function. Note the precision of
         that sentence (gate review): this does NOT mean a YAML edit takes effect
         on its own, without a restart -- `providers.load()` is called ONCE, at
-        process start (`principal.crear_estado`), so that set stays fixed in
+        process start (`main.build_state`), so that set stays fixed in
         memory until the next restart. What IS true: given that set (fixed until
         restart), the sweep runs on EVERY probing cycle, so removing (or
         re-adding) a provider takes effect without touching code -- only one
