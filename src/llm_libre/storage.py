@@ -31,6 +31,14 @@ CREATE INDEX IF NOT EXISTS ix_events ON events(key, at DESC);
 CREATE TABLE IF NOT EXISTS paid_usage (
     api_key TEXT NOT NULL, day TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (api_key, day));
+
+-- Metadata for the binaries a provider generated for us; the bytes live on disk
+-- next to this file (see assets.py). Here so retention can be enforced by AGE
+-- with one query instead of by walking a directory and stat-ing every file.
+CREATE TABLE IF NOT EXISTS assets (
+    id TEXT PRIMARY KEY, content_type TEXT NOT NULL,
+    bytes INTEGER NOT NULL, created_at REAL NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_assets_age ON assets(created_at);
 """
 
 # The previous Spanish-named shape, kept only so `_migrate` can recognise it and

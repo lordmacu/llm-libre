@@ -4,6 +4,7 @@ import time
 
 import httpx
 
+from llm_libre.assets import RETENTION_S as ASSET_RETENTION_S
 from llm_libre.catalog import normalize
 from llm_libre.models import Route
 from llm_libre.providers import Provider, fixed_routes, join_path
@@ -217,3 +218,9 @@ async def cycle(state, counter: int) -> None:
     if counter % QUALITY_EVERY_N_CYCLES == 0:
         await probe_quality(state.proxy, state.store, routes, now)
     state.store.prune(now - RETENTION_DAYS * 86400)
+    # Generated assets age out on their own schedule (assets.RETENTION_S, 30
+    # days): they are bytes on a finite volume, and without this the disk grows
+    # forever. Same place as the telemetry prune so there is ONE thing that
+    # bounds what this service accumulates, not two that can drift apart.
+    if getattr(state, "assets", None) is not None:
+        state.assets.prune(now - ASSET_RETENTION_S)

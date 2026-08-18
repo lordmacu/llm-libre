@@ -1,4 +1,5 @@
 import os
+import tempfile
 
 import pytest
 
@@ -11,6 +12,10 @@ import pytest
 # (/datos/llm-libre.sqlite3, not writable outside Docker) and any key at all
 # avoids the very fail-fast this file tests below.
 os.environ["DB_PATH"] = ":memory:"
+# Same reason: the production default (/datos/assets) is not writable
+# outside Docker, and the store must not be the thing that decides
+# whether the process starts.
+os.environ.setdefault("ASSETS_DIR", tempfile.mkdtemp(prefix="llm-assets-"))
 os.environ.setdefault("LLM_LIBRE_API_KEYS", "startup-key-for-tests")
 
 from llm_libre import main  # noqa: E402

@@ -4,12 +4,13 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from llm_libre.assets import content_disposition, localise
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.models import NEUTRAL_METRICS, RouteRequest
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
-                               IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
+                               ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
                                USAGE_DOCS, VERSION, customise_openapi)
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
@@ -168,6 +169,11 @@ class State:
     # main.build_state() according to ROTATE_TIES so tests can build a
     # deterministic State without going through environment variables.
     rng: object = None
+    # Where generated binaries are stored, and the origin their URLs carry.
+    # Both None in most tests: with no store the images endpoint simply hands
+    # back the provider's own URL, which is what it did before this existed.
+    assets: object = None
+    public_base_url: str = ""
 
 
 def _resolve_api_key(x_api_key: str | None, authorization: str | None) -> str | None:
@@ -342,11 +348,48 @@ def create_app(state: State) -> FastAPI:
 
         r = await state.proxy.generate_images(routes, body, now,
                                               on_billable_attempt=_count_paid_usage)
+        if r.status == 200 and state.assets is not None:
+            # The provider's URL never reaches the client: it expires, it may
+            # need headers the client does not have, and it names who served --
+            # which is the one thing this gateway promises not to make the
+            # client care about. See assets.localise; it degrades to the
+            # original URL rather than failing the request.
+            r = replace(r, json=await localise(
+                r.json, state.assets, state.proxy.http, state.public_base_url,
+                body.get("response_format"), now))
         headers = {"X-Attempts": str(r.attempts)}
         if r.route is not None:
             headers["X-Route-Used"] = r.route.key
             headers["X-Tier"] = r.route.tier
         return JSONResponse(r.json, status_code=r.status, headers=headers)
+
+    @app.get("/v1/assets/{asset_id}", **ASSETS_DOCS)
+    def asset(asset_id: str):
+        """Serve a stored binary. DELIBERATELY unauthenticated.
+
+        It has to be: the whole point is that the URL works in an `<img>` tag, a
+        markdown preview or a browser address bar, none of which can attach an
+        API key. What protects it instead is the id -- a SHA-256 of the content,
+        so it cannot be guessed, enumerated, or derived from the prompt.
+
+        `Cache-Control: immutable` is honest here rather than optimistic: the id
+        IS the hash of the bytes, so the response for a given id can never
+        change. Retention is the only reason one ever stops existing, and then
+        it becomes a 404 rather than different content.
+        """
+        found = state.assets.get(asset_id) if state.assets is not None else None
+        if found is None:
+            raise HTTPException(404, "asset not found")
+        data, content_type = found
+        return Response(data, media_type=content_type, headers={
+            "Cache-Control": "public, max-age=31536000, immutable",
+            # An SVG is an image everywhere except in a browser, where it can
+            # run script -- so it is served as a download. See assets.py.
+            "Content-Disposition": content_disposition(content_type),
+            # The bytes come from a third party: no sniffing, no framing.
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+        })
 
     @app.get("/v1/models", **MODELS_DOCS)
     def models(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):

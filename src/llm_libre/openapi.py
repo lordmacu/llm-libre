@@ -657,6 +657,32 @@ RANKING_DOCS = {
 
 # --- GET /v1/usage ---------------------------------------------------------
 
+ASSETS_DOCS = {
+    "tags": ["OpenAI-compatible"],
+    "summary": "Fetch a binary this gateway generated",
+    "description": (
+        "Serves an asset produced by `POST /v1/images/generations`. **No API key**, "
+        "on purpose: the URL has to work in an `<img>` tag, a markdown preview or a "
+        "browser address bar, none of which can attach a header.\n\n"
+        "What guards it instead is the id -- the SHA-256 of the content, so it cannot "
+        "be guessed, enumerated or derived from the prompt. Nothing lists assets, and "
+        "nothing here accepts a URL from a caller.\n\n"
+        "The response is `immutable` and that is literal rather than optimistic: the "
+        "id IS the hash of the bytes, so a given id can never return different "
+        "content. Assets are pruned by age, after which the id returns `404` -- never "
+        "something else.\n\n"
+        "Why the gateway hosts these at all: a provider's own URL expires (Mistral "
+        "hands out Azure Blob SAS links), may need credentials the client does not "
+        "have, and names who served the request -- which is the one thing this "
+        "gateway exists to keep clients from having to care about."
+    ),
+    "responses": {
+        200: {"description": "The asset bytes, with its stored content type."},
+        404: {"description": "Unknown id, or the asset was pruned.",
+              "content": {"application/json": {"example": {"detail": "asset not found"}}}},
+    },
+}
+
 IMAGES_DOCS = {
     "tags": ["OpenAI-compatible"],
     "summary": "Generate images, routed only to models that actually can",

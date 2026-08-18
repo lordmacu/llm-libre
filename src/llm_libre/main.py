@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import httpx
 
 from llm_libre.api import State, create_app
+from llm_libre.assets import AssetStore
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.probing import cycle
 from llm_libre.providers import load
@@ -45,6 +46,16 @@ HEALTH_PROBE_HOURS = float(_env("HEALTH_PROBE_HOURS", "SONDEO_SALUD_HORAS", "5")
 # useful when debugging an odd response.
 SHUFFLE_TIES = _env("ROTATE_TIES", "ROTAR_EMPATES", "true").strip().lower() \
     not in ("false", "0", "no")
+# Where generated binaries are stored. Under the SAME persistent volume as the
+# database on purpose: an asset URL a client stored has to survive a redeploy,
+# exactly like the telemetry does.
+ASSETS_DIR = os.getenv("ASSETS_DIR", "/datos/assets")
+# The origin asset URLs carry. The gateway cannot discover its own public
+# hostname -- behind a Cloudflare tunnel the request it sees says 127.0.0.1 --
+# so it is declared. Left EMPTY the images endpoint keeps handing back the
+# provider's own URL, which is the pre-asset behaviour and a safe default: a
+# wrong origin here would produce URLs that resolve nowhere.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 
 
 def build_state() -> State:
@@ -82,6 +93,8 @@ def build_state() -> State:
                       int(_env("PER_MINUTE_LIMIT", "LIMITE_POR_MINUTO", "60"))))
     state.providers = providers
     state.http = http
+    state.assets = AssetStore(ASSETS_DIR, store._con)
+    state.public_base_url = PUBLIC_BASE_URL
     state.rng = random.Random() if SHUFFLE_TIES else None
     return state
 

@@ -283,12 +283,15 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
 
     con = store._con
     assert {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}\
-        == {"routes", "probes", "events", "paid_usage"}
+        == {"routes", "probes", "events", "paid_usage",
+            # Added later; a legacy database gains it from CREATE TABLE IF NOT
+            # EXISTS like any other, since it holds no pre-existing data.
+            "assets"}
     # The old indexes are dropped rather than carried over: renaming a table keeps
     # its index NAMES, so leaving them would mean two identical indexes per table.
     assert {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'ix_%'")}\
-        == {"ix_probes", "ix_events"}
+        == {"ix_probes", "ix_events", "ix_assets_age"}
     assert [f[1] for f in con.execute("PRAGMA table_info(routes)")] == [
         "key", "provider", "model_id", "tier", "tools", "vision", "context",
         "max_output", "last_seen", "active", "priority",
