@@ -498,6 +498,169 @@
         ]
       }
     },
+    "/v1/images/generations": {
+      "post": {
+        "tags": [
+          "OpenAI-compatible"
+        ],
+        "summary": "Generate images, routed only to models that actually can",
+        "description": "OpenAI's image-generation contract. As with chat, a client changes only `base_url`.\n\nWhat this endpoint adds over calling a provider directly is the **filter**: the gateway tracks image generation as a routing capability of its own (`images` in `GET /v1/ranking`), separate from `vision` -- `vision` is image INPUT, this is image OUTPUT, and a route can have either, both or neither. Routes that cannot generate are dropped BEFORE any request is attempted, so a prompt never spends a full timeout on a chat-only model just to be told it cannot draw.\n\nFailover, cooldowns, per-route telemetry and the daily paid cap all work exactly as they do for chat, and the same `X-Route-Used` / `X-Tier` / `X-Attempts` headers come back.\n\nA `200` whose `data` array is EMPTY is not treated as a success: the gateway counts it as a failed attempt for that route and moves to the next one, rather than handing back `{\"data\": []}`.\n\n`503` means every image-capable route is down, in cooldown, or out of quota -- both upstreams rate-limit generation far more aggressively than chat.",
+        "operationId": "images_v1_images_generations_post",
+        "parameters": [
+          {
+            "name": "x-api-key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Api-Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One or more generated images.",
+            "content": {
+              "application/json": {
+                "schema": {},
+                "example": {
+                  "created": 1755400000,
+                  "data": [
+                    {
+                      "url": "https://.../generated.png"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid API key.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "invalid api key"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No route can generate images at all -- the pool has none, which is a different situation from them all being busy.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": {
+                    "message": "no route satisfies the request",
+                    "request": {
+                      "needs_tools": false,
+                      "needs_vision": false,
+                      "needs_images": true,
+                      "min_context": 0,
+                      "profile": "balanced",
+                      "allow_paid": true
+                    },
+                    "active_routes": 52
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Image-capable routes exist but none can serve right now.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "error": {
+                    "message": "no routes available",
+                    "detail": "200 with no generated image"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyHeader": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/assets/{asset_id}": {
+      "get": {
+        "tags": [
+          "OpenAI-compatible"
+        ],
+        "summary": "Fetch a binary this gateway generated",
+        "description": "Serves an asset produced by `POST /v1/images/generations`. **No API key**, on purpose: the URL has to work in an `<img>` tag, a markdown preview or a browser address bar, none of which can attach a header.\n\nWhat guards it instead is the id -- the SHA-256 of the content, so it cannot be guessed, enumerated or derived from the prompt. Nothing lists assets, and nothing here accepts a URL from a caller.\n\nThe response is `immutable` and that is literal rather than optimistic: the id IS the hash of the bytes, so a given id can never return different content. Assets are pruned by age, after which the id returns `404` -- never something else.\n\nWhy the gateway hosts these at all: a provider's own URL expires (Mistral hands out Azure Blob SAS links), may need credentials the client does not have, and names who served the request -- which is the one thing this gateway exists to keep clients from having to care about.",
+        "operationId": "asset_v1_assets__asset_id__get",
+        "parameters": [
+          {
+            "name": "asset_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Asset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The asset bytes, with its stored content type.",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown id, or the asset was pruned.",
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": "asset not found"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "ApiKeyHeader": []
+          },
+          {
+            "BearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/models": {
       "get": {
         "tags": [

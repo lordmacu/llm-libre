@@ -163,7 +163,52 @@ is still recorded and visible another way: `GET /v1/usage`.
 | `GET /v1/models` | The normalised catalogue (OpenAI shape) plus the `auto*` aliases |
 | `GET /v1/ranking` | Each route's score (with its `priority`) and every component broken out, **sorted with the same key the router uses** — cooldown included: a punished route (`cooldown_until` in the row) goes last, even if it scores better than everything else — so you can audit why the router chose what it chose, without the top row contradicting `X-Route-Used` |
 | `GET /v1/usage` | The calling key's paid consumption for the day, against its daily cap |
+| `POST /v1/images/generations` | OpenAI's image contract. Routed **only** to models that can actually generate (`images` in the ranking, a separate axis from `vision`, which is image INPUT): routes that cannot are dropped before a single request is attempted, so a prompt never spends a full timeout on a chat-only model to be told it cannot draw. Returns a URL on **our** origin, not the provider's — see below |
+| `GET /v1/assets/{id}` | The bytes of something generated. **No API key**, deliberately: the URL has to work in an `<img>` tag, a markdown preview or an address bar, none of which can attach a header. What guards it is the id — the SHA-256 of the content, unguessable and underivable from the prompt |
 | `GET /health` | Honest: `ok` only if there is at least one live free route; `degraded` if only paid is left; `down` if nothing is serviceable. A route counts as alive by **positive evidence** (a recent success, or no telemetry yet) — not by an average reliability, which a single client can poison. One failed probe alone is not enough to declare it dead: two consecutive ones are needed, with no success in between. No key required |
+
+## Generated images and files
+
+`POST /v1/images/generations` never hands back the provider's own URL. Those are
+Azure Blob SAS links (Mistral) or the provider's asset host (grok): they
+**expire**, some need credentials the client does not have, and every one of
+them names who served — which is the single thing this gateway exists to keep
+clients from caring about. A client that saves the URL we returned and opens it
+next week must still get the image.
+
+So the bytes are fetched once, stored, and re-served from our own origin:
+
+```json
+{"created": 1755400000,
+ "data": [{"url": "https://<domain>/v1/assets/9f2c…"}]}
+```
+
+`response_format: "b64_json"` returns the bytes inline instead, exactly as
+OpenAI defines it — for a client with no egress. URL is the default because
+base64 costs ~33% overhead (a 1024×1024 PNG becomes ~2 MB of JSON, in every log
+and every buffer) while a URL is cacheable and can be skipped entirely.
+
+It is an **asset** store, not an image store: it knows only bytes and a content
+type, which is enough to also cover documents a provider generates.
+
+What guards `GET /v1/assets/{id}`, given it takes no key:
+
+- the id is the SHA-256 of the content — unguessable, unenumerable, and
+  validated as 64 hex characters before it goes anywhere near the filesystem;
+- a content type outside a small allow-list is served as an opaque download, so
+  a provider cannot make the gateway serve HTML from its own origin; SVG is
+  allowed but never inline, since in a browser it can run script;
+- `nosniff` and a `default-src 'none'; sandbox` CSP on every asset;
+- 10 MB per asset, so a broken provider cannot fill the disk one response at a
+  time, and 30-day retention pruned by the same cycle that prunes telemetry.
+
+Only URLs a provider returned to us are ever fetched, and only `http(s)` ones —
+nothing here follows a URL from the client's request.
+
+Every failure degrades instead of erroring: a download that fails, an oversized
+asset, an unset `PUBLIC_BASE_URL` or an unwritable assets directory all leave
+the provider's original URL in place, and an unwritable directory does not stop
+the process from starting.
 
 ## Configuration
 
@@ -181,6 +226,8 @@ Environment variables (see `.env.example`):
 | `PER_MINUTE_LIMIT` | `60` | Requests per minute, per key |
 | `DB_PATH` | `/datos/llm-libre.sqlite3` | Path to the SQLite file (catalogue + telemetry) |
 | `PROVIDERS_YAML` | `providers.yaml` | Path to the provider registry |
+| `ASSETS_DIR` | `/datos/assets` | Where generated binaries are stored — under the same persistent volume as the database, so a saved asset URL survives a redeploy |
+| `PUBLIC_BASE_URL` | *(empty)* | The origin asset URLs carry, e.g. `https://llm.example.co`, no trailing slash. The gateway cannot discover its own hostname behind a tunnel. Left empty it keeps returning the provider's URL, which is the safe default: a wrong origin would produce URLs that resolve nowhere |
 
 These variables were renamed from Spanish on 2026-08-18. The code still reads
 the OLD names as a fallback (the new one wins), so a deployment configured with

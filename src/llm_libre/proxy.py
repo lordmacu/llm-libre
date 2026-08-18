@@ -320,9 +320,9 @@ class ProxyResponse:
 
 
 class Proxy:
-    def __init__(self, proveedores: dict, almacen, http_client: httpx.AsyncClient):
-        self.providers = proveedores
-        self.store = almacen
+    def __init__(self, providers: dict, store, http_client: httpx.AsyncClient):
+        self.providers = providers
+        self.store = store
         self.http = http_client
         self.cooldowns: dict[str, float] = {}
         self._punishments: dict[str, int] = {}
