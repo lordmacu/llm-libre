@@ -1259,7 +1259,7 @@ async def test_una_excepcion_no_http_en_la_sonda_no_revienta_ni_castiga_a_ciegas
     await p.wait_for_pending_probes()  # no cuelga ni propaga
 
     assert "kilo/a:free" not in p.cooldowns  # sin veredicto, no muerta por accidente
-    assert "sonda bajo demanda" in caplog.text  # quedo logueado, no silencioso
+    assert "on-demand probe" in caplog.text  # it was logged, not silent
     assert "kilo/a:free" not in p._suspicions  # no queda trabada esperando para siempre
 
 

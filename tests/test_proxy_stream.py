@@ -476,7 +476,7 @@ async def test_avisa_cuando_descarta_los_chunks_retenidos_de_un_intento_fallido(
                                                  CUERPO, 0.0))
     assert texto == "bien"
     assert "kilo/a:free" in caplog.text
-    assert "descarta" in caplog.text
+    assert "discarding" in caplog.text
 
 
 async def test_avisa_cuando_la_retencion_se_desborda(caplog):

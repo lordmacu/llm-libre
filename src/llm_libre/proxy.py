@@ -16,289 +16,271 @@ from llm_libre.reasoning import CompositeStreamTrimmer, trim
 
 log = logging.getLogger(__name__)
 
-COOLDOWN_BASE_S = 60.0  # backoff de una ruta castigada por una SONDA (propia,
-                         # confirmada) o por fallos de pago directos -- ver
-                         # _castigar. Round 9: el 429 YA NO usa esto (ver
-                         # _punish_429 y COOLDOWN_429_*, mas abajo) -- una
-                         # sonda confirmada es evidencia mas fuerte que un
-                         # simple "pariate" del proveedor, y merece un
-                         # backoff que SI escala si la ruta sigue rota.
+COOLDOWN_BASE_S = 60.0   # backoff for a route punished by a PROBE (our own,
+                         # confirmed) or by direct paid failures -- see
+                         # _punish. Round 9: a 429 NO LONGER uses this (see
+                         # _punish_429 and COOLDOWN_429_*, below) -- a
+                         # confirmed probe is stronger evidence than a plain
+                         # "back off" from the provider, and deserves a
+                         # backoff that DOES escalate if the route stays broken.
 COOLDOWN_CAP_S = 3600.0
 TIMEOUT_S = 90.0
 
-# El PING de salud comparte el tope de la bateria (SHORT_TOKEN_BUDGET) por la MISMA
-# razon, y no puede quedarse atras cuando ese numero se mueve.
+# The health PING shares the battery's cap (SHORT_TOKEN_BUDGET) for the SAME
+# reason, and cannot lag behind when that number moves.
 #
-# Tenia `max_tokens: 8`, cuatro veces menos que los 32 que la bateria ya
-# demostro insuficientes. Mientras un 200 vacio contaba como exito eso era
-# inofensivo; desde que un 200 sin respuesta adentro es (con razon) un intento
-# FALLIDO, un ping que no deja pensar al modelo FABRICA el fallo que dice
-# medir: la sonda declara muerta a una ruta sana. Medido contra Kilo con
-# max_tokens=8, una pasada sobre las 11 rutas gratis daba 5 sanas; entre las
-# "muertas" estaban cohere/north-mini-code:free -- la que sirve `auto` en el
-# arranque en frio -- y tencent/hy3:free, que saca 5/5 en la bateria.
+# It used to be `max_tokens: 8`, four times less than the 32 the battery had
+# already proven insufficient. While an empty 200 counted as success that was
+# harmless; since a 200 with no answer inside is (rightly) a FAILED attempt, a
+# ping that leaves the model no room to think MANUFACTURES the failure it claims
+# to measure: the probe declares a healthy route dead. Measured against Kilo with
+# max_tokens=8, one pass over the 11 free routes returned 5 healthy; among the
+# "dead" ones were cohere/north-mini-code:free -- the one that serves `auto` on a
+# cold start -- and tencent/hy3:free, which scores 5/5 in the battery.
 #
-# El dano no es solo un /health pesimista: `_confiabilidad` mira las ultimas 50
-# observaciones y las sondas son ~125 por dia, asi que el trafico real no
-# alcanza a desmentirlas. El ranking terminaria ordenando por quien contesta
-# mas corto, que es exactamente la premisa que este proyecto elimino.
+# The damage is not just a pessimistic /health: `_reliability` looks at the last
+# 50 observations and probes are ~125 a day, so real traffic never gets to
+# contradict them. The ranking would end up ordering by whoever answers shortest,
+# which is exactly the premise this project eliminated.
 #
-# Vive ACA (round 8), no en sondeo.py: es proxy quien ahora TAMBIEN dispara
-# sondas por su cuenta (ver SUSPICION_THRESHOLD mas abajo), asi que el payload
-# fijo que las hace inequivocas tiene que estar donde se usa. sondeo.py lo
-# importa de aca (`from llm_libre.proxy import PING`) para que la sonda
-# PERIODICA y la sonda BAJO DEMANDA sigan siendo, literalmente, el mismo
-# pedido.
+# It lives HERE (round 8), not in probing.py: the proxy is now ALSO firing probes
+# of its own (see SUSPICION_THRESHOLD below), so the fixed payload that makes them
+# unambiguous has to live where it is used. probing.py imports it from here
+# (`from llm_libre.proxy import PING`) so the PERIODIC probe and the ON-DEMAND
+# probe stay, literally, the same request.
 PING = {"messages": [{"role": "user", "content": "ping"}],
         "max_tokens": SHORT_TOKEN_BUDGET, "temperature": 0}
 
-# Round 8. Seis rondas del mismo mecanismo (retryability, una lista de
-# codigos, la lista con el default invertido, atribucion a nivel de
-# respuesta, atribucion a nivel de cadena) cayeron cada una por un vector
-# nuevo -- y los dos ultimos (round 8) eran ESCOTILLAS DEL PROPIO DISENO de
-# round 7: una cadena de una sola ruta (el cliente la fuerza con un `model`
-# explicito o con `x_min_contexto`; `/v1/ranking` publica `contexto` por
-# ruta, asi que no hace falta ningun conocimiento interno) y la rama
-# `if emitido:` de completar_stream (sin hermana con quien comparar, y sin
-# chequeo de longitud de cadena). Cuando las fugas estan en las EXCEPCIONES
-# que uno mismo escribio a proposito, el eje esta mal, no sub-enumerado.
+# Round 8. Six rounds of the same mechanism (retryability, a list of codes, the
+# list with the default inverted, response-level attribution, chain-level
+# attribution) each fell to a new vector -- and the last two (round 8) were
+# ESCAPE HATCHES OF ROUND 7'S OWN DESIGN: a single-route chain (the client forces
+# it with an explicit `model` or with `x_min_contexto`; `/v1/ranking` publishes
+# `contexto` per route, so no internal knowledge is needed) and the `if emitido:`
+# branch of complete_stream (with no sibling to compare against, and no
+# chain-length check). When the leaks are in the EXCEPTIONS you wrote on purpose,
+# the axis is wrong, not under-enumerated.
 #
-# El cambio: TRAFICO DE UN CLIENTE REAL NUNCA EXCLUYE UNA RUTA DIRECTAMENTE.
-# Solo puede acumular SOSPECHA -- que no excluye nada y no es visible en
-# ningun lado que importe. Cruzar el umbral programa una SONDA PROPIA, con
-# el mismo payload fijo (`PING`, arriba) que ya usa la sonda periodica de
-# `sondeo.py`. Esa sonda -- nunca el pedido del cliente -- decide: si falla,
-# la ruta se castiga (mismo backoff/tope que siempre, `_castigar`); si pasa,
-# la sospecha se limpia y la ruta sigue en rotacion.
+# The change: A REAL CLIENT'S TRAFFIC NEVER EXCLUDES A ROUTE DIRECTLY. It can
+# only accumulate SUSPICION -- which excludes nothing and is not visible anywhere
+# that matters. Crossing the threshold schedules OUR OWN PROBE, with the same
+# fixed payload (`PING`, above) the periodic probe in `probing.py` already uses.
+# That probe -- never the client's request -- decides: if it fails, the route is
+# punished (same backoff/cap as always, `_punish`); if it passes, the suspicion is
+# cleared and the route stays in rotation.
 #
-# Por que una sonda SI puede excluir sin ambiguedad y una respuesta real
-# NUNCA puede: el payload de la sonda lo escribe EL GATEWAY. No hay nada que
-# atribuir -- si la sonda falla, la ruta esta rota, punto. Ninguno de los
-# vectores de las seis rondas anteriores (contenido flageado, prompt
-# gigante, modelo de razonamiento que se gasta el presupuesto, una cadena
-# corta, un early-return de streaming) puede tocar el payload de una sonda,
-# porque el cliente nunca lo escribe.
+# Why a probe CAN exclude unambiguously and a real response NEVER can: the
+# probe's payload is written by THE GATEWAY. There is nothing to attribute -- if
+# the probe fails, the route is broken, full stop. None of the vectors from the
+# six previous rounds (flagged content, a giant prompt, a reasoning model burning
+# its budget, a short chain, a streaming early-return) can touch a probe's
+# payload, because the client never writes it.
 #
-# `429` sigue siendo la excepcion, y sigue INTACTO: es el proveedor mismo
-# diciendo "pariate" -- evidencia de la ruta tan inequivoca como una sonda,
-# sin necesitar que se confirme con una. Su backoff ya esta probado; este
-# round no lo toca.
-SUSPICION_THRESHOLD = 3  # cuantos fallos de TRAFICO REAL CONSECUTIVOS (round 9:
-                      # ya no "dentro de una ventana de tiempo" -- ver el
-                      # hallazgo HIGH 3 mas abajo) hacen falta para programar
-                      # una sonda propia contra esa ruta. El mismo numero que
-                      # el viejo TOPE_FALLOS_SEGUIDOS de round 7 -- no es
-                      # sagrado, pero mantiene la intuicion de "tres
-                      # seguidos" que el spec/README ya usan en otros lados.
+# `429` remains the exception, and remains UNTOUCHED: it is the provider itself
+# saying "back off" -- evidence about the route as unambiguous as a probe,
+# without needing one to confirm it. Its backoff is already proven; this round
+# does not touch it.
+SUSPICION_THRESHOLD = 3  # how many CONSECUTIVE REAL-TRAFFIC failures (round 9:
+                         # no longer "within a time window" -- see finding HIGH 3
+                         # below) are needed to schedule our own probe against
+                         # that route. The same number as round 7's old
+                         # TOPE_FALLOS_SEGUIDOS -- not sacred, but it keeps the
+                         # "three in a row" intuition the spec/README already use
+                         # elsewhere.
 
-# Round 9, HIGH 3 del gate. La ronda anterior contaba "3 fallos dentro de
-# los ultimos 10 minutos" -- pero eso significa que trafico mas lento que
-# 1 fallo cada ~200s NUNCA junta tres dentro de la ventana antes de que el
-# primero decaiga: medido, 80 fallos consecutivos espaciados 301s aparte no
-# disparaban NINGUNA sonda; a 300s (el limite exacto de la ventana) si. Una
-# ruta muerta en un despliegue de trafico bajo se queda primera en
-# `ordenar` para siempre -- el defecto original de round 1, de vuelta.
+# Round 9, HIGH 3 from the gate. The previous round counted "3 failures within the
+# last 10 minutes" -- but that means traffic slower than 1 failure every ~200s
+# NEVER gathers three inside the window before the first one decays: measured, 80
+# consecutive failures spaced 301s apart triggered NO probe at all; at 300s (the
+# window's exact boundary) they did. A dead route in a low-traffic deployment
+# stays first in `order_routes` forever -- round 1's original defect, back again.
 #
-# La sospecha ahora es un CONTADOR de fallos consecutivos, sin ventana de
-# tiempo: se reinicia a 0 en cualquier exito (ver el `pop` en completar()/
-# completar_stream()), pase lo que pase entremedio. No evapora "porque el
-# servicio esta tranquilo" -- si nunca hay un exito, tres fallos SEPARADOS
-# POR HORAS siguen siendo tres fallos consecutivos. Esto no reabre ningun
-# vector de las ocho rondas anteriores: esos eran todos sobre EXCLUSION
-# DIRECTA por trafico de cliente, y sospecha nunca excluye nada por si
-# sola -- sigue haciendo falta que la SONDA (payload del gateway, nunca del
-# cliente) confirme. La proteccion real contra "incidentes no relacionados
-# que se suman" siempre fue el reinicio-en-cualquier-exito, no el reloj:
-# dos incidentes de verdad separados casi siempre tienen un exito real
-# entremedio.
-ON_DEMAND_PROBE_LIMIT_S = 60.0  # como maximo UNA sonda bajo demanda por
-                                     # ruta cada 60s, sin importar cuantos
-                                     # pedidos sospechosos lleguen mientras
-                                     # tanto. Justificacion del numero: una
-                                     # sonda gasta la MISMA cuota gratis que
-                                     # el trafico real (el mismo endpoint,
-                                     # el mismo limite por minuto del
-                                     # proveedor), asi que el costo extra
-                                     # que UN cliente hostil puede imponerle
-                                     # a UNA ruta queda topeado en, como
-                                     # mucho, 60 pedidos extra por hora --
-                                     # sin importar cuantos pedidos mande
-                                     # el cliente (podria mandar miles y el
-                                     # tope sigue siendo el mismo). Y como
-                                     # el payload de esa sonda es del
-                                     # gateway, el cliente jamas puede hacer
-                                     # que ese pedido extra FALLE: una ruta
-                                     # sana pasa la sonda siempre, asi que
-                                     # el peor resultado posible para el
-                                     # atacante es gastar ese cupo fijo sin
-                                     # lograr nunca que una ruta sana caiga.
+# Suspicion is now a COUNTER of consecutive failures, with no time window: it
+# resets to 0 on any success (see the `pop` in complete()/complete_stream()), no
+# matter what happened in between. It does not evaporate "because the service is
+# quiet" -- if there is never a success, three failures SEPARATED BY HOURS are
+# still three consecutive failures. This reopens none of the eight previous
+# rounds' vectors: those were all about DIRECT EXCLUSION by client traffic, and
+# suspicion never excludes anything on its own -- the PROBE (gateway payload,
+# never the client's) still has to confirm. The real protection against
+# "unrelated incidents adding up" was always the reset-on-any-success, not the
+# clock: two genuinely separate incidents almost always have a real success
+# between them.
+ON_DEMAND_PROBE_LIMIT_S = 60.0   # at most ONE on-demand probe per route every
+                                 # 60s, no matter how many suspicious requests
+                                 # arrive in the meantime. Justification for the
+                                 # number: a probe burns the SAME free quota as
+                                 # real traffic (same endpoint, same per-minute
+                                 # limit from the provider), so the extra cost ONE
+                                 # hostile client can impose on ONE route is
+                                 # capped at, at most, 60 extra requests per hour
+                                 # -- regardless of how many requests the client
+                                 # sends (they could send thousands and the cap is
+                                 # the same). And because that probe's payload
+                                 # belongs to the gateway, the client can never
+                                 # make that extra request FAIL: a healthy route
+                                 # always passes the probe, so the best possible
+                                 # outcome for the attacker is burning that fixed
+                                 # quota without ever bringing a healthy route
+                                 # down.
 
-# Round 9, MEDIUM 6 del gate: el limite de arriba es POR RUTA, pero el
-# AGREGADO no estaba acotado -- con N rutas en el catalogo (N no lo controla
-# el operador, sale del catalogo VIVO), el peor caso es N x 60 sondas/hora.
-# Medido: 11 rutas, 15.840 pedidos extra por dia contra la MISMA cuota
-# gratis que necesita el trafico real. Tope GLOBAL, independiente de N: como
-# maximo `GLOBAL_PROBE_LIMIT_PER_MINUTE` sondas bajo demanda arrancan por
-# minuto, sumando TODAS las rutas. Con 5/min (300/hora, 7200/dia) un
-# catalogo del tamano de referencia (11 rutas) queda investigado entero en
-# un par de minutos aunque las 11 esten sospechosas a la vez, y ningun
-# tamano de catalogo puede hacer crecer el costo agregado mas alla de eso.
+# Round 9, MEDIUM 6 from the gate: the limit above is PER ROUTE, but the AGGREGATE
+# was unbounded -- with N routes in the catalogue (N is not controlled by the
+# operator, it comes from the LIVE catalogue), the worst case is N x 60
+# probes/hour. Measured: 11 routes, 15,840 extra requests a day against the SAME
+# free quota real traffic needs. A GLOBAL cap, independent of N: at most
+# `GLOBAL_PROBE_LIMIT_PER_MINUTE` on-demand probes start per minute, across ALL
+# routes. At 5/min (300/hour, 7200/day) a reference-sized catalogue (11 routes)
+# is fully investigated within a couple of minutes even if all 11 are suspicious
+# at once, and no catalogue size can grow the aggregate cost beyond that.
 GLOBAL_PROBE_LIMIT_PER_MINUTE = 5
 GLOBAL_PROBE_WINDOW_S = 60.0
 
-# Round 9, MEDIUM 7 del gate ("el 429 es el unico resorte que le queda al
-# cliente"). Un 429 SI sigue castigando de inmediato -- es el proveedor
-# mismo diciendo "pariate", tan inequivoco como una sonda -- pero hasta
-# ahora reutilizaba el backoff exponencial de _castigar (hasta
-# COOLDOWN_CAP_S=3600s). Medido: 12 pedidos de UNA llave alcanzaban para
-# enfriar las 3 rutas de un catalogo chico via 429 real, otra llave caia a
-# 503, /health se iba a "caido" -- por una ventana de rate-limit que el
-# PROPIO proveedor tipicamente resetea en segundos a un minuto, no en una
-# hora. El 429 sigue siendo el UNICO resorte que le queda al trafico de un
-# cliente para afectar una ruta directo (justificado: es evidencia
-# inequivoca de la ruta, no necesita confirmarse con una sonda) -- pero la
-# DURACION tiene que ser proporcional a lo que de verdad esta pasando
-# (una ventana de rate-limit), no escalar hacia una exclusion de una hora
-# cruzando TODAS las llaves. Se respeta el `Retry-After` del proveedor
-# cuando lo manda (es la fuente mas precisa posible); si no lo manda, se usa
-# un default corto; en cualquier caso se topea (`COOLDOWN_429_MAX_S`)
-# para que un `Retry-After` absurdo (o malicioso, via un proveedor
-# comprometido) no vuelva a abrir la puerta a una exclusion de horas.
+# Round 9, MEDIUM 7 from the gate ("the 429 is the only lever the client has
+# left"). A 429 DOES still punish immediately -- it is the provider itself saying
+# "back off", as unambiguous as a probe -- but until now it reused _punish's
+# exponential backoff (up to COOLDOWN_CAP_S=3600s). Measured: 12 requests from ONE
+# key were enough to cool all 3 routes of a small catalogue via real 429s, another
+# key fell to 503, /health went to "caido" -- over a rate-limit window the
+# provider ITSELF typically resets in seconds to a minute, not in an hour. The 429
+# remains the ONLY lever a client's traffic has to affect a route directly
+# (justified: it is unambiguous evidence about the route, it does not need a probe
+# to confirm it) -- but the DURATION has to be proportional to what is actually
+# happening (a rate-limit window), not escalate toward an hour-long exclusion
+# across ALL keys. The provider's `Retry-After` is respected when it sends one (it
+# is the most precise source possible); when it does not, a short default is used;
+# either way it is capped (`COOLDOWN_429_MAX_S`) so an absurd `Retry-After` (or a
+# malicious one, via a compromised provider) cannot reopen the door to an
+# hours-long exclusion.
 COOLDOWN_429_DEFAULT_S = 30.0
 COOLDOWN_429_MAX_S = 300.0
 
-# Round 10, MEDIUM del gate: `_suspect_paid` (castigo directo para rutas
-# de pago, ver mas abajo) reutilizaba el backoff exponencial de `_castigar`
-# -- el MISMO defecto que el 429 tenia antes de la constante de arriba, en
-# otro lugar. `_castigar` existe para SONDAS CONFIRMADAS; un castigo de
-# pago no tiene ninguna sonda detras (por diseno -- ver _suspect_paid),
-# asi que escalar su duracion como si la tuviera no tiene fundamento.
-# Medido a traves de la API real: 60->120->240->480->960->1920->3600s en
-# apenas 24 pedidos de una llave, con el fallback de pago afuera para
-# TODAS las llaves durante una hora -- ~96 pedidos/dia bastan para
-# sostener la exclusion. Flat, sin escalar -- igual que _punish_429.
+# Round 10, MEDIUM from the gate: `_suspect_paid` (direct punishment for paid
+# routes, see below) reused `_punish`'s exponential backoff -- the SAME defect the
+# 429 had before the constant above, in another place. `_punish` exists for
+# CONFIRMED PROBES; a paid punishment has no probe behind it (by design -- see
+# _suspect_paid), so escalating its duration as if it did has no basis. Measured
+# through the real API: 60->120->240->480->960->1920->3600s in barely 24 requests
+# from one key, with the paid fallback out for ALL keys for an hour -- ~96
+# requests/day are enough to sustain the exclusion. Flat, no escalation -- same as
+# _punish_429.
 PAID_DIRECT_COOLDOWN_S = 60.0
 
-# Revision de Task 13, hallazgo 2. Solo un 429 castigaba (con backoff
-# exponencial, ver _castigar): un 500, un timeout o un error de red no
-# dejaban NUNCA un cooldown, asi que una ruta persistentemente rota o
-# COLGADA se seguia probando en cada pedido, adelante de rutas sanas segun
-# su prioridad, para siempre -- con TIMEOUT_S=90 eso son hasta 5*90s=450s
-# por pedido en la cadena mas larga, y /health sigue en "ok" mientras haya
-# UNA ruta viva. `blog` es una maquina saturada: colgado-no-rechazado es el
-# modo de falla realista, no un 500 limpio. Round 8 sigue resolviendo esto,
-# solo que ahora la ruta se excluye cuando SU PROPIA sonda confirma que esta
-# rota (arriba), no cuando el conteo de fallos del cliente llega a un tope.
+# Task 13 review, finding 2. Only a 429 used to punish (with exponential backoff,
+# see _punish): a 500, a timeout or a network error NEVER left a cooldown, so a
+# persistently broken or HUNG route kept being tried on every request, ahead of
+# healthy routes according to its priority, forever -- with TIMEOUT_S=90 that is
+# up to 5*90s=450s per request on the longest chain, and /health stays "ok" as
+# long as ONE route is alive. `blog` is a saturated machine: hung-not-refused is
+# the realistic failure mode, not a clean 500. Round 8 still solves this, only now
+# the route is excluded when ITS OWN probe confirms it is broken (above), not when
+# the client's failure count hits a cap.
 
 
-# Cuantos chunks sin nada util (role inicial, finish_reason, razonamiento
-# filtrado) se retienen antes de soltarlos. Existe para que un stream que
-# TODAVIA no entrego contenido pueda hacer failover limpio -- si esos chunks ya
-# hubieran salido, cambiar de ruta mezclaria dos respuestas. Un stream que solo
-# escupe razonamiento puede ser larguisimo, asi que la retencion tiene tope.
+# How many chunks with nothing useful in them (the initial role, finish_reason,
+# trimmed reasoning) are held back before being released. It exists so a stream
+# that has NOT YET delivered content can fail over cleanly -- if those chunks had
+# already gone out, switching routes would mix two responses. A stream that emits
+# nothing but reasoning can be very long, so the retention is capped.
 PENDING_CAP = 64
 
-# Claves de SOBRE de un chunk SSE: las que se repiten identicas (o triviales) en
-# cada chunk del stream y no aportan informacion propia. Existen para poder
-# preguntar "aparte del texto, este chunk trae algo?" mirando el chunk ENTERO
-# sin que el sobre conteste que si siempre.
+# ENVELOPE keys of an SSE chunk: the ones that repeat identically (or trivially)
+# in every chunk of the stream and carry no information of their own. They exist
+# so we can ask "besides the text, does this chunk carry anything?" while looking
+# at the WHOLE chunk without the envelope always answering yes.
 #
-# Hace falta mirar el chunk entero porque en el protocolo real de OpenAI
-# `finish_reason` es HERMANO de `delta`, no una clave adentro, y el chunk de
-# `usage` (stream_options.include_usage) llega con `choices: []`. Un guard que
-# solo mirara `delta` los descarta a los dos en silencio -- que es perdida de
-# datos en un contrato cuya premisa es "cambia solo base_url". No mordia con
-# Kilo ni OpenRouter porque ambos mandan `role` en cada delta, pero si muerde
-# con un proveedor estricto (el dialecto OpenAI de MiniMax, o los Groq/Cerebras
-# que el diseno planea sumar).
+# The whole chunk has to be examined because in OpenAI's real protocol
+# `finish_reason` is a SIBLING of `delta`, not a key inside it, and the `usage`
+# chunk (stream_options.include_usage) arrives with `choices: []`. A guard looking
+# only at `delta` discards both silently -- which is data loss in a contract whose
+# premise is "change only base_url". It did not bite with Kilo or OpenRouter
+# because both send `role` in every delta, but it does bite with a strict provider
+# (MiniMax's OpenAI dialect, or the Groq/Cerebras the design plans to add).
 #
-# Y hace falta EXCLUIR el sobre porque, si contara, cada chunk de razonamiento
-# ya recortado pareceria util por traer `id`/`model`/`index`: el stream de puro
-# razonamiento dejaria de hacer failover (regresion del fix B1) y la retencion
-# se llenaria de basura.
+# And the envelope has to be EXCLUDED because, if it counted, every
+# already-trimmed reasoning chunk would look useful for carrying
+# `id`/`model`/`index`: a pure-reasoning stream would stop failing over
+# (a regression of fix B1) and the retention buffer would fill with junk.
 _CHUNK_ENVELOPE = frozenset({"id", "object", "created", "model",
-                          "system_fingerprint", "service_tier"})
+                             "system_fingerprint", "service_tier"})
 _CHOICE_ENVELOPE = frozenset({"index"})
 
 
-# El eje de clasificacion siempre fue ATRIBUCION ("de quien es la culpa, el
-# pedido o la ruta"), pero hasta la revision round 6 la IMPLEMENTACION lo
-# invertia: "todo 4xx es evidencia del pedido SALVO estos siete codigos".
-# Ese default oculta cualquier codigo en el que nadie penso todavia -- el
-# reviewer probo el mutante agregando 405 al conjunto de "si cuenta" y la
-# suite entera seguia en verde, porque nada pinneaba el DEFAULT, solo la
-# lista. Medido el costo: las 5 rutas devolviendo 405 (o 409/415/418/431
-# /451, cualquier 4xx que nadie anticipo) dejaba al cliente con 503 en el
-# 100% de los pedidos, CERO cooldowns, y /health en 200 "ok" -- la misma
-# salida silenciosa de la revision 3, con un codigo distinto cada vez.
+# The classification axis was always ATTRIBUTION ("whose fault is it, the request
+# or the route"), but until the round 6 review the IMPLEMENTATION inverted it:
+# "every 4xx is evidence about the request EXCEPT these seven codes". That default
+# hides any code nobody has thought of yet -- the reviewer tried the mutant of
+# adding 405 to the "does count" set and the entire suite stayed green, because
+# nothing pinned the DEFAULT, only the list. The cost, measured: all 5 routes
+# returning 405 (or 409/415/418/431/451, any 4xx nobody anticipated) left the
+# client with a 503 on 100% of requests, ZERO cooldowns, and /health at 200 "ok"
+# -- the same silent failure as review 3, with a different code each time.
 #
-# PRINCIPIO: cuando no se puede saber de quien es la culpa, HAY QUE
-# CONTARLO -- para CONFIABILIDAD (una MEDICION, ver Storage.registrar_evento
-# y _confiabilidad). Round 8 separa esto de EXCLUSION (cooldown): ver el
-# comentario de cabecera de SUSPICION_THRESHOLD para el principio opuesto que le
-# corresponde a esa otra pregunta.
+# PRINCIPLE: when it cannot be known whose fault it is, IT MUST BE COUNTED -- for
+# RELIABILITY (a MEASUREMENT, see Storage.record_event and _reliability). Round 8
+# separates this from EXCLUSION (cooldown): see the header comment of
+# SUSPICION_THRESHOLD for the opposite principle that belongs to that other
+# question.
 #
-# Por eso el default esta INVERTIDO: un 4xx es evidencia de LA RUTA salvo
-# que este en esta lista CORTA, y cada entrada tiene que poder justificarse
-# en una linea como evidencia GENUINA del payload -- nunca de la ruta. Todo
-# lo demas, conocido hoy o no, cuenta igual que un 500. `429`/`408`/`425`
-# ya NO necesitan estar en ninguna lista (antes SI, del lado de "no
-# cuenta"): bajo este default caen solos del lado de la ruta, que es una
-# buena senal de que la forma es la correcta.
+# That is why the default is INVERTED: a 4xx is evidence about THE ROUTE unless it
+# is in this SHORT list, and every entry has to be justifiable in one line as
+# GENUINE evidence about the payload -- never about the route. Everything else,
+# known today or not, counts the same as a 500. `429`/`408`/`425` NO longer need
+# to be in any list (they used to, on the "does not count" side): under this
+# default they land on the route's side by themselves, which is a good sign that
+# the shape is right.
 _REQUEST_EVIDENCE_CODES = frozenset({
-    400,  # Bad Request: el cuerpo no se pudo ni interpretar -- es sobre la
-          # SINTAXIS de este pedido, nunca sobre si la ruta sirve.
-    413,  # Payload Too Large: el TAMAÑO de ESTE pedido excede un limite --
-          # un pedido mas chico andaria bien contra la MISMA ruta.
-    422,  # Unprocessable Entity: sintacticamente valido pero invalido para
-          # ESTE pedido puntual (un parametro fuera de rango, un tipo
-          # equivocado) -- no dice nada sobre si la ruta esta sana.
+    400,  # Bad Request: the body could not even be parsed -- it is about the
+          # SYNTAX of this request, never about whether the route works.
+    413,  # Payload Too Large: the SIZE of THIS request exceeds a limit -- a
+          # smaller request would work fine against the SAME route.
+    422,  # Unprocessable Entity: syntactically valid but invalid for THIS
+          # particular request (a parameter out of range, a wrong type) -- it says
+          # nothing about whether the route is healthy.
 })
 
 
 def _is_client_error(codigo: int) -> bool:
-    """True SOLO si `codigo` esta en `_REQUEST_EVIDENCE_CODES` --
-    evidencia GENUINA sobre el pedido, nunca sobre la ruta. Cualquier otro
-    codigo (401, 403, 404, 405, 409, o el que un proveedor invente manana)
-    es evidencia de la ruta por DEFAULT y cuenta igual que un 500 hacia
-    confiabilidad (ver Storage.record_event) -- ver el comentario de
-    cabecera del conjunto para el principio completo ("cuando no se puede
-    saber de quien es la culpa, hay que contarlo"). Desde round 8 esto ya
-    NO decide directamente ningun cooldown -- ver SUSPICION_THRESHOLD: esa es
-    una pregunta distinta, con un default distinto.
+    """True ONLY if `codigo` is in `_REQUEST_EVIDENCE_CODES` -- GENUINE evidence
+    about the request, never about the route. Any other code (401, 403, 404, 405,
+    409, or whatever a provider invents tomorrow) is evidence about the route by
+    DEFAULT and counts the same as a 500 toward reliability (see
+    Storage.record_event) -- see the set's header comment for the full principle
+    ("when it cannot be known whose fault it is, it must be counted"). Since round
+    8 this NO longer decides any cooldown directly -- see SUSPICION_THRESHOLD:
+    that is a different question, with a different default.
 
-    Solo los tres codigos de la lista corta no cuentan hacia confiabilidad:
-    contarlos convertiria el error de UN cliente en una medicion mala para
-    TODOS. Verificado contra el registro real de 5 rutas: tres pedidos
-    malformados (400) seguidos bastaban para arrastrar la confiabilidad de
-    las cinco antes de que existiera esta exclusion."""
+    Only the three codes in the short list do not count toward reliability:
+    counting them would turn ONE client's mistake into a bad measurement for
+    EVERYONE. Verified against the real 5-route registry: three consecutive
+    malformed requests (400) were enough to drag all five routes' reliability down
+    before this exclusion existed."""
     return codigo in _REQUEST_EVIDENCE_CODES
 
 
 def _timeout_for(proveedor) -> float:
-    """`Provider.timeout_s` (default None) permite acotar el peor caso de UN
-    proveedor puntual -- p.ej. uno que puede colgarse -- sin bajarle el
-    timeout a todos. None (el default, y el comportamiento de siempre para
-    quien no lo declare) usa el TIMEOUT_S global."""
+    """`Provider.timeout_s` (default None) bounds the worst case of ONE
+    particular provider -- e.g. one that can hang -- without lowering the timeout
+    for everyone. None (the default, and the long-standing behaviour for anyone
+    who does not declare it) uses the global TIMEOUT_S."""
     return proveedor.timeout_s if proveedor.timeout_s is not None else TIMEOUT_S
 
 
 def has_answer(datos: dict) -> bool:
-    """True si un 200 trae algo que el cliente pueda usar como respuesta.
+    """True if a 200 carries something the client can use as an answer.
 
-    La mayoria de los modelos gratis son de razonamiento: se gastan el
-    presupuesto de la completion pensando y devuelven `200` con
-    `finish_reason: "length"` y `"content": null`. Sin este chequeo eso se
-    registra como EXITO, con lo cual la ruta que falla SUBE su confiabilidad,
-    `/health` la sigue contando viva y el cliente recibe la respuesta vacia en
-    vez de un failover.
+    Most free models are reasoning models: they burn the completion budget
+    thinking and return `200` with `finish_reason: "length"` and
+    `"content": null`. Without this check that is recorded as SUCCESS, which
+    means the route that failed RAISES its reliability, `/health` keeps counting
+    it alive, and the client receives the empty response instead of a failover.
 
-    `tool_calls` cuenta como respuesta: una llamada a herramienta legitima
-    viaja con `content: null` y toda la carga util ahi. Se exige por VERDAD del
-    valor (no por presencia) porque en el mensaje FINAL de una respuesta no
-    streaming, `tool_calls: []` significa literalmente "no llame a ninguna
-    herramienta" -- al reves que en los deltas de streaming, donde la presencia
-    de la clave ya es senal.
+    `tool_calls` counts as an answer: a legitimate tool call travels with
+    `content: null` and all the useful payload there. It is required by the
+    TRUTHINESS of the value (not by its presence) because in the FINAL message of
+    a non-streaming response, `tool_calls: []` literally means "I called no
+    tool" -- the opposite of streaming deltas, where the key's presence is
+    already a signal.
     """
     if not isinstance(datos, dict):
         return False
@@ -344,64 +326,61 @@ class Proxy:
         self.http = cliente_http
         self.cooldowns: dict[str, float] = {}
         self._punishments: dict[str, int] = {}
-        # Round 9: numero de generaciones que un cooldown/castigo tuvo para
-        # esta clave (se incrementa en CADA _castigar/_punish_429/
-        # _clear_punishment) -- deja que una sonda bajo demanda detecte si
-        # algo (tipicamente un 429 real) modifico el estado de la ruta
-        # MIENTRAS la sonda estaba en vuelo, y evite pisarlo (MEDIUM 5).
+        # Round 9: how many generations of cooldown/punishment this key has had
+        # (incremented on EVERY _punish/_punish_429/_clear_punishment) -- it lets
+        # an on-demand probe detect whether something (typically a real 429)
+        # changed the route's state WHILE the probe was in flight, and avoid
+        # overwriting it (MEDIUM 5).
         self._cooldown_generation: dict[str, int] = {}
-        # Round 9 (HIGH 3): contador de fallos CONSECUTIVOS de trafico real
-        # por ruta gratis, sin ventana de tiempo -- se reinicia a 0 en
-        # cualquier exito. Ver _suspect().
+        # Round 9 (HIGH 3): counter of CONSECUTIVE real-traffic failures per free
+        # route, with no time window -- it resets to 0 on any success. See
+        # _suspect().
         self._suspicions: dict[str, int] = {}
-        # Round 9 (HIGH 4): igual que arriba pero para rutas de PAGO, que no
-        # pasan por sospecha+sonda (nunca se sondean, ver _suspect_paid) --
-        # cuenta hacia un castigo DIRECTO, sin sonda de por medio.
+        # Round 9 (HIGH 4): same as above but for PAID routes, which do not go
+        # through suspicion+probe (they are never probed, see _suspect_paid) --
+        # it counts toward a DIRECT punishment, with no probe in between.
         self._paid_failures: dict[str, int] = {}
         self._last_on_demand_probe: dict[str, float] = {}
-        # Round 9 (MEDIUM 6): marcas de tiempo de sondas bajo demanda
-        # arrancadas, sumando TODAS las rutas -- tope agregado independiente
-        # del tamano del catalogo. Ver GLOBAL_PROBE_LIMIT_PER_MINUTE.
+        # Round 9 (MEDIUM 6): timestamps of on-demand probes started, across ALL
+        # routes -- an aggregate cap independent of catalogue size. See
+        # GLOBAL_PROBE_LIMIT_PER_MINUTE.
         self._recent_probes: list[float] = []
-        # Sondas bajo demanda en vuelo (asyncio.Task), por clave -- evita
-        # disparar dos sondas superpuestas contra la MISMA ruta si varios
-        # pedidos concurrentes cruzan el umbral casi al mismo tiempo, y le
-        # da a los tests un lugar donde esperar (`esperar_sondas_pendientes`).
+        # On-demand probes in flight (asyncio.Task), by key -- prevents firing two
+        # overlapping probes against the SAME route if several concurrent requests
+        # cross the threshold at nearly the same time, and gives the tests
+        # somewhere to wait (`wait_for_pending_probes`).
         self._probes_in_flight: dict[str, asyncio.Task] = {}
-        # Round 10, HIGH del gate: rutas que cruzaron el umbral y quieren
-        # una sonda pero todavia no consiguieron cupo -- ver
-        # `_admit_pending_probes`. Sin esto, el cupo GLOBAL (round 9,
-        # MEDIUM 6) se lo llevaban siempre las mismas rutas: `completar()`
-        # recorre la cadena en el MISMO orden en cada pedido (prioridad/
-        # confiabilidad), asi que las primeras rutas de la cadena piden
-        # sonda primero, SIEMPRE -- y una ruta genuinamente rota, cuya
-        # confiabilidad colapsada la manda al FINAL de esa cadena, nunca
-        # llegaba a pedir antes de que el cupo del minuto se agotara.
+        # Round 10, HIGH from the gate: routes that crossed the threshold and want
+        # a probe but have not got a slot yet -- see `_admit_pending_probes`.
+        # Without this, the GLOBAL quota (round 9, MEDIUM 6) was always taken by
+        # the same routes: `complete()` walks the chain in the SAME order on every
+        # request (priority/reliability), so the chain's first routes ask for a
+        # probe first, ALWAYS -- and a genuinely broken route, whose collapsed
+        # reliability sends it to the END of that chain, never got to ask before
+        # the minute's quota ran out.
         self._awaiting_probe: dict[str, Route] = {}
 
     async def complete(self, rutas: list[Route], cuerpo: dict, ahora: float,
                         raw: bool = False, is_probe: bool = False,
                         on_billable_attempt: Callable[[Route], None] | None = None
                         ) -> ProxyResponse:
-        """`is_probe=True` es exclusivamente para uso INTERNO (sondeo
-        periodico via `probing.probe_health`, y la sonda bajo demanda de
-        `_probe_on_demand` -- nunca lo pasa un pedido de un cliente
-        real): cambia como se interpreta un fallo NO-429. Con
-        `is_probe=False` (el default, todo trafico real) un fallo solo
-        acumula SOSPECHA (`_sospechar`/`_suspect_paid`, ver
-        SUSPICION_THRESHOLD) -- nunca castiga directo. Con `is_probe=True` un
-        fallo castiga la ruta de inmediato (`_castigar`), sin pasar por
-        sospecha ni programar otra sonda: una sonda ya ES la verificacion,
-        no hay nada mas que confirmar.
+        """`is_probe=True` is exclusively for INTERNAL use (periodic probing via
+        `probing.probe_health`, and the on-demand probe in `_probe_on_demand` --
+        a real client's request never passes it): it changes how a NON-429 failure
+        is interpreted. With `is_probe=False` (the default, all real traffic) a
+        failure only accumulates SUSPICION (`_suspect`/`_suspect_paid`, see
+        SUSPICION_THRESHOLD) -- it never punishes directly. With `is_probe=True` a
+        failure punishes the route immediately (`_punish`), without going through
+        suspicion or scheduling another probe: a probe already IS the
+        verification, there is nothing further to confirm.
 
-        `on_billable_attempt`, si se pasa, se llama por cada intento
-        contra una ruta de PAGO que el proveedor respondio con `200` --
-        exitoso o no (HIGH 4, round 9): el proveedor cobra por generar la
-        respuesta, no por que el gateway la considere util. `r.route`
-        (arriba, exito) solo marca el intento que de verdad sirvio al
-        cliente; este callback marca TODO intento facturable, para que
-        quien factura (api.py) no pierda el caso "200 con contenido vacio"
-        -- billable y silencioso hasta esta ronda."""
+        `on_billable_attempt`, when passed, is called for every attempt against a
+        PAID route the provider answered with `200` -- successful or not (HIGH 4,
+        round 9): the provider charges for generating the response, not for the
+        gateway considering it useful. `r.route` (above, on success) only marks
+        the attempt that genuinely served the client; this callback marks EVERY
+        billable attempt, so whoever does the billing (api.py) does not miss the
+        "200 with empty content" case -- billable and silent until this round."""
         intentos = 0
         ultimo_error = None
         ultimo_codigo = 0
@@ -418,33 +397,32 @@ class Proxy:
             except httpx.HTTPError as e:
                 codigo, resp, ultimo_error = 0, None, str(e)
             ultimo_codigo = codigo
-            # Round-trip completo, NO un time-to-first-token: por este camino la
-            # respuesta llega entera de una vez, asi que este numero incluye
-            # toda la generacion (7-27 s en un modelo de razonamiento). Va a
-            # `latencia_ms`; `ttft_ms` queda en 0 para no contaminar un p50 que
-            # significa otra cosa. Ver el comentario de cabecera de almacen.py.
+            # A COMPLETE round-trip, NOT a time-to-first-token: on this path the
+            # response arrives all at once, so this number includes the whole
+            # generation (7-27 s on a reasoning model). It goes to `latencia_ms`;
+            # `ttft_ms` stays 0 so as not to contaminate a p50 that means
+            # something else. See the header comment of storage.py.
             latencia = int((time.monotonic() - t0) * 1000)
-            # HIGH 2 (round 9): el cooldown que un fallo de ESTE intento
-            # dispare se estampa con AHORA + cuanto tardo ESTE intento, no
-            # con el `ahora` crudo. Si el intento tardo hasta TIMEOUT_S=90s
-            # (una ruta colgada -- el caso que este mecanismo entero existe
-            # para atrapar) y se estampa con el `ahora` de cuando EMPEZO el
-            # intento, el cooldown nace con hasta 90s ya "comidos": con
-            # COOLDOWN_BASE_S=60, el primer castigo (60s nominales) nace YA
-            # EXPIRADO. Medido: exclusion efectiva max(0, 60*2^(n-1) - 90) =
-            # 0s, 30s, 150s, 390s en los primeros cuatro castigos -- la ruta
-            # colgada segia de punta en la cadena. Con MockTransport (sin
-            # demora real) `latencia` es ~0 y esto es un no-op: no cambia
-            # ningun test existente.
+            # HIGH 2 (round 9): the cooldown a failure of THIS attempt triggers is
+            # stamped with NOW + how long THIS attempt took, not with the raw
+            # `ahora`. If the attempt took up to TIMEOUT_S=90s (a hung route --
+            # the case this whole mechanism exists to catch) and it is stamped
+            # with the `ahora` from when the attempt STARTED, the cooldown is born
+            # with up to 90s already "eaten": with COOLDOWN_BASE_S=60, the first
+            # punishment (60s nominal) is born ALREADY EXPIRED. Measured:
+            # effective exclusion max(0, 60*2^(n-1) - 90) = 0s, 30s, 150s, 390s
+            # over the first four punishments -- the hung route stayed at the head
+            # of the chain. With MockTransport (no real delay) `latencia` is ~0 and
+            # this is a no-op: it changes no existing test.
             ahora_del_castigo = ahora + latencia / 1000.0
 
             if codigo == 200 and ruta.tier == "pago" and on_billable_attempt is not None:
                 on_billable_attempt(ruta)
 
-            # Un 200 con cuerpo no parseable (p.ej. una pagina de mantenimiento
-            # HTML servida con status 200) no es un exito: se trata como intento
-            # fallido, sin excepcion escapando y sin castigo (no es rate-limit,
-            # esta rota).
+            # A 200 with an unparseable body (e.g. an HTML maintenance page served
+            # with status 200) is not a success: it is treated as a failed
+            # attempt, with no exception escaping and no punishment (it is not
+            # rate-limiting, it is broken).
             datos = None
             if codigo == 200:
                 try:
@@ -453,21 +431,21 @@ class Proxy:
                     datos = None
                     ultimo_error = "200 con cuerpo no-JSON"
                 else:
-                    # JSON valido pero que no es un objeto (p.ej. una lista):
-                    # `_limpiar` de mas abajo hace datos.get(...) y reventaria
-                    # con AttributeError sin atrapar -- o sea un 500 del
-                    # gateway porque el proveedor mando algo raro. El mismo
-                    # trato que el cuerpo no-JSON, y ANTES de tocar `datos`.
+                    # Valid JSON that is not an object (e.g. a list): `_clean`
+                    # below does datos.get(...) and would blow up with an
+                    # uncaught AttributeError -- i.e. a 500 from the gateway
+                    # because the provider sent something odd. Same treatment as
+                    # a non-JSON body, and BEFORE touching `datos`.
                     if not isinstance(datos, dict):
                         datos = None
                         ultimo_error = "200 con cuerpo JSON que no es un objeto"
 
-            # Mismo lugar y mismo trato que el guard de arriba: un 200 que no
-            # trae respuesta adentro tampoco es un exito. El recorte del
-            # razonamiento va ANTES de decidirlo porque lo que cuenta es lo que
-            # el cliente va a ver: si tras sacar el <think> no queda nada, esa
-            # ruta no respondio (salvo en modo crudo, donde el texto crudo ES
-            # la respuesta pedida).
+            # Same place and same treatment as the guard above: a 200 that carries
+            # no answer inside is not a success either. Trimming the reasoning
+            # happens BEFORE deciding, because what counts is what the client will
+            # see: if nothing is left after removing the <think>, that route did
+            # not answer (except in raw mode, where the raw text IS the requested
+            # answer).
             razon = ""
             if datos is not None:
                 razon = "" if raw else self._clean(datos, proveedor.unwraps_canvas)
@@ -483,17 +461,17 @@ class Proxy:
             if exito:
                 self._suspicions.pop(ruta.key, None)
                 self._paid_failures.pop(ruta.key, None)
-                # MEDIUM 5 (round 9): con is_probe=True, la limpieza queda
-                # diferida a _probe_on_demand (que chequea si un 429
-                # castigo la ruta MIENTRAS esta sonda estaba en vuelo antes
-                # de limpiar) -- completar() no puede saber eso desde aca.
+                # MEDIUM 5 (round 9): with is_probe=True, the cleanup is
+                # deferred to _probe_on_demand (which checks whether a 429
+                # punished the route WHILE this probe was in flight before
+                # clearing it) -- complete() cannot know that from here.
                 if not is_probe:
                     self._clear_punishment(ruta.key)
                 if proveedor.emulates_tools:
-                    # `cuerpo` es el pedido del CLIENTE, con su `tools` intacto:
-                    # build_request lo saca solo de la copia que viaja al
-                    # proveedor. Ese array es el allow-list que evita convertir
-                    # una respuesta de texto legitima en un tool call inventado.
+                    # `cuerpo` is the CLIENT's request, with its `tools` intact:
+                    # build_request strips it only from the copy that travels to
+                    # the provider. That array is the allow-list that prevents
+                    # converting a legitimate text answer into an invented tool call.
                     datos = _emu.detect_and_convert(datos, cuerpo.get("tools"),
                                                     cuerpo.get("tool_choice"))
                 return ProxyResponse(200, datos, ruta, intentos, razon, codigo)
@@ -504,9 +482,9 @@ class Proxy:
                 self._react_to_non_429_failure(ruta, ahora, ahora_del_castigo, is_probe)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
 
-        # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
-        # mas alla de una sola llamada y puede tener castigadas rutas ajenas a
-        # esta cadena, cuyo vencimiento no le sirve de nada al que esta pidiendo.
+        # Only the cooldowns of THIS request's routes count: the proxy outlives
+        # a single call and may have punished routes unrelated to this chain,
+        # whose expiry is of no use to whoever is asking now.
         cooldowns_del_pedido = {c: v for c, v in self.cooldowns.items()
                                 if c in claves_del_pedido}
         return ProxyResponse(503, {"error": {
@@ -520,61 +498,62 @@ class Proxy:
                                raw: bool = False,
                                on_route_committed: Callable[[Route], None] | None = None,
                                on_billable_attempt: Callable[[Route], None] | None = None):
-        """Emite lineas SSE ya recortadas, terminando siempre en `data: [DONE]`.
+        """Emit already-trimmed SSE lines, always ending in `data: [DONE]`.
 
-        Hace failover solo ANTES del primer byte util: una vez que al cliente le
-        llego contenido de una ruta, cambiar de modelo mezclaria dos respuestas
-        distintas en un mismo stream. Por eso una falla de red DESPUES de emitir
-        no reintenta la siguiente ruta: cierra el stream ahi mismo.
+        It fails over only BEFORE the first useful byte: once content from a route
+        has reached the client, switching models would mix two different responses
+        into one stream. That is why a network failure AFTER emitting does not
+        retry the next route: it closes the stream right there.
 
-        `on_route_committed`, si se pasa, se llama COMO MUCHO una vez por
-        llamada a este generador: exactamente cuando (y si) una ruta queda
-        confirmada como la que de verdad sirvio la peticion. Se dispara desde
-        el mismo lugar que ya decide "esto fue un exito real" para la
-        telemetria (`_registrar_exito_una_vez`, mas abajo) -- no desde el
-        status 200 crudo, porque un 200 que muere sin emitir nada antes del
-        primer byte util TODAVIA hace failover a la siguiente ruta (ver mas
-        arriba) y ahi no hubo servicio real.
+        `on_route_committed`, when passed, is called AT MOST once per call to
+        this generator: exactly when (and if) a route is confirmed as the one that
+        genuinely served the request. It fires from the same place that already
+        decides "this was a real success" for telemetry
+        (`_registrar_exito_una_vez`, below) -- not from the raw 200 status,
+        because a 200 that dies without emitting anything before the first useful
+        byte STILL fails over to the next route (see above), and no real service
+        happened there.
 
-        `on_billable_attempt`, si se pasa, se llama por cada intento contra
-        una ruta de PAGO cuyo status inicial fue `200` -- exitoso o no (HIGH
-        4, round 9: el proveedor cobra por generar la respuesta, incluido un
-        stream que termina sin contenido util). Distinto de
-        `on_route_committed`: ese marca solo la ruta GANADORA, este marca
-        todo intento facturable.
+        `on_billable_attempt`, when passed, is called for every attempt against
+        a PAID route whose initial status was `200` -- successful or not (HIGH 4,
+        round 9: the provider charges for generating the response, including a
+        stream that ends with no useful content). Different from
+        `on_route_committed`: that one marks only the WINNING route, this one
+        marks every billable attempt.
 
-        Nunca se llama con `is_probe` (round 8: sondeo.py jamas streamea) --
-        todo fallo aca es TRAFICO REAL, y CADA rama de fallo (status != 200,
-        stream sin contenido util, error de red, y el corte por
-        `if emitido:` que no puede seguir la cadena) pasa por
-        `_react_to_non_429_failure` por igual -- el mismo punto unico de
-        decision que usa completar(), para que las dos ramas no puedan
-        volver a desincronizarse (ese fue justo el vector de round 8)."""
+        It is never called with `is_probe` (round 8: probing.py never streams) --
+        every failure here is REAL TRAFFIC, and EVERY failure branch (status !=
+        200, a stream with no useful content, a network error, and the cut by
+        `if emitido:` that cannot continue the chain) goes through
+        `_react_to_non_429_failure` alike -- the same single decision point
+        complete() uses, so the two branches cannot drift apart again (that was
+        precisely round 8's vector)."""
         for ruta in rutas:
             proveedor = self.proveedores[ruta.provider]
             url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.model_id)
             payload["stream"] = True
             t0 = time.monotonic()
-            emitido = False          # ya salio algun chunk hacia el cliente
-            util = False             # ...y al menos uno traia contenido o tool_calls
-            evento_registrado = False  # ya se conto la telemetria de este intento
-            # Solo lo usa el camino de emulacion (abajo): ahi la respuesta se
-            # BUFFEREA entera antes de poder decidir si es un tool call, asi que
-            # para cuando se llama a _registrar_exito_una_vez ya paso toda la
-            # generacion. Sin esto, esas rutas reportaban el tiempo TOTAL como
-            # ttft -- 7-27s para un modelo que razona -- y ranking.latency_factor
-            # las hundia en el puntaje justo por usarlas. Se estampa cuando llega
-            # el PRIMER fragmento, que es lo que ttft significa.
+            emitido = False          # some chunk already went out to the client
+            util = False             # ...and at least one carried content or tool_calls
+            evento_registrado = False  # this attempt's telemetry was already counted
+            # Only the emulation path (below) uses it: there the response is
+            # BUFFERED whole before it can be decided whether it is a tool call, so
+            # by the time _registrar_exito_una_vez is called the entire generation
+            # has already happened. Without this, those routes reported the TOTAL
+            # time as ttft -- 7-27s for a reasoning model -- and
+            # ranking.latency_factor sank their score precisely for being used. It
+            # is stamped when the FIRST fragment arrives, which is what ttft
+            # means.
             ttft_medido_ms = None
 
             def _registrar_exito_una_vez() -> None:
-                # Exactamente un evento por intento, nunca cero ni dos: se
-                # dispara la primera vez que hay algo UTIL que mandar (asi el
-                # ttft mide el primer token real, no el cierre del stream). Si
-                # nunca hubo nada util el intento se cierra abajo con un evento
-                # FALLIDO, no con este: un 200 que no entrega contenido ni
-                # tool_calls no sirvio a nadie, y contarlo como exito le sube
-                # la confiabilidad a la ruta que acaba de fallar.
+                # Exactly one event per attempt, never zero and never two: it
+                # fires the first time there is something USEFUL to send (so ttft
+                # measures the first real token, not the stream's close). If there
+                # was never anything useful the attempt closes below with a FAILED
+                # event, not this one: a 200 delivering neither content nor
+                # tool_calls served nobody, and counting it as a success raises the
+                # reliability of the route that just failed.
                 nonlocal evento_registrado
                 if not evento_registrado:
                     ttft = (ttft_medido_ms if ttft_medido_ms is not None
@@ -605,30 +584,30 @@ class Proxy:
                         on_billable_attempt(ruta)
                     rec = CompositeStreamTrimmer(unwrap_canvas=proveedor.unwraps_canvas)
 
-                    # Emulacion de tools en streaming. Detectar un tool call exige
-                    # el TEXTO COMPLETO (el JSON llega partido en deltas), asi que
-                    # este camino junta la respuesta entera y recien ahi decide:
-                    # o la emite como un chunk de tool_calls, o la suelta como
-                    # texto. El precio es perder el streaming incremental para
-                    # estas rutas -- inevitable, y solo cuando el cliente pidio
-                    # tools contra un proveedor que no las soporta nativamente.
+                    # Tool emulation over streaming. Detecting a tool call needs
+                    # the COMPLETE TEXT (the JSON arrives split across deltas), so
+                    # this path gathers the whole response and only then decides:
+                    # either it emits it as a tool_calls chunk, or it releases it
+                    # as text. The price is losing incremental streaming for these
+                    # routes -- unavoidable, and only when the client asked for
+                    # tools against a provider that does not support them natively.
                     #
-                    # `nombres_tools` es el allow-list del pedido del CLIENTE: sin
-                    # el, un texto legitimo que traiga JSON se convertiria en una
-                    # llamada inventada (ver el docstring de tool_emulator).
+                    # `nombres_tools` is the CLIENT request's allow-list: without
+                    # it, legitimate text carrying JSON would be turned into an
+                    # invented call (see tool_emulator's docstring).
                     #
-                    # OJO con el orden: `emula_tools` se evalua ANTES de mirar
-                    # `tools`. Al reves, un `tools` malformado de un cliente
-                    # cualquiera reventaba el streaming de TODOS los proveedores,
-                    # incluidos los que no emulan nada -- y la excepcion salia
-                    # DENTRO del generador, con el 200 y las cabeceras SSE ya
-                    # mandadas: stream cortado y sin failover posible.
+                    # MIND THE ORDER: `emulates_tools` is evaluated BEFORE looking
+                    # at `tools`. The other way round, a malformed `tools` from any
+                    # client broke streaming for EVERY provider, including those
+                    # that emulate nothing -- and the exception was raised INSIDE
+                    # the generator, with the 200 and the SSE headers already sent:
+                    # a cut stream with no possible failover.
                     if proveedor.emulates_tools and _emu.tool_names(cuerpo.get("tools")):
                         nombres_tools = _emu.tool_names(cuerpo.get("tools"))
                         acumulado = ""
-                        # id/created/model/usage del proveedor: son campos que el
-                        # esquema de chunk marca como obligatorios, y el chunk
-                        # sintetico era el unico del gateway que los perdia.
+                        # id/created/model/usage from the provider: fields the
+                        # chunk schema marks as required, and the synthetic chunk
+                        # was the only one in the gateway that lost them.
                         sobre = {}
                         async for linea_buf in resp.aiter_lines():
                             if not linea_buf.startswith("data:"):
@@ -645,10 +624,10 @@ class Proxy:
                             for campo in ("id", "created", "model", "system_fingerprint"):
                                 if campo not in sobre and obj_buf.get(campo) is not None:
                                     sobre[campo] = obj_buf[campo]
-                            # `usage` llega en un chunk final propio (con
-                            # choices vacio) cuando el cliente pidio
-                            # stream_options.include_usage: se pisa siempre para
-                            # quedarse con el ultimo, que es el total.
+                            # `usage` arrives in a final chunk of its own (with
+                            # empty choices) when the client asked for
+                            # stream_options.include_usage: it is always
+                            # overwritten so the last one -- the total -- wins.
                             if obj_buf.get("usage") is not None:
                                 sobre["usage"] = obj_buf["usage"]
                             elec_buf = (obj_buf.get("choices") or [{}])[0]
@@ -672,18 +651,18 @@ class Proxy:
                             yield "data: [DONE]\n\n"
                             return
                         if acumulado.strip():
-                            # No era un tool call: se entrega como respuesta de
-                            # texto normal, que es exactamente lo que el cliente
-                            # habria recibido sin emulacion.
+                            # It was not a tool call: it is delivered as an
+                            # ordinary text response, which is exactly what the
+                            # client would have received without emulation.
                             _registrar_exito_una_vez()
                             util = True
                             chunk = _emu.build_stream_chunk(None, sobre, acumulado)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
-                        # 200 que no entrego nada: mismo tratamiento que el
-                        # camino normal -- intento FALLIDO y failover a la
-                        # siguiente ruta. Nada se emitio, asi que sigue limpio.
+                        # A 200 that delivered nothing: same treatment as the
+                        # normal path -- a FAILED attempt and failover to the next
+                        # route. Nothing was emitted, so it stays clean.
                         if not evento_registrado:
                             self.almacen.record_event(ruta.key, False, 0, 200, ahora)
                             evento_registrado = True
@@ -691,10 +670,10 @@ class Proxy:
                                 ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
                         continue
 
-                    # Chunks recibidos que todavia no llevan nada util. Se
-                    # retienen (no se emiten) hasta que llegue el primero que
-                    # SI: mientras nada haya salido, el failover sigue siendo
-                    # limpio. Ver PENDING_CAP.
+                    # Chunks received that do not carry anything useful yet.
+                    # They are held back (not emitted) until the first one that
+                    # DOES arrive: while nothing has gone out, failover stays
+                    # clean. See PENDING_CAP.
                     pendientes: list[str] = []
                     async for linea in resp.aiter_lines():
                         if not linea.startswith("data:"):
@@ -710,17 +689,17 @@ class Proxy:
                         if not isinstance(eleccion, dict):
                             eleccion = {}
                         delta = eleccion.get("delta") or {}
-                        # Un chunk de tool_calls (o el de role inicial) suele
-                        # viajar con content="": miramos la PRESENCIA de otras
-                        # claves, no su valor, porque algo como "tool_calls": []
-                        # (valor falsy pero presente) igual es util para el
-                        # cliente y no se puede tirar junto con el contenido.
+                        # A tool_calls chunk (or the initial role one) usually
+                        # travels with content="": we look at the PRESENCE of
+                        # other keys, not their value, because something like
+                        # "tool_calls": [] (falsy but present) is still useful to
+                        # the client and cannot be thrown away with the content.
                         #
-                        # Se mira el chunk ENTERO, en sus tres niveles, salteando
-                        # las claves de sobre (ver _CHUNK_ENVELOPE/_CHOICE_ENVELOPE):
-                        # `finish_reason` vive al lado de `delta` y `usage` al
-                        # nivel superior, y mirando solo `delta` los dos se
-                        # perdian.
+                        # The WHOLE chunk is examined, at its three levels,
+                        # skipping the envelope keys (see
+                        # _CHUNK_ENVELOPE/_CHOICE_ENVELOPE): `finish_reason` lives
+                        # next to `delta` and `usage` at the top level, and
+                        # looking only at `delta` lost both.
                         otras = ({k for k in delta if k != "content"}
                                  | {k for k in eleccion
                                     if k != "delta" and k not in _CHOICE_ENVELOPE}
@@ -729,35 +708,37 @@ class Proxy:
                         if not raw and isinstance(delta.get("content"), str):
                             delta["content"] = rec.feed(delta["content"])
                         contenido = delta.get("content")
-                        # Dos preguntas distintas sobre el mismo chunk:
-                        #  - hay_texto: trae RESPUESTA (algo que no sea espacio
-                        #    en blanco). Es lo que decide si el intento fue un
-                        #    exito -- una respuesta de puros espacios no es una
-                        #    respuesta, igual que en el camino no-streaming.
-                        #  - tiene_contenido: trae texto del cliente, aunque sea
-                        #    un " " suelto. Los deltas vienen muy partidos y esos
-                        #    espacios son parte de la frase: no se pueden tirar.
+                        # Two different questions about the same chunk:
+                        #  - hay_texto: does it carry an ANSWER (something that is
+                        #    not whitespace)? That is what decides whether the
+                        #    attempt was a success -- a response of pure
+                        #    whitespace is not a response, same as on the
+                        #    non-streaming path.
+                        #  - tiene_contenido: does it carry client-facing text,
+                        #    even a lone " "? Deltas arrive heavily split and
+                        #    those spaces are part of the sentence: they cannot be
+                        #    thrown away.
                         hay_texto = isinstance(contenido, str) and bool(contenido.strip())
                         tiene_contenido = isinstance(contenido, str) and contenido != ""
                         trozo = f"data: {json.dumps(obj)}\n\n"
                         if not hay_texto and "tool_calls" not in delta:
-                            # Nada util TODAVIA. Lo estructural (role,
-                            # finish_reason, razonamiento del proveedor) y los
-                            # espacios sueltos se guardan para soltarlos EN
-                            # ORDEN junto al primer chunk util; un chunk que ya
-                            # no tiene nada adentro se descarta.
+                            # Nothing useful YET. The structural bits (role,
+                            # finish_reason, the provider's reasoning) and the
+                            # lone spaces are kept so they can be released IN
+                            # ORDER alongside the first useful chunk; a chunk with
+                            # nothing left inside is discarded.
                             if not (tiene_contenido or otras):
                                 continue
                             pendientes.append(trozo)
                             if len(pendientes) > PENDING_CAP:
-                                # Retener sin limite un stream que solo escupe
-                                # razonamiento seria una fuga de memoria: se
-                                # sueltan (se pierde el failover limpio) pero
-                                # el intento sigue contando como fallido si
-                                # nunca llega contenido de verdad.
+                                # Holding back a stream that emits nothing but
+                                # reasoning, without a limit, would be a memory
+                                # leak: they are released (clean failover is lost)
+                                # but the attempt still counts as failed if real
+                                # content never arrives.
                                 log.info(
-                                    "stream de %s: mas de %d chunks sin contenido "
-                                    "retenidos; se sueltan y este intento ya no puede "
+                                    "stream of %s: more than %d contentless chunks "
+                                    "held back; releasing them, and this attempt can no "
                                     "hacer failover limpio", ruta.key, PENDING_CAP)
                                 for p in pendientes:
                                     yield p
@@ -782,33 +763,34 @@ class Proxy:
                         yield ('data: {"choices":[{"delta":{"content":%s}}]}\n\n'
                                % json.dumps(resto))
                     if not util:
-                        # 200 que nunca entrego contenido ni tool_calls: el
-                        # mismo agujero que arriba, del lado del streaming. La
-                        # conexion funciono a nivel HTTP, pero el cliente se
-                        # queda sin respuesta -- se registra como intento
-                        # FALLIDO y se cae a la siguiente ruta.
+                        # A 200 that never delivered content or tool_calls: the
+                        # same hole as above, on the streaming side. The
+                        # connection worked at the HTTP level, but the client is
+                        # left with no answer -- it is recorded as a FAILED
+                        # attempt and falls through to the next route.
                         if not evento_registrado:
                             self.almacen.record_event(ruta.key, False, 0, 200, ahora)
                             evento_registrado = True
                             self._react_to_non_429_failure(
                                 ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
                         if pendientes:
-                            # Lo retenido se va a la basura junto con el intento.
-                            # Es lo correcto (nada de eso llego al cliente, asi
-                            # que el failover sigue siendo limpio) pero no puede
-                            # ser silencioso: son chunks de una ruta que dijo 200.
+                            # What was held back is discarded along with the
+                            # attempt. That is correct (none of it reached the
+                            # client, so failover stays clean) but it cannot be
+                            # silent: these are chunks from a route that said 200.
                             log.info(
-                                "stream de %s: se descartan %d chunk(s) retenidos; el "
-                                "intento cerro sin contenido ni tool_calls",
+                                "stream of %s: discarding %d held-back chunk(s); the "
+                                "attempt closed with neither content nor tool_calls",
                                 ruta.key, len(pendientes))
                         if emitido:
-                            # Ya se solto lo retenido (ver PENDING_CAP): no
-                            # se puede empalmar otra ruta encima sin mezclar
-                            # dos respuestas. Round 8: este ERA el escape hatch
-                            # que comprometia la ruta sin comparar con nadie --
-                            # ahora es igual que cualquier otra rama de fallo,
-                            # `_sospechar` de arriba ya la registro, no hay
-                            # nada mas que commitear aca.
+                            # What was held back has already been released (see
+                            # PENDING_CAP): another route cannot be spliced on top
+                            # without mixing two responses. Round 8: this WAS the
+                            # escape hatch that committed the route without
+                            # comparing it against anyone -- now it is like any
+                            # other failure branch, `_suspect` above already
+                            # recorded it, and there is nothing left to commit
+                            # here.
                             yield "data: [DONE]\n\n"
                             return
                         continue
@@ -830,23 +812,22 @@ class Proxy:
         yield "data: [DONE]\n\n"
 
     def _punish(self, clave: str, ahora: float) -> None:
-        """Castigo con backoff exponencial -- SONDA confirmada (periodica o
-        bajo demanda) o fallos de pago directos (`_suspect_paid`). Round
-        9: el 429 YA NO pasa por aca, ver `_punish_429`."""
+        """Punishment with exponential backoff -- a confirmed PROBE (periodic or
+        on demand) or direct paid failures (`_suspect_paid`). Round 9: a 429 NO
+        longer goes through here, see `_punish_429`."""
         n = self._punishments.get(clave, 0) + 1
         self._punishments[clave] = n
         self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_CAP_S)
         self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
 
     def _punish_429(self, clave: str, ahora: float, resp: httpx.Response | None) -> None:
-        """Round 9, MEDIUM 7: el 429 sigue castigando de inmediato (senal
-        inequivoca de la ruta, no necesita sonda) pero YA NO reutiliza el
-        backoff exponencial de `_castigar` (que podia escalar hasta
-        COOLDOWN_CAP_S=3600s). Se respeta el `Retry-After` del proveedor
-        cuando lo manda; si no, se usa un default corto
-        (COOLDOWN_429_DEFAULT_S); en cualquier caso se topea a
-        COOLDOWN_429_MAX_S. Ver el comentario de cabecera de las
-        constantes para la medicion que motivo el cambio."""
+        """Round 9, MEDIUM 7: a 429 still punishes immediately (an unambiguous
+        signal about the route, no probe needed) but NO longer reuses `_punish`'s
+        exponential backoff (which could escalate to COOLDOWN_CAP_S=3600s). The
+        provider's `Retry-After` is respected when it sends one; otherwise a short
+        default is used (COOLDOWN_429_DEFAULT_S); either way it is capped at
+        COOLDOWN_429_MAX_S. See the constants' header comment for the measurement
+        that motivated the change."""
         duracion = self._retry_after_seconds(resp)
         if duracion is None:
             duracion = COOLDOWN_429_DEFAULT_S
@@ -856,17 +837,16 @@ class Proxy:
 
     @staticmethod
     def _retry_after_seconds(resp: httpx.Response | None) -> float | None:
-        """Parsea `Retry-After` (segundos, o una fecha HTTP) si el proveedor
-        lo manda. `None` si falta o no se puede interpretar -- el llamador
-        cae a un default.
+        """Parse `Retry-After` (seconds, or an HTTP date) if the provider sends
+        one. `None` if it is missing or cannot be interpreted -- the caller falls
+        back to a default.
 
-        Round 10, fix chico del gate: un `Retry-After` HOSTIL o roto
-        (`-5`, `nan`) pasaba el `max(0.0, ...)` de antes y volvia UN
-        COOLDOWN DE 0s -- un proveedor diciendo explicitamente "parate" (un
-        429 es tan inequivoco como una sonda) terminaba SIN NINGUN
-        castigo, martillado de inmediato otra vez. Un valor negativo,
-        no-finito (`nan`/`inf`) o directamente ilegible se trata IGUAL que
-        ausente -- cae al default corto, nunca a cero."""
+        Round 10, small fix from the gate: a HOSTILE or broken `Retry-After`
+        (`-5`, `nan`) passed the old `max(0.0, ...)` and returned a 0s COOLDOWN --
+        a provider explicitly saying "stop" (a 429 is as unambiguous as a probe)
+        ended up with NO punishment at all, hammered again immediately. A negative,
+        non-finite (`nan`/`inf`) or outright unreadable value is treated the SAME
+        as absent -- it falls back to the short default, never to zero."""
         if resp is None:
             return None
         valor = resp.headers.get("Retry-After")
@@ -893,22 +873,21 @@ class Proxy:
             return None
 
     def _clear_punishment(self, clave: str) -> None:
-        """Un exito borra TODO rastro de castigo previo -- 429 y sondas
-        fallidas por igual. Factorizado para que completar() y
-        completar_stream() (con su _registrar_exito_una_vez) no puedan
-        desincronizarse en cuales diccionarios limpian."""
+        """A success erases EVERY trace of previous punishment -- 429s and failed
+        probes alike. Factored out so complete() and complete_stream() (with its
+        _registrar_exito_una_vez) cannot drift apart on which dictionaries they
+        clear."""
         self._punishments.pop(clave, None)
         self.cooldowns.pop(clave, None)
         self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
 
     def _react_to_non_429_failure(self, ruta: Route, ahora: float, ahora_del_castigo: float,
                                     is_probe: bool) -> None:
-        """Punto UNICO de decision para un fallo NO-429 (ver
-        _is_client_error) -- lo comparten completar() y
-        completar_stream() para que las dos ramas no puedan
-        desincronizarse en como tratan la misma situacion: ese fue
-        exactamente el vector de round 8 (la rama `if emitido:` de
-        completar_stream tenia su propio atajo)."""
+        """The SINGLE decision point for a NON-429 failure (see
+        _is_client_error) -- shared by complete() and complete_stream() so the two
+        branches cannot drift apart in how they treat the same situation: that was
+        exactly round 8's vector (complete_stream's `if emitido:` branch had a
+        shortcut of its own)."""
         if is_probe:
             self._punish(ruta.key, ahora_del_castigo)
         elif ruta.tier == "pago":
@@ -917,58 +896,54 @@ class Proxy:
             self._suspect(ruta, ahora)
 
     def _suspect(self, ruta: Route, ahora: float) -> None:
-        """Round 8/9: un fallo de TRAFICO REAL nunca excluye una ruta el
-        mismo -- solo acumula sospecha. Al cruzar SUSPICION_THRESHOLD fallos
-        CONSECUTIVOS (round 9, HIGH 3: ya no "dentro de una ventana de
-        tiempo" -- ver el comentario de cabecera de SUSPICION_THRESHOLD), la
-        ruta queda ANOTADA como candidata a una sonda BAJO DEMANDA (mismo
-        payload fijo `PING` que la sonda periodica); `_admit_pending_probes`
-        decide, con criterio de EQUIDAD, a quien de los candidatos le toca
-        el proximo cupo. Es esa sonda -- nunca este metodo, nunca el pedido
-        del cliente -- la que decide si la ruta se castiga
-        (`completar(..., is_probe=True)`, en `_probe_on_demand`).
+        """Round 8/9: a REAL-TRAFFIC failure never excludes a route by itself --
+        it only accumulates suspicion. On crossing SUSPICION_THRESHOLD CONSECUTIVE
+        failures (round 9, HIGH 3: no longer "within a time window" -- see
+        SUSPICION_THRESHOLD's header comment), the route is RECORDED as a
+        candidate for an ON-DEMAND probe (the same fixed `PING` payload as the
+        periodic probe); `_admit_pending_probes` decides, on FAIRNESS grounds,
+        which of the candidates gets the next slot. It is that probe -- never this
+        method, never the client's request -- that decides whether the route is
+        punished (`complete(..., is_probe=True)`, in `_probe_on_demand`).
 
-        Solo para rutas GRATIS -- las de pago pasan por `_suspect_paid`
-        (ver `_react_to_non_429_failure`), que castiga DIRECTO sin sonda:
-        una sonda bajo demanda gastaria PLATA REAL contra un proveedor de
-        pago sin un dueno natural de esa cuenta (el tope diario es POR
-        LLAVE, no por ruta)."""
+        FREE routes only -- paid ones go through `_suspect_paid` (see
+        `_react_to_non_429_failure`), which punishes DIRECTLY without a probe: an
+        on-demand probe would spend REAL MONEY against a paid provider with no
+        natural owner for that charge (the daily cap is PER KEY, not per route)."""
         self._suspicions[ruta.key] = min(self._suspicions.get(ruta.key, 0) + 1, SUSPICION_THRESHOLD)
         if self._suspicions[ruta.key] < SUSPICION_THRESHOLD:
             return
         if ruta.key in self._probes_in_flight:
-            return  # ya hay una sonda en vuelo para esta ruta -- no duplicar
+            return  # a probe is already in flight for this route -- do not duplicate
         ultimo = self._last_on_demand_probe.get(ruta.key, float("-inf"))
         if ahora - ultimo < ON_DEMAND_PROBE_LIMIT_S:
-            return  # rate-limitada por ruta -- la sospecha queda para la proxima oportunidad
-        # No se decide ACA si hay cupo -- se anota como candidata y se le
-        # pide a `_admit_pending_probes` que reparta el cupo disponible
-        # por EQUIDAD entre TODAS las candidatas actuales, no solo esta.
+            return  # rate-limited per route -- the suspicion waits for the next chance
+        # Whether there is quota is NOT decided HERE -- the route is recorded as a
+        # candidate and `_admit_pending_probes` is asked to share the available
+        # quota FAIRLY among ALL current candidates, not just this one.
         self._awaiting_probe[ruta.key] = ruta
         self._admit_pending_probes(ahora)
 
     def _admit_pending_probes(self, ahora: float) -> None:
-        """Round 10, HIGH del gate: reparte el cupo global (round 9,
-        MEDIUM 6) por EQUIDAD, no por orden de llegada. `completar()`
-        recorre la cadena en el MISMO orden en cada pedido (prioridad,
-        luego confiabilidad) -- asi que, con admision "primero que
-        llega, primero que entra", las rutas al FRENTE de la cadena piden
-        sonda primero SIEMPRE, y una ruta genuinamente rota (cuya
-        confiabilidad colapsada la manda al FINAL de la cadena) nunca
-        alcanzaba a pedir antes de que el cupo del minuto se agotara.
-        Medido: con 6 rutas y trafico que sospecha de todas por igual, la
-        ruta en la posicion 5 nunca conseguia una sonda en 60 minutos
-        simulados -- exactamente la ruta que MAS necesitaba confirmarse,
-        indefinidamente relegada.
+        """Round 10, HIGH from the gate: share the global quota (round 9,
+        MEDIUM 6) by FAIRNESS, not by arrival order. `complete()` walks the chain
+        in the SAME order on every request (priority, then reliability) -- so with
+        first-come-first-served admission, the routes at the FRONT of the chain
+        ask for a probe first ALWAYS, and a genuinely broken route (whose
+        collapsed reliability sends it to the END of the chain) never got to ask
+        before the minute's quota ran out. Measured: with 6 routes and traffic
+        suspecting all of them equally, the route in position 5 never obtained a
+        probe across 60 simulated minutes -- exactly the route that MOST needed
+        confirming, indefinitely starved.
 
-        Prioridad: la candidata con MAS TIEMPO sin una sonda bajo demanda
-        (nunca sondeada = infinito, gana siempre) se lleva el proximo cupo
-        libre -- un round-robin efectivo por staleness, re-evaluado en
-        CADA llamada (no una cola FIFO fija): apenas una ruta consigue su
-        sonda, dejar de ser la mas vieja hace que la SIGUIENTE mas vieja
-        gane la proxima vez, sin importar en que orden pidieron dentro de
-        una misma cadena. El TOPE global sigue siendo el mismo (round 9):
-        esto cambia A QUIEN se admite, no CUANTAS sondas por minuto."""
+        Priority: the candidate with the LONGEST time since an on-demand probe
+        (never probed = infinity, always wins) takes the next free slot -- an
+        effective round-robin by staleness, re-evaluated on EVERY call (not a
+        fixed FIFO queue): as soon as a route gets its probe, no longer being the
+        stalest makes the NEXT stalest win the following time, regardless of the
+        order in which they asked within a single chain. The global CAP is
+        unchanged (round 9): this changes WHO is admitted, not HOW MANY probes per
+        minute."""
         corte_global = ahora - GLOBAL_PROBE_WINDOW_S
         self._recent_probes[:] = [m for m in self._recent_probes if m >= corte_global]
         candidatas = sorted(
@@ -976,7 +951,7 @@ class Proxy:
             key=lambda r: self._last_on_demand_probe.get(r.key, float("-inf")))
         for ruta in candidatas:
             if len(self._recent_probes) >= GLOBAL_PROBE_LIMIT_PER_MINUTE:
-                break  # cupo agotado -- las que quedan esperan a la proxima oportunidad
+                break  # quota exhausted -- the rest wait for the next chance
             if ruta.key in self._probes_in_flight:
                 self._awaiting_probe.pop(ruta.key, None)
                 continue
@@ -989,30 +964,26 @@ class Proxy:
                 lambda _t, clave=ruta.key: self._probes_in_flight.pop(clave, None))
 
     def _suspect_paid(self, ruta: Route, ahora: float) -> None:
-        """HIGH 4 (round 9): las rutas de pago quedan afuera de sospecha+
-        sonda (ver _sospechar) porque una sonda bajo demanda gastaria plata
-        real sin dueno -- pero eso NO puede significar que nada las
-        excluya: sin esto, una ruta de pago rota factura cada pedido, para
-        siempre, sin que ningun mecanismo la saque de rotacion (medido:
-        40/40 llamadas facturables, `/v1/uso` en `pago_hoy: 0` porque solo
-        se contaba el EXITO, `TOPE_PAGO_DIARIO` nunca actuaba -- ver
-        api.py para el otro lado de este fix, contar lo FACTURADO). Se
-        reintroduce un castigo DIRECTO (sin sonda, como round 7), con el
-        MISMO umbral que la sospecha de rutas gratis, acotado a rutas de
-        pago especificamente: van ULTIMAS en la cadena (§7), asi que solo
-        entran en juego cuando YA se agoto todo lo gratis -- el costo de un
-        falso positivo aca es mucho mas bajo que para una ruta gratis
-        (round 8 completo), y el costo de NO excluir (gasto sin fondo) es
-        estrictamente peor.
+        """HIGH 4 (round 9): paid routes stay out of suspicion+probe (see
+        _suspect) because an on-demand probe would spend real money with no owner
+        -- but that CANNOT mean nothing excludes them: without this, a broken paid
+        route bills every request, forever, with no mechanism taking it out of
+        rotation (measured: 40/40 billable calls, `/v1/uso` at `pago_hoy: 0`
+        because only SUCCESS was counted, `TOPE_PAGO_DIARIO` never acting -- see
+        api.py for the other side of this fix, counting what was BILLED). A DIRECT
+        punishment is reintroduced (no probe, as in round 7), with the SAME
+        threshold as free-route suspicion, scoped to paid routes specifically:
+        they go LAST in the chain (section 7), so they only come into play once
+        everything free is exhausted -- the cost of a false positive here is far
+        lower than for a free route (all of round 8), and the cost of NOT
+        excluding (unbounded spending) is strictly worse.
 
-        Round 10, MEDIUM del gate: la duracion de ese castigo directo NO
-        puede reusar `_castigar` (el backoff exponencial existe para
-        SONDAS CONFIRMADAS) -- exactamente el mismo defecto que el 429
-        tenia antes de round 9, en otro lugar. Medido a traves de la API
-        real: 60->120->...->3600s en 24 pedidos de una llave, con el
-        fallback de pago afuera para TODAS las llaves por una hora. Flat,
-        capped (`PAID_DIRECT_COOLDOWN_S`), sin escalar -- igual que
-        `_punish_429`."""
+        Round 10, MEDIUM from the gate: that direct punishment's duration CANNOT
+        reuse `_punish` (the exponential backoff exists for CONFIRMED PROBES) --
+        exactly the same defect the 429 had before round 9, in another place.
+        Measured through the real API: 60->120->...->3600s in 24 requests from one
+        key, with the paid fallback out for ALL keys for an hour. Flat, capped
+        (`PAID_DIRECT_COOLDOWN_S`), no escalation -- same as `_punish_429`."""
         n = min(self._paid_failures.get(ruta.key, 0) + 1, SUSPICION_THRESHOLD)
         self._paid_failures[ruta.key] = n
         if n >= SUSPICION_THRESHOLD:
@@ -1021,32 +992,30 @@ class Proxy:
             self._paid_failures.pop(ruta.key, None)
 
     async def _probe_on_demand(self, ruta: Route, ahora: float) -> None:
-        """La sonda que `_sospechar` programa. Reutiliza completar() con
-        `is_probe=True` sobre una cadena de UNA sola ruta -- el mismo
-        camino que ya castiga de forma inequivoca -- y ademas deja
-        constancia en `sondas` (tabla que alimenta tanto confiabilidad como
-        `Storage.has_liveness_evidence`), exactamente como
-        `probing.probe_health` para la periodica: para el resto del
-        sistema, una sonda bajo demanda y una periodica son
-        indistinguibles, solo cambia quien la disparo.
+        """The probe `_suspect` schedules. It reuses complete() with
+        `is_probe=True` over a chain of a SINGLE route -- the same path that
+        already punishes unambiguously -- and additionally records a row in
+        `sondas` (the table feeding both reliability and
+        `Storage.has_liveness_evidence`), exactly like `probing.probe_health` does
+        for the periodic one: to the rest of the system, an on-demand probe and a
+        periodic one are indistinguishable, only who fired it differs.
 
-        MEDIUM 5 (round 9): un exito de ESTA sonda nunca debe cancelar un
-        429 mas nuevo que ella (un cliente cancelando el "pariate" del
-        proveedor via una sonda bajo demanda seria un camino a que
-        baneen la llave compartida). Se guarda un cooldown YA activo (skip
-        total, ni se gasta la sonda) y la GENERACION de castigo/cooldown
-        antes de arrancar; solo se limpia si nada la toco mientras la sonda
-        estaba en vuelo.
+        MEDIUM 5 (round 9): a success of THIS probe must never cancel a 429 newer
+        than itself (a client cancelling the provider's "back off" via an
+        on-demand probe would be a path to getting the shared key banned). An
+        ALREADY active cooldown is preserved (skipped entirely, the probe is not
+        even spent) along with the punishment/cooldown GENERATION taken before
+        starting; it is only cleared if nothing touched it while the probe was in
+        flight.
 
-        LOW 8 (round 9): esto corre en un `asyncio.Task` en segundo plano
-        -- una excepcion no-HTTP (p.ej. `sqlite3.OperationalError` bajo
-        contencion de WAL con el planificador de sondeo escribiendo en
-        paralelo) no la atrapa `completar()` (que solo espera
-        `httpx.HTTPError`) y quedaria sin recuperar (silenciosa, y con
-        `_sospechas` sin limpiar: la ruta quedaria trabada, sin poder volver
-        a sospecharse hasta que decayera el rate-limit, con una sospecha
-        vieja pegada). Se atrapa, se loguea, y se limpia `_sospechas`
-        SIEMPRE para no dejar la ruta en un estado a medio camino."""
+        LOW 8 (round 9): this runs in a background `asyncio.Task` -- a non-HTTP
+        exception (e.g. `sqlite3.OperationalError` under WAL contention with the
+        probing scheduler writing in parallel) is not caught by `complete()`
+        (which only expects `httpx.HTTPError`) and would go unhandled (silently,
+        and with `_suspicions` uncleared: the route would be stuck, unable to be
+        suspected again until the rate limit decayed, with a stale suspicion
+        attached). It is caught, logged, and `_suspicions` is ALWAYS cleared so
+        the route is never left half-way."""
         if self.cooldowns.get(ruta.key, 0.0) > ahora:
             self._suspicions.pop(ruta.key, None)
             return
@@ -1055,43 +1024,41 @@ class Proxy:
             t0 = time.monotonic()
             r = await self.complete([ruta], dict(PING), ahora, is_probe=True)
             ms = int((time.monotonic() - t0) * 1000)
-            # Round 10, fix chico: se estampa con AHORA + cuanto tardo la
-            # sonda, no con el `ahora` de cuando se PROGRAMO -- misma clase
-            # de bug que HIGH 2 de round 9, un escalon mas arriba: para una
-            # ruta colgada (hasta TIMEOUT_S=90s) la fila de `sondas` quedaba
-            # fechada hasta 90s en el pasado, pudiendo des-ordenar el
-            # `ORDER BY momento DESC` que usa `tiene_evidencia_de_vida`.
+            # Round 10, small fix: it is stamped with NOW + how long the probe
+            # took, not with the `ahora` from when it was SCHEDULED -- the same
+            # class of bug as round 9's HIGH 2, one level up: for a hung route (up
+            # to TIMEOUT_S=90s) the `sondas` row was dated up to 90s in the past,
+            # which could mis-order the `ORDER BY momento DESC` that
+            # `has_liveness_evidence` relies on.
             ahora_resuelto = ahora + ms / 1000.0
             if r.upstream_code != 429:
-                # Fix chico: un 429 contra la SONDA ya tiene su propio
-                # castigo proporcional (_punish_429, adentro de
-                # completar()) -- es evidencia de que la ruta esta
-                # rate-limitada AHORA, no de que este rota. Grabarlo
-                # TAMBIEN como sonda de salud fallida lo confundiria con
-                # una ruta genuinamente caida: dos 429 seguidos contra la
-                # sonda bastarian para que `tiene_evidencia_de_vida`
-                # (round 9) la de por muerta -- una senal de capacidad
-                # momentanea no es evidencia de muerte.
+                # Small fix: a 429 against the PROBE already has its own
+                # proportional punishment (_punish_429, inside complete()) -- it
+                # is evidence the route is rate-limited NOW, not that it is
+                # broken. Recording it ALSO as a failed health probe would confuse
+                # it with a genuinely downed route: two consecutive 429s against
+                # the probe would be enough for `has_liveness_evidence` (round 9)
+                # to declare it dead -- a momentary capacity signal is not
+                # evidence of death.
                 self.almacen.record_probe(ruta.key, "salud", r.status == 200, ms, 0,
                                              r.upstream_code, 0, 0, ahora_resuelto)
             if r.status == 200 and self._cooldown_generation.get(ruta.key, 0) == generacion_antes:
                 self._clear_punishment(ruta.key)
         except Exception:
             log.exception(
-                "sonda bajo demanda de %s fallo con una excepcion no-HTTP "
-                "(posible contencion de SQLite bajo WAL) -- no se registra "
-                "sonda ni se castiga/limpia: la ruta queda SIN VEREDICTO, "
-                "no muerta por accidente.", ruta.key)
+                "on-demand probe of %s failed with a non-HTTP exception "
+                "(possibly SQLite contention under WAL) -- no probe is "
+                "recorded and nothing is punished or cleared: the route "
+                "is left WITHOUT A VERDICT, not dead by accident.", ruta.key)
         finally:
             self._suspicions.pop(ruta.key, None)
 
     async def wait_for_pending_probes(self) -> None:
-        """Solo para tests: las sondas bajo demanda corren en segundo plano
-        (ver _sospechar) para no sumarle latencia al pedido del cliente que
-        las disparo. Awaitear esto deja que las que esten en vuelo AHORA
-        terminen antes de afirmar sobre cooldowns/sondas -- sin esto, un
-        test que revisa `p.cooldowns` justo despues de disparar el umbral
-        puede correr antes de que la sonda en background haya corrido."""
+        """Tests only: on-demand probes run in the background (see _suspect) so
+        as not to add latency to the client request that triggered them. Awaiting
+        this lets the ones in flight RIGHT NOW finish before asserting on
+        cooldowns/probes -- without it, a test checking `p.cooldowns` right after
+        crossing the threshold can run before the background probe has."""
         tareas = list(self._probes_in_flight.values())
         if tareas:
             await asyncio.gather(*tareas)
