@@ -245,7 +245,7 @@ def test_un_proveedor_sin_desenvuelve_canvas_en_el_yaml_usa_el_default_falso(tmp
 #     complicar el diseno -- default None significa "usar el TIMEOUT_S global
 #     de proxy.py", igual que hoy para todo el que no lo declare. ---
 
-def test_un_proveedor_sin_timeout_declarado_queda_en_none(tmp_path):
+def test_un_proveedor_sin_timeout_forclarado_queda_en_none(tmp_path):
     # kilo sigue sin declarar timeout_s -- Task 14 solo le puso uno a
     # chatgpt (ver el test de abajo), a proposito: no se toca el timeout de
     # ningun otro proveedor.

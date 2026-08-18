@@ -93,7 +93,7 @@ async def test_selects_correct_tool_from_multiple():
         proxy = Proxy(providers, store, http)
 
         for question, expected_tool in cases:
-            r = await proxy.completar(
+            r = await proxy.complete(
                 [route],
                 {"model": "deepseek-chat",
                  "messages": [{"role": "user", "content": question}],
@@ -101,7 +101,7 @@ async def test_selects_correct_tool_from_multiple():
                  "tool_choice": "required"},
                 ahora=0.0,
             )
-            assert r.estado == 200, f"HTTP {r.estado} for: {question}"
+            assert r.status == 200, f"HTTP {r.status} for: {question}"
             tcs = _tool_calls(r)
             assert tcs, f"No tool_calls for: {question!r}"
             name = tcs[0]["function"]["name"]
@@ -121,7 +121,7 @@ async def test_includes_optional_arguments_when_relevant():
         from llm_libre.proxy import Proxy
         proxy = Proxy(providers, store, http)
 
-        r = await proxy.completar(
+        r = await proxy.complete(
             [route],
             {"model": "deepseek-chat",
              "messages": [{"role": "user",
@@ -130,7 +130,7 @@ async def test_includes_optional_arguments_when_relevant():
              "tool_choice": "required"},
             ahora=0.0,
         )
-        assert r.estado == 200
+        assert r.status == 200
         tcs = _tool_calls(r)
         assert tcs, "No tool_calls generated"
         args = json.loads(tcs[0]["function"]["arguments"])
@@ -158,7 +158,7 @@ async def test_two_turn_agentic_loop():
 
         messages = [{"role": "user", "content": "What's the weather like in Bogotá today?"}]
 
-        r1 = await proxy.completar(
+        r1 = await proxy.complete(
             [route],
             {"model": "deepseek-chat",
              "messages": messages,
@@ -166,7 +166,7 @@ async def test_two_turn_agentic_loop():
              "tool_choice": "required"},
             ahora=0.0,
         )
-        assert r1.estado == 200, f"Turn 1 failed: {r1.json}"
+        assert r1.status == 200, f"Turn 1 failed: {r1.json}"
         tcs = _tool_calls(r1)
         assert tcs, "Turn 1: no tool_calls generated"
 
@@ -189,14 +189,14 @@ async def test_two_turn_agentic_loop():
             {"role": "tool", "tool_call_id": call_id, "content": fake_result},
         ]
 
-        r2 = await proxy.completar(
+        r2 = await proxy.complete(
             [route],
             {"model": "deepseek-chat",
              "messages": messages,
              "tools": [WEATHER_TOOL]},
             ahora=0.0,
         )
-        assert r2.estado == 200, f"Turn 2 failed: {r2.json}"
+        assert r2.status == 200, f"Turn 2 failed: {r2.json}"
         final_text = _content(r2)
         assert final_text.strip(), "Turn 2: empty text response"
 
@@ -233,7 +233,7 @@ async def test_three_turn_comparison_loop():
         calls_made = []
 
         for turn in range(3):
-            r = await proxy.completar(
+            r = await proxy.complete(
                 [route],
                 {"model": "deepseek-chat",
                  "messages": messages,
@@ -244,9 +244,9 @@ async def test_three_turn_comparison_loop():
             # body under consecutive calls -- its own session degrading, not an
             # emulation failure. Skipping keeps this test measuring what it is
             # for (multi-turn coherence) instead of the provider's uptime.
-            if r.estado == 503 and "sin contenido" in str(r.json):
+            if r.status == 503 and "sin contenido" in str(r.json):
                 pytest.skip("provider returned an empty 200; not an emulation failure")
-            assert r.estado == 200, f"Turn {turn + 1} HTTP {r.estado}"
+            assert r.status == 200, f"Turn {turn + 1} HTTP {r.status}"
 
             tcs = _tool_calls(r)
             if not tcs:

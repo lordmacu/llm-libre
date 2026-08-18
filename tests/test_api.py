@@ -13,8 +13,8 @@ from llm_libre.api import Estado, crear_app, interpretar_pedido
 from llm_libre.auth import PerKeyRateLimiter
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
-from llm_libre.proxy import (LIMITE_PROBE_BAJO_DEMANDA_S, TOPE_PENDIENTES,
-                             UMBRAL_SOSPECHA, Proxy)
+from llm_libre.proxy import (ON_DEMAND_PROBE_LIMIT_S, PENDING_CAP,
+                             SUSPICION_THRESHOLD, Proxy)
 
 
 def _hoy() -> str:
@@ -471,7 +471,7 @@ def test_health_sigue_excluyendo_por_cooldown_de_429(estado_cliente):
         rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
-        await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, time.time())
+        await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, time.time())
 
     asyncio.run(_forzar_429())
     assert estado.proxy.cooldowns  # confirma que esta vez SI quedo en cooldown
@@ -502,7 +502,7 @@ def test_health_excluye_por_cooldown_aunque_haya_evidencia_de_vida(estado_client
         rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(429, json={"error": "rate limited"})))
-        await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+        await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
 
     asyncio.run(_forzar_429())
     assert estado.proxy.cooldowns  # confirma que quedo en cooldown
@@ -657,7 +657,7 @@ def test_health_sigue_ok_tras_30_400_seguidos(estado_cliente):
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"})))
         for _ in range(30):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
 
     asyncio.run(_mandar_400_treinta_veces())
     r = cliente.get("/health")
@@ -676,7 +676,7 @@ def test_health_cae_con_30_500_seguidos_igual_que_antes(estado_cliente):
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
         for _ in range(30):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
 
     asyncio.run(_mandar_500_treinta_veces())
     r = cliente.get("/health")
@@ -705,7 +705,7 @@ def test_health_tras_reinicio_del_proceso_sigue_ok_con_400_seguidos(tmp_path):
     async def _mandar_400_treinta_veces():
         rutas = almacen1.active_routes()
         for _ in range(30):
-            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
+            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, time.time())
 
     asyncio.run(_mandar_400_treinta_veces())
     cliente1 = TestClient(crear_app(estado1))
@@ -736,7 +736,7 @@ def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"} if codigo < 500 else None)))
         for _ in range(veces):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
 
     asyncio.run(_mandar(400, 30))
     despues_400 = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
@@ -760,7 +760,7 @@ def test_ranking_no_se_mueve_con_400_seguidos_pero_si_con_500(estado_cliente):
 #     con 503 en el 100% de los pedidos mientras /health seguia en "ok" --
 #     el apagon con luz verde que /health existe para prevenir, y sin
 #     ningun backstop para las rutas de pago (nunca sondeadas). Redibujado
-#     sobre ATRIBUCION (ver proxy._es_error_del_cliente /
+#     sobre ATRIBUCION (ver proxy._is_client_error /
 #     _CODIGOS_EVIDENCIA_DE_RUTA): estos cuatro ahora cuentan igual que un
 #     500, en /health y en /v1/ranking. ---
 
@@ -774,7 +774,7 @@ def test_health_cae_con_30_seguidos_de_un_codigo_de_ruta(estado_cliente, codigo)
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(codigo, json={"error": "x"})))
         for _ in range(30):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
 
     asyncio.run(_mandar_treinta_veces())
     r = cliente.get("/health")
@@ -804,8 +804,8 @@ def test_health_tras_reinicio_del_proceso_sigue_caido_con_401_seguidos(tmp_path)
     async def _mandar_401_treinta_veces():
         rutas = almacen1.active_routes()
         for _ in range(30):
-            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, time.time())
-        await proxy1.esperar_sondas_pendientes()
+            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, time.time())
+        await proxy1.wait_for_pending_probes()
 
     asyncio.run(_mandar_401_treinta_veces())
     # Round 9: la sospecha (30x401 reales) dispara UNA sonda bajo demanda
@@ -870,9 +870,9 @@ def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
         rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         for i in range(15):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []},
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []},
                                          ahora + i)
-        await estado.proxy.esperar_sondas_pendientes()
+        await estado.proxy.wait_for_pending_probes()
 
     asyncio.run(_quince_pedidos_identicos())
     assert cliente.get("/health").json()["estado"] == "ok"
@@ -880,11 +880,11 @@ def test_health_sigue_ok_bajo_ataque_de_cadena_de_una_sola_ruta(estado_cliente):
 
 def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_cliente):
     # El vector 2 del gate: la rama if emitido: (force-flush de
-    # TOPE_PENDIENTES) sin narrows de cadena -- "auto", sin extensiones.
+    # PENDING_CAP) sin narrows de cadena -- "auto", sin extensiones.
     estado, cliente = estado_cliente
     ahora = time.time()
     lineas = ['data: {"choices":[{"index":0,"delta":{"content":""},'
-             '"finish_reason":null}]}\n\n' for _ in range(TOPE_PENDIENTES + 6)]
+             '"finish_reason":null}]}\n\n' for _ in range(PENDING_CAP + 6)]
     lineas.append("data: [DONE]\n\n")
     payload_sin_contenido = "".join(lineas).encode()
 
@@ -900,8 +900,8 @@ def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_c
         cuerpo = {"model": "auto", "stream": True,
                  "messages": [{"role": "user", "content": "piensa mucho"}]}
         for i in range(15):
-            [ln async for ln in estado.proxy.completar_stream(rutas, cuerpo, ahora + i)]
-        await estado.proxy.esperar_sondas_pendientes()
+            [ln async for ln in estado.proxy.complete_stream(rutas, cuerpo, ahora + i)]
+        await estado.proxy.wait_for_pending_probes()
 
     asyncio.run(_quince_streams_identicos())
     assert cliente.get("/health").json()["estado"] == "ok"
@@ -909,7 +909,7 @@ def test_health_sigue_ok_con_flood_de_chunks_sin_contenido_en_streaming(estado_c
 
 def test_health_cae_rapido_con_una_ruta_rota_de_verdad_via_sonda_bajo_demanda(estado_cliente):
     # Contraste: una ruta rota de verdad (le va mal tambien a la sonda) se
-    # enfria en UMBRAL_SOSPECHA pedidos + una sonda -- no en 5h.
+    # enfria en SUSPICION_THRESHOLD pedidos + una sonda -- no en 5h.
     estado, cliente = estado_cliente
     ahora = time.time()
 
@@ -917,10 +917,10 @@ def test_health_cae_rapido_con_una_ruta_rota_de_verdad_via_sonda_bajo_demanda(es
         rutas = estado.almacen.active_routes()
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500)))
-        for i in range(UMBRAL_SOSPECHA):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []},
+        for i in range(SUSPICION_THRESHOLD):
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []},
                                          ahora + i)
-        await estado.proxy.esperar_sondas_pendientes()
+        await estado.proxy.wait_for_pending_probes()
 
     asyncio.run(_umbral_pedidos())
     assert estado.proxy.cooldowns  # la sonda confirmo y castigo
@@ -951,8 +951,8 @@ def test_health_tras_reinicio_sigue_ok_tras_ataque_de_cadena_de_una_sola_ruta(tm
     async def _quince_pedidos():
         rutas = almacen1.active_routes()
         for i in range(15):
-            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
-        await proxy1.esperar_sondas_pendientes()
+            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, ahora + i)
+        await proxy1.wait_for_pending_probes()
 
     asyncio.run(_quince_pedidos())
     cliente1 = TestClient(crear_app(estado1))
@@ -988,17 +988,17 @@ def test_health_tras_reinicio_sigue_caido_tras_sonda_bajo_demanda_fallida(tmp_pa
 
     async def _dos_rachas_de_umbral_pedidos():
         rutas = almacen1.active_routes()
-        for i in range(UMBRAL_SOSPECHA):
-            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora + i)
-        await proxy1.esperar_sondas_pendientes()
+        for i in range(SUSPICION_THRESHOLD):
+            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, ahora + i)
+        await proxy1.wait_for_pending_probes()
         # Segunda racha, mas alla del rate-limit de sondas bajo demanda:
         # dispara una SEGUNDA sonda por el mecanismo real. Round 9 exige
         # dos fallidas consecutivas (ver Storage.tiene_evidencia_de_vida)
         # para que /health la trate como muerta -- una sola ya no alcanza.
-        ahora2 = ahora + LIMITE_PROBE_BAJO_DEMANDA_S + UMBRAL_SOSPECHA + 10
-        for i in range(UMBRAL_SOSPECHA):
-            await proxy1.completar(rutas, {"model": "a:free", "messages": []}, ahora2 + i)
-        await proxy1.esperar_sondas_pendientes()
+        ahora2 = ahora + ON_DEMAND_PROBE_LIMIT_S + SUSPICION_THRESHOLD + 10
+        for i in range(SUSPICION_THRESHOLD):
+            await proxy1.complete(rutas, {"model": "a:free", "messages": []}, ahora2 + i)
+        await proxy1.wait_for_pending_probes()
 
     asyncio.run(_dos_rachas_de_umbral_pedidos())
     cliente1 = TestClient(crear_app(estado1))
@@ -1038,7 +1038,7 @@ def test_ranking_cae_con_401_seguidos_igual_que_con_500(estado_cliente):
         estado.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"})))
         for _ in range(30):
-            await estado.proxy.completar(rutas, {"model": "a:free", "messages": []}, ahora)
+            await estado.proxy.complete(rutas, {"model": "a:free", "messages": []}, ahora)
 
     asyncio.run(_mandar_401_treinta_veces())
     despues = cliente.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
@@ -1162,7 +1162,7 @@ def test_streaming_pago_cuenta_uso_y_el_tope_ata():
 
 
 # --- Round 9, HIGH 4 del gate: round 8 solo contaba uso de pago en el
-#     EXITO (`r.ruta`/`en_ruta_comprometida`) -- pero un 200 con contenido
+#     EXITO (`r.route`/`on_route_committed`) -- pero un 200 con contenido
 #     vacio (un modelo de razonamiento que se gasta el presupuesto) el
 #     proveedor lo COBRA igual, aunque el gateway lo trate como fallido y
 #     siga la cadena. Medido: 40/40 llamadas facturables con

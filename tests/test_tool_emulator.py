@@ -546,7 +546,7 @@ async def test_deepseek_emulates_tool_call():
 
     async with httpx.AsyncClient(timeout=90) as http:
         proxy = Proxy(providers, store, http)
-        r = await proxy.completar(
+        r = await proxy.complete(
             [route],
             {
                 "model": "deepseek-chat",
@@ -557,7 +557,7 @@ async def test_deepseek_emulates_tool_call():
             ahora=0.0,
         )
 
-    assert r.estado == 200, f"deepseek returned HTTP {r.estado}: {r.json}"
+    assert r.status == 200, f"deepseek returned HTTP {r.status}: {r.json}"
     msg = (r.json.get("choices") or [{}])[0].get("message", {})
     tcs = msg.get("tool_calls") or []
     assert tcs, f"No tool_calls with emulation. Response: {json.dumps(r.json, ensure_ascii=False)[:400]}"
@@ -586,14 +586,14 @@ async def test_deepseek_text_response_without_tools():
 
     async with httpx.AsyncClient(timeout=90) as http:
         proxy = Proxy(providers, store, http)
-        r = await proxy.completar(
+        r = await proxy.complete(
             [route],
             {"model": "deepseek-chat",
              "messages": [{"role": "user", "content": "Say only: hello"}]},
             ahora=0.0,
         )
 
-    assert r.estado == 200
+    assert r.status == 200
     content = (r.json.get("choices") or [{}])[0].get("message", {}).get("content") or ""
     assert content.strip(), "Empty text response"
     assert not (r.json.get("choices") or [{}])[0].get("message", {}).get("tool_calls")

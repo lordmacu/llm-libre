@@ -19,11 +19,11 @@ log = logging.getLogger(__name__)
 COOLDOWN_BASE_S = 60.0  # backoff de una ruta castigada por una SONDA (propia,
                          # confirmada) o por fallos de pago directos -- ver
                          # _castigar. Round 9: el 429 YA NO usa esto (ver
-                         # _castigar_429 y COOLDOWN_429_*, mas abajo) -- una
+                         # _punish_429 y COOLDOWN_429_*, mas abajo) -- una
                          # sonda confirmada es evidencia mas fuerte que un
                          # simple "pariate" del proveedor, y merece un
                          # backoff que SI escala si la ruta sigue rota.
-COOLDOWN_TOPE_S = 3600.0
+COOLDOWN_CAP_S = 3600.0
 TIMEOUT_S = 90.0
 
 # El PING de salud comparte el tope de la bateria (SHORT_TOKEN_BUDGET) por la MISMA
@@ -44,7 +44,7 @@ TIMEOUT_S = 90.0
 # mas corto, que es exactamente la premisa que este proyecto elimino.
 #
 # Vive ACA (round 8), no en sondeo.py: es proxy quien ahora TAMBIEN dispara
-# sondas por su cuenta (ver UMBRAL_SOSPECHA mas abajo), asi que el payload
+# sondas por su cuenta (ver SUSPICION_THRESHOLD mas abajo), asi que el payload
 # fijo que las hace inequivocas tiene que estar donde se usa. sondeo.py lo
 # importa de aca (`from llm_libre.proxy import PING`) para que la sonda
 # PERIODICA y la sonda BAJO DEMANDA sigan siendo, literalmente, el mismo
@@ -83,7 +83,7 @@ PING = {"messages": [{"role": "user", "content": "ping"}],
 # diciendo "pariate" -- evidencia de la ruta tan inequivoca como una sonda,
 # sin necesitar que se confirme con una. Su backoff ya esta probado; este
 # round no lo toca.
-UMBRAL_SOSPECHA = 3  # cuantos fallos de TRAFICO REAL CONSECUTIVOS (round 9:
+SUSPICION_THRESHOLD = 3  # cuantos fallos de TRAFICO REAL CONSECUTIVOS (round 9:
                       # ya no "dentro de una ventana de tiempo" -- ver el
                       # hallazgo HIGH 3 mas abajo) hacen falta para programar
                       # una sonda propia contra esa ruta. El mismo numero que
@@ -111,7 +111,7 @@ UMBRAL_SOSPECHA = 3  # cuantos fallos de TRAFICO REAL CONSECUTIVOS (round 9:
 # que se suman" siempre fue el reinicio-en-cualquier-exito, no el reloj:
 # dos incidentes de verdad separados casi siempre tienen un exito real
 # entremedio.
-LIMITE_PROBE_BAJO_DEMANDA_S = 60.0  # como maximo UNA sonda bajo demanda por
+ON_DEMAND_PROBE_LIMIT_S = 60.0  # como maximo UNA sonda bajo demanda por
                                      # ruta cada 60s, sin importar cuantos
                                      # pedidos sospechosos lleguen mientras
                                      # tanto. Justificacion del numero: una
@@ -138,19 +138,19 @@ LIMITE_PROBE_BAJO_DEMANDA_S = 60.0  # como maximo UNA sonda bajo demanda por
 # el operador, sale del catalogo VIVO), el peor caso es N x 60 sondas/hora.
 # Medido: 11 rutas, 15.840 pedidos extra por dia contra la MISMA cuota
 # gratis que necesita el trafico real. Tope GLOBAL, independiente de N: como
-# maximo `LIMITE_PROBE_GLOBAL_POR_MINUTO` sondas bajo demanda arrancan por
+# maximo `GLOBAL_PROBE_LIMIT_PER_MINUTE` sondas bajo demanda arrancan por
 # minuto, sumando TODAS las rutas. Con 5/min (300/hora, 7200/dia) un
 # catalogo del tamano de referencia (11 rutas) queda investigado entero en
 # un par de minutos aunque las 11 esten sospechosas a la vez, y ningun
 # tamano de catalogo puede hacer crecer el costo agregado mas alla de eso.
-LIMITE_PROBE_GLOBAL_POR_MINUTO = 5
-VENTANA_PROBE_GLOBAL_S = 60.0
+GLOBAL_PROBE_LIMIT_PER_MINUTE = 5
+GLOBAL_PROBE_WINDOW_S = 60.0
 
 # Round 9, MEDIUM 7 del gate ("el 429 es el unico resorte que le queda al
 # cliente"). Un 429 SI sigue castigando de inmediato -- es el proveedor
 # mismo diciendo "pariate", tan inequivoco como una sonda -- pero hasta
 # ahora reutilizaba el backoff exponencial de _castigar (hasta
-# COOLDOWN_TOPE_S=3600s). Medido: 12 pedidos de UNA llave alcanzaban para
+# COOLDOWN_CAP_S=3600s). Medido: 12 pedidos de UNA llave alcanzaban para
 # enfriar las 3 rutas de un catalogo chico via 429 real, otra llave caia a
 # 503, /health se iba a "caido" -- por una ventana de rate-limit que el
 # PROPIO proveedor tipicamente resetea en segundos a un minuto, no en una
@@ -161,23 +161,23 @@ VENTANA_PROBE_GLOBAL_S = 60.0
 # (una ventana de rate-limit), no escalar hacia una exclusion de una hora
 # cruzando TODAS las llaves. Se respeta el `Retry-After` del proveedor
 # cuando lo manda (es la fuente mas precisa posible); si no lo manda, se usa
-# un default corto; en cualquier caso se topea (`COOLDOWN_429_MAXIMO_S`)
+# un default corto; en cualquier caso se topea (`COOLDOWN_429_MAX_S`)
 # para que un `Retry-After` absurdo (o malicioso, via un proveedor
 # comprometido) no vuelva a abrir la puerta a una exclusion de horas.
 COOLDOWN_429_DEFAULT_S = 30.0
-COOLDOWN_429_MAXIMO_S = 300.0
+COOLDOWN_429_MAX_S = 300.0
 
-# Round 10, MEDIUM del gate: `_sospechar_pago` (castigo directo para rutas
+# Round 10, MEDIUM del gate: `_suspect_paid` (castigo directo para rutas
 # de pago, ver mas abajo) reutilizaba el backoff exponencial de `_castigar`
 # -- el MISMO defecto que el 429 tenia antes de la constante de arriba, en
 # otro lugar. `_castigar` existe para SONDAS CONFIRMADAS; un castigo de
-# pago no tiene ninguna sonda detras (por diseno -- ver _sospechar_pago),
+# pago no tiene ninguna sonda detras (por diseno -- ver _suspect_paid),
 # asi que escalar su duracion como si la tuviera no tiene fundamento.
 # Medido a traves de la API real: 60->120->240->480->960->1920->3600s en
 # apenas 24 pedidos de una llave, con el fallback de pago afuera para
 # TODAS las llaves durante una hora -- ~96 pedidos/dia bastan para
-# sostener la exclusion. Flat, sin escalar -- igual que _castigar_429.
-COOLDOWN_PAGO_DIRECTO_S = 60.0
+# sostener la exclusion. Flat, sin escalar -- igual que _punish_429.
+PAID_DIRECT_COOLDOWN_S = 60.0
 
 # Revision de Task 13, hallazgo 2. Solo un 429 castigaba (con backoff
 # exponencial, ver _castigar): un 500, un timeout o un error de red no
@@ -196,7 +196,7 @@ COOLDOWN_PAGO_DIRECTO_S = 60.0
 # TODAVIA no entrego contenido pueda hacer failover limpio -- si esos chunks ya
 # hubieran salido, cambiar de ruta mezclaria dos respuestas. Un stream que solo
 # escupe razonamiento puede ser larguisimo, asi que la retencion tiene tope.
-TOPE_PENDIENTES = 64
+PENDING_CAP = 64
 
 # Claves de SOBRE de un chunk SSE: las que se repiten identicas (o triviales) en
 # cada chunk del stream y no aportan informacion propia. Existen para poder
@@ -216,9 +216,9 @@ TOPE_PENDIENTES = 64
 # ya recortado pareceria util por traer `id`/`model`/`index`: el stream de puro
 # razonamiento dejaria de hacer failover (regresion del fix B1) y la retencion
 # se llenaria de basura.
-_SOBRE_CHUNK = frozenset({"id", "object", "created", "model",
+_CHUNK_ENVELOPE = frozenset({"id", "object", "created", "model",
                           "system_fingerprint", "service_tier"})
-_SOBRE_ELECCION = frozenset({"index"})
+_CHOICE_ENVELOPE = frozenset({"index"})
 
 
 # El eje de clasificacion siempre fue ATRIBUCION ("de quien es la culpa, el
@@ -235,7 +235,7 @@ _SOBRE_ELECCION = frozenset({"index"})
 # PRINCIPIO: cuando no se puede saber de quien es la culpa, HAY QUE
 # CONTARLO -- para CONFIABILIDAD (una MEDICION, ver Storage.registrar_evento
 # y _confiabilidad). Round 8 separa esto de EXCLUSION (cooldown): ver el
-# comentario de cabecera de UMBRAL_SOSPECHA para el principio opuesto que le
+# comentario de cabecera de SUSPICION_THRESHOLD para el principio opuesto que le
 # corresponde a esa otra pregunta.
 #
 # Por eso el default esta INVERTIDO: un 4xx es evidencia de LA RUTA salvo
@@ -245,7 +245,7 @@ _SOBRE_ELECCION = frozenset({"index"})
 # ya NO necesitan estar en ninguna lista (antes SI, del lado de "no
 # cuenta"): bajo este default caen solos del lado de la ruta, que es una
 # buena senal de que la forma es la correcta.
-_CODIGOS_EVIDENCIA_DE_PEDIDO = frozenset({
+_REQUEST_EVIDENCE_CODES = frozenset({
     400,  # Bad Request: el cuerpo no se pudo ni interpretar -- es sobre la
           # SINTAXIS de este pedido, nunca sobre si la ruta sirve.
     413,  # Payload Too Large: el TAMAÑO de ESTE pedido excede un limite --
@@ -256,15 +256,15 @@ _CODIGOS_EVIDENCIA_DE_PEDIDO = frozenset({
 })
 
 
-def _es_error_del_cliente(codigo: int) -> bool:
-    """True SOLO si `codigo` esta en `_CODIGOS_EVIDENCIA_DE_PEDIDO` --
+def _is_client_error(codigo: int) -> bool:
+    """True SOLO si `codigo` esta en `_REQUEST_EVIDENCE_CODES` --
     evidencia GENUINA sobre el pedido, nunca sobre la ruta. Cualquier otro
     codigo (401, 403, 404, 405, 409, o el que un proveedor invente manana)
     es evidencia de la ruta por DEFAULT y cuenta igual que un 500 hacia
     confiabilidad (ver Storage.record_event) -- ver el comentario de
     cabecera del conjunto para el principio completo ("cuando no se puede
     saber de quien es la culpa, hay que contarlo"). Desde round 8 esto ya
-    NO decide directamente ningun cooldown -- ver UMBRAL_SOSPECHA: esa es
+    NO decide directamente ningun cooldown -- ver SUSPICION_THRESHOLD: esa es
     una pregunta distinta, con un default distinto.
 
     Solo los tres codigos de la lista corta no cuentan hacia confiabilidad:
@@ -272,10 +272,10 @@ def _es_error_del_cliente(codigo: int) -> bool:
     TODOS. Verificado contra el registro real de 5 rutas: tres pedidos
     malformados (400) seguidos bastaban para arrastrar la confiabilidad de
     las cinco antes de que existiera esta exclusion."""
-    return codigo in _CODIGOS_EVIDENCIA_DE_PEDIDO
+    return codigo in _REQUEST_EVIDENCE_CODES
 
 
-def _timeout_de(proveedor) -> float:
+def _timeout_for(proveedor) -> float:
     """`Provider.timeout_s` (default None) permite acotar el peor caso de UN
     proveedor puntual -- p.ej. uno que puede colgarse -- sin bajarle el
     timeout a todos. None (el default, y el comportamiento de siempre para
@@ -283,7 +283,7 @@ def _timeout_de(proveedor) -> float:
     return proveedor.timeout_s if proveedor.timeout_s is not None else TIMEOUT_S
 
 
-def hay_respuesta(datos: dict) -> bool:
+def has_answer(datos: dict) -> bool:
     """True si un 200 trae algo que el cliente pueda usar como respuesta.
 
     La mayoria de los modelos gratis son de razonamiento: se gastan el
@@ -317,24 +317,24 @@ def hay_respuesta(datos: dict) -> bool:
 
 
 @dataclass
-class Respuesta:
-    estado: int
+class ProxyResponse:
+    status: int
     json: dict
-    ruta: Route | None
-    intentos: int
-    razonamiento: str = ""
-    # Status HTTP que devolvio el PROVEEDOR en el ultimo intento (0 = ni
-    # siquiera hubo respuesta: error de red). No es lo mismo que `estado`, que
-    # es lo que este gateway decidio: un 200 que llega vacio queda como
-    # `estado=503, codigo_upstream=200`, y esa diferencia es justo lo que hace
-    # falta para diagnosticar desde la tabla de sondas si el proveedor esta
-    # caido o si respondio bien pero sin nada adentro.
+    route: Route | None
+    attempts: int
+    reasoning: str = ""
+    # HTTP status the PROVIDER returned on the last attempt (0 = there was no
+    # response at all: a network error). Not the same as `status`, which is what
+    # this gateway decided: a 200 that arrives empty ends up as
+    # `status=503, upstream_code=200`, and that difference is exactly what is
+    # needed to diagnose, from the probes table, whether the provider is down or
+    # answered fine but with nothing inside.
     #
-    # En una cadena de varias rutas es el codigo de la ULTIMA intentada; quien
-    # necesite atribucion exacta por ruta tiene la tabla `eventos`, que guarda
-    # una fila por intento. La sonda de salud pasa siempre una sola ruta, asi
-    # que ahi no hay ambiguedad.
-    codigo_upstream: int = 0
+    # In a chain of several routes it is the code of the LAST one tried; anyone
+    # needing exact per-route attribution has the `eventos` table, which stores
+    # one row per attempt. The health probe always passes a single route, so
+    # there is no ambiguity there.
+    upstream_code: int = 0
 
 
 class Proxy:
@@ -343,61 +343,61 @@ class Proxy:
         self.almacen = almacen
         self.http = cliente_http
         self.cooldowns: dict[str, float] = {}
-        self._castigos: dict[str, int] = {}
+        self._punishments: dict[str, int] = {}
         # Round 9: numero de generaciones que un cooldown/castigo tuvo para
-        # esta clave (se incrementa en CADA _castigar/_castigar_429/
-        # _limpiar_castigo) -- deja que una sonda bajo demanda detecte si
+        # esta clave (se incrementa en CADA _castigar/_punish_429/
+        # _clear_punishment) -- deja que una sonda bajo demanda detecte si
         # algo (tipicamente un 429 real) modifico el estado de la ruta
         # MIENTRAS la sonda estaba en vuelo, y evite pisarlo (MEDIUM 5).
-        self._generacion_cooldown: dict[str, int] = {}
+        self._cooldown_generation: dict[str, int] = {}
         # Round 9 (HIGH 3): contador de fallos CONSECUTIVOS de trafico real
         # por ruta gratis, sin ventana de tiempo -- se reinicia a 0 en
-        # cualquier exito. Ver _sospechar().
-        self._sospechas: dict[str, int] = {}
+        # cualquier exito. Ver _suspect().
+        self._suspicions: dict[str, int] = {}
         # Round 9 (HIGH 4): igual que arriba pero para rutas de PAGO, que no
-        # pasan por sospecha+sonda (nunca se sondean, ver _sospechar_pago) --
+        # pasan por sospecha+sonda (nunca se sondean, ver _suspect_paid) --
         # cuenta hacia un castigo DIRECTO, sin sonda de por medio.
-        self._fallos_pago: dict[str, int] = {}
-        self._ultimo_probe_bajo_demanda: dict[str, float] = {}
+        self._paid_failures: dict[str, int] = {}
+        self._last_on_demand_probe: dict[str, float] = {}
         # Round 9 (MEDIUM 6): marcas de tiempo de sondas bajo demanda
         # arrancadas, sumando TODAS las rutas -- tope agregado independiente
-        # del tamano del catalogo. Ver LIMITE_PROBE_GLOBAL_POR_MINUTO.
-        self._probes_recientes: list[float] = []
+        # del tamano del catalogo. Ver GLOBAL_PROBE_LIMIT_PER_MINUTE.
+        self._recent_probes: list[float] = []
         # Sondas bajo demanda en vuelo (asyncio.Task), por clave -- evita
         # disparar dos sondas superpuestas contra la MISMA ruta si varios
         # pedidos concurrentes cruzan el umbral casi al mismo tiempo, y le
         # da a los tests un lugar donde esperar (`esperar_sondas_pendientes`).
-        self._sondas_en_curso: dict[str, asyncio.Task] = {}
+        self._probes_in_flight: dict[str, asyncio.Task] = {}
         # Round 10, HIGH del gate: rutas que cruzaron el umbral y quieren
         # una sonda pero todavia no consiguieron cupo -- ver
-        # `_admitir_sondas_pendientes`. Sin esto, el cupo GLOBAL (round 9,
+        # `_admit_pending_probes`. Sin esto, el cupo GLOBAL (round 9,
         # MEDIUM 6) se lo llevaban siempre las mismas rutas: `completar()`
         # recorre la cadena en el MISMO orden en cada pedido (prioridad/
         # confiabilidad), asi que las primeras rutas de la cadena piden
         # sonda primero, SIEMPRE -- y una ruta genuinamente rota, cuya
         # confiabilidad colapsada la manda al FINAL de esa cadena, nunca
         # llegaba a pedir antes de que el cupo del minuto se agotara.
-        self._esperando_sonda: dict[str, Route] = {}
+        self._awaiting_probe: dict[str, Route] = {}
 
-    async def completar(self, rutas: list[Route], cuerpo: dict, ahora: float,
-                        crudo: bool = False, es_sonda: bool = False,
-                        en_intento_facturable: Callable[[Route], None] | None = None
-                        ) -> Respuesta:
-        """`es_sonda=True` es exclusivamente para uso INTERNO (sondeo
+    async def complete(self, rutas: list[Route], cuerpo: dict, ahora: float,
+                        raw: bool = False, is_probe: bool = False,
+                        on_billable_attempt: Callable[[Route], None] | None = None
+                        ) -> ProxyResponse:
+        """`is_probe=True` es exclusivamente para uso INTERNO (sondeo
         periodico via `probing.probe_health`, y la sonda bajo demanda de
-        `_probar_bajo_demanda` -- nunca lo pasa un pedido de un cliente
+        `_probe_on_demand` -- nunca lo pasa un pedido de un cliente
         real): cambia como se interpreta un fallo NO-429. Con
-        `es_sonda=False` (el default, todo trafico real) un fallo solo
-        acumula SOSPECHA (`_sospechar`/`_sospechar_pago`, ver
-        UMBRAL_SOSPECHA) -- nunca castiga directo. Con `es_sonda=True` un
+        `is_probe=False` (el default, todo trafico real) un fallo solo
+        acumula SOSPECHA (`_sospechar`/`_suspect_paid`, ver
+        SUSPICION_THRESHOLD) -- nunca castiga directo. Con `is_probe=True` un
         fallo castiga la ruta de inmediato (`_castigar`), sin pasar por
         sospecha ni programar otra sonda: una sonda ya ES la verificacion,
         no hay nada mas que confirmar.
 
-        `en_intento_facturable`, si se pasa, se llama por cada intento
+        `on_billable_attempt`, si se pasa, se llama por cada intento
         contra una ruta de PAGO que el proveedor respondio con `200` --
         exitoso o no (HIGH 4, round 9): el proveedor cobra por generar la
-        respuesta, no por que el gateway la considere util. `r.ruta`
+        respuesta, no por que el gateway la considere util. `r.route`
         (arriba, exito) solo marca el intento que de verdad sirvio al
         cliente; este callback marca TODO intento facturable, para que
         quien factura (api.py) no pierda el caso "200 con contenido vacio"
@@ -413,7 +413,7 @@ class Proxy:
             t0 = time.monotonic()
             try:
                 resp = await self.http.post(url, headers=cabeceras, json=payload,
-                                            timeout=_timeout_de(proveedor))
+                                            timeout=_timeout_for(proveedor))
                 codigo = resp.status_code
             except httpx.HTTPError as e:
                 codigo, resp, ultimo_error = 0, None, str(e)
@@ -438,8 +438,8 @@ class Proxy:
             # ningun test existente.
             ahora_del_castigo = ahora + latencia / 1000.0
 
-            if codigo == 200 and ruta.tier == "pago" and en_intento_facturable is not None:
-                en_intento_facturable(ruta)
+            if codigo == 200 and ruta.tier == "pago" and on_billable_attempt is not None:
+                on_billable_attempt(ruta)
 
             # Un 200 con cuerpo no parseable (p.ej. una pagina de mantenimiento
             # HTML servida con status 200) no es un exito: se trata como intento
@@ -470,25 +470,25 @@ class Proxy:
             # la respuesta pedida).
             razon = ""
             if datos is not None:
-                razon = "" if crudo else self._limpiar(datos, proveedor.unwraps_canvas)
-                if not hay_respuesta(datos):
+                razon = "" if raw else self._clean(datos, proveedor.unwraps_canvas)
+                if not has_answer(datos):
                     datos = None
                     ultimo_error = "200 sin contenido ni tool_calls"
 
             exito = codigo == 200 and datos is not None
             self.almacen.record_event(ruta.key, exito, 0, codigo, ahora,
                                           latency_ms=latencia,
-                                          is_client_error=_es_error_del_cliente(codigo))
+                                          is_client_error=_is_client_error(codigo))
 
             if exito:
-                self._sospechas.pop(ruta.key, None)
-                self._fallos_pago.pop(ruta.key, None)
-                # MEDIUM 5 (round 9): con es_sonda=True, la limpieza queda
-                # diferida a _probar_bajo_demanda (que chequea si un 429
+                self._suspicions.pop(ruta.key, None)
+                self._paid_failures.pop(ruta.key, None)
+                # MEDIUM 5 (round 9): con is_probe=True, la limpieza queda
+                # diferida a _probe_on_demand (que chequea si un 429
                 # castigo la ruta MIENTRAS esta sonda estaba en vuelo antes
                 # de limpiar) -- completar() no puede saber eso desde aca.
-                if not es_sonda:
-                    self._limpiar_castigo(ruta.key)
+                if not is_probe:
+                    self._clear_punishment(ruta.key)
                 if proveedor.emulates_tools:
                     # `cuerpo` es el pedido del CLIENTE, con su `tools` intacto:
                     # build_request lo saca solo de la copia que viaja al
@@ -496,12 +496,12 @@ class Proxy:
                     # una respuesta de texto legitima en un tool call inventado.
                     datos = _emu.detect_and_convert(datos, cuerpo.get("tools"),
                                                     cuerpo.get("tool_choice"))
-                return Respuesta(200, datos, ruta, intentos, razon, codigo)
+                return ProxyResponse(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
-                self._castigar_429(ruta.key, ahora_del_castigo, resp)
-            elif not _es_error_del_cliente(codigo):
-                self._reaccionar_a_fallo_no_429(ruta, ahora, ahora_del_castigo, es_sonda)
+                self._punish_429(ruta.key, ahora_del_castigo, resp)
+            elif not _is_client_error(codigo):
+                self._react_to_non_429_failure(ruta, ahora, ahora_del_castigo, is_probe)
             ultimo_error = ultimo_error or f"HTTP {codigo}"
 
         # Solo cuentan los cooldowns de las rutas de ESTE pedido: el proxy vive
@@ -509,17 +509,17 @@ class Proxy:
         # esta cadena, cuyo vencimiento no le sirve de nada al que esta pidiendo.
         cooldowns_del_pedido = {c: v for c, v in self.cooldowns.items()
                                 if c in claves_del_pedido}
-        return Respuesta(503, {"error": {
+        return ProxyResponse(503, {"error": {
             "message": "sin rutas disponibles",
             "detalle": ultimo_error,
             "proxima_liberacion": (min(cooldowns_del_pedido.values())
                                    if cooldowns_del_pedido else None),
         }}, None, intentos, "", ultimo_codigo)
 
-    async def completar_stream(self, rutas: list[Route], cuerpo: dict, ahora: float,
-                               crudo: bool = False,
-                               en_ruta_comprometida: Callable[[Route], None] | None = None,
-                               en_intento_facturable: Callable[[Route], None] | None = None):
+    async def complete_stream(self, rutas: list[Route], cuerpo: dict, ahora: float,
+                               raw: bool = False,
+                               on_route_committed: Callable[[Route], None] | None = None,
+                               on_billable_attempt: Callable[[Route], None] | None = None):
         """Emite lineas SSE ya recortadas, terminando siempre en `data: [DONE]`.
 
         Hace failover solo ANTES del primer byte util: una vez que al cliente le
@@ -527,7 +527,7 @@ class Proxy:
         distintas en un mismo stream. Por eso una falla de red DESPUES de emitir
         no reintenta la siguiente ruta: cierra el stream ahi mismo.
 
-        `en_ruta_comprometida`, si se pasa, se llama COMO MUCHO una vez por
+        `on_route_committed`, si se pasa, se llama COMO MUCHO una vez por
         llamada a este generador: exactamente cuando (y si) una ruta queda
         confirmada como la que de verdad sirvio la peticion. Se dispara desde
         el mismo lugar que ya decide "esto fue un exito real" para la
@@ -536,18 +536,18 @@ class Proxy:
         primer byte util TODAVIA hace failover a la siguiente ruta (ver mas
         arriba) y ahi no hubo servicio real.
 
-        `en_intento_facturable`, si se pasa, se llama por cada intento contra
+        `on_billable_attempt`, si se pasa, se llama por cada intento contra
         una ruta de PAGO cuyo status inicial fue `200` -- exitoso o no (HIGH
         4, round 9: el proveedor cobra por generar la respuesta, incluido un
         stream que termina sin contenido util). Distinto de
-        `en_ruta_comprometida`: ese marca solo la ruta GANADORA, este marca
+        `on_route_committed`: ese marca solo la ruta GANADORA, este marca
         todo intento facturable.
 
-        Nunca se llama con `es_sonda` (round 8: sondeo.py jamas streamea) --
+        Nunca se llama con `is_probe` (round 8: sondeo.py jamas streamea) --
         todo fallo aca es TRAFICO REAL, y CADA rama de fallo (status != 200,
         stream sin contenido util, error de red, y el corte por
         `if emitido:` que no puede seguir la cadena) pasa por
-        `_reaccionar_a_fallo_no_429` por igual -- el mismo punto unico de
+        `_react_to_non_429_failure` por igual -- el mismo punto unico de
         decision que usa completar(), para que las dos ramas no puedan
         volver a desincronizarse (ese fue justo el vector de round 8)."""
         for ruta in rutas:
@@ -581,28 +581,28 @@ class Proxy:
                             else int((time.monotonic() - t0) * 1000))
                     self.almacen.record_event(ruta.key, True, ttft, 200, ahora)
                     evento_registrado = True
-                    self._limpiar_castigo(ruta.key)
-                    self._sospechas.pop(ruta.key, None)
-                    self._fallos_pago.pop(ruta.key, None)
-                    if en_ruta_comprometida is not None:
-                        en_ruta_comprometida(ruta)
+                    self._clear_punishment(ruta.key)
+                    self._suspicions.pop(ruta.key, None)
+                    self._paid_failures.pop(ruta.key, None)
+                    if on_route_committed is not None:
+                        on_route_committed(ruta)
 
             try:
                 async with self.http.stream("POST", url, headers=cabeceras, json=payload,
-                                            timeout=_timeout_de(proveedor)) as resp:
+                                            timeout=_timeout_for(proveedor)) as resp:
                     ahora_del_castigo = ahora + (time.monotonic() - t0)
                     if resp.status_code != 200:
                         if resp.status_code == 429:
-                            self._castigar_429(ruta.key, ahora_del_castigo, resp)
-                        elif not _es_error_del_cliente(resp.status_code):
-                            self._reaccionar_a_fallo_no_429(
-                                ruta, ahora, ahora_del_castigo, es_sonda=False)
+                            self._punish_429(ruta.key, ahora_del_castigo, resp)
+                        elif not _is_client_error(resp.status_code):
+                            self._react_to_non_429_failure(
+                                ruta, ahora, ahora_del_castigo, is_probe=False)
                         self.almacen.record_event(
                             ruta.key, False, 0, resp.status_code, ahora,
-                            is_client_error=_es_error_del_cliente(resp.status_code))
+                            is_client_error=_is_client_error(resp.status_code))
                         continue
-                    if ruta.tier == "pago" and en_intento_facturable is not None:
-                        en_intento_facturable(ruta)
+                    if ruta.tier == "pago" and on_billable_attempt is not None:
+                        on_billable_attempt(ruta)
                     rec = CompositeStreamTrimmer(unwrap_canvas=proveedor.unwraps_canvas)
 
                     # Emulacion de tools en streaming. Detectar un tool call exige
@@ -659,8 +659,8 @@ class Proxy:
                                 continue
                             if ttft_medido_ms is None and frag:
                                 ttft_medido_ms = int((time.monotonic() - t0) * 1000)
-                            acumulado += rec.feed(frag) if not crudo else frag
-                        if not crudo:
+                            acumulado += rec.feed(frag) if not raw else frag
+                        if not raw:
                             acumulado += rec.close()
 
                         llamadas = _emu.parse_tool_calls(acumulado, nombres_tools)
@@ -687,14 +687,14 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.record_event(ruta.key, False, 0, 200, ahora)
                             evento_registrado = True
-                            self._reaccionar_a_fallo_no_429(
-                                ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
+                            self._react_to_non_429_failure(
+                                ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
                         continue
 
                     # Chunks recibidos que todavia no llevan nada util. Se
                     # retienen (no se emiten) hasta que llegue el primero que
                     # SI: mientras nada haya salido, el failover sigue siendo
-                    # limpio. Ver TOPE_PENDIENTES.
+                    # limpio. Ver PENDING_CAP.
                     pendientes: list[str] = []
                     async for linea in resp.aiter_lines():
                         if not linea.startswith("data:"):
@@ -717,16 +717,16 @@ class Proxy:
                         # cliente y no se puede tirar junto con el contenido.
                         #
                         # Se mira el chunk ENTERO, en sus tres niveles, salteando
-                        # las claves de sobre (ver _SOBRE_CHUNK/_SOBRE_ELECCION):
+                        # las claves de sobre (ver _CHUNK_ENVELOPE/_CHOICE_ENVELOPE):
                         # `finish_reason` vive al lado de `delta` y `usage` al
                         # nivel superior, y mirando solo `delta` los dos se
                         # perdian.
                         otras = ({k for k in delta if k != "content"}
                                  | {k for k in eleccion
-                                    if k != "delta" and k not in _SOBRE_ELECCION}
+                                    if k != "delta" and k not in _CHOICE_ENVELOPE}
                                  | {k for k in obj
-                                    if k != "choices" and k not in _SOBRE_CHUNK})
-                        if not crudo and isinstance(delta.get("content"), str):
+                                    if k != "choices" and k not in _CHUNK_ENVELOPE})
+                        if not raw and isinstance(delta.get("content"), str):
                             delta["content"] = rec.feed(delta["content"])
                         contenido = delta.get("content")
                         # Dos preguntas distintas sobre el mismo chunk:
@@ -749,7 +749,7 @@ class Proxy:
                             if not (tiene_contenido or otras):
                                 continue
                             pendientes.append(trozo)
-                            if len(pendientes) > TOPE_PENDIENTES:
+                            if len(pendientes) > PENDING_CAP:
                                 # Retener sin limite un stream que solo escupe
                                 # razonamiento seria una fuga de memoria: se
                                 # sueltan (se pierde el failover limpio) pero
@@ -758,7 +758,7 @@ class Proxy:
                                 log.info(
                                     "stream de %s: mas de %d chunks sin contenido "
                                     "retenidos; se sueltan y este intento ya no puede "
-                                    "hacer failover limpio", ruta.key, TOPE_PENDIENTES)
+                                    "hacer failover limpio", ruta.key, PENDING_CAP)
                                 for p in pendientes:
                                     yield p
                                 pendientes.clear()
@@ -790,8 +790,8 @@ class Proxy:
                         if not evento_registrado:
                             self.almacen.record_event(ruta.key, False, 0, 200, ahora)
                             evento_registrado = True
-                            self._reaccionar_a_fallo_no_429(
-                                ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
+                            self._react_to_non_429_failure(
+                                ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
                         if pendientes:
                             # Lo retenido se va a la basura junto con el intento.
                             # Es lo correcto (nada de eso llego al cliente, asi
@@ -802,7 +802,7 @@ class Proxy:
                                 "intento cerro sin contenido ni tool_calls",
                                 ruta.key, len(pendientes))
                         if emitido:
-                            # Ya se solto lo retenido (ver TOPE_PENDIENTES): no
+                            # Ya se solto lo retenido (ver PENDING_CAP): no
                             # se puede empalmar otra ruta encima sin mezclar
                             # dos respuestas. Round 8: este ERA el escape hatch
                             # que comprometia la ruta sin comparar con nadie --
@@ -819,8 +819,8 @@ class Proxy:
             except httpx.HTTPError:
                 if not evento_registrado:
                     self.almacen.record_event(ruta.key, False, 0, 0, ahora)
-                    self._reaccionar_a_fallo_no_429(
-                        ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
+                    self._react_to_non_429_failure(
+                        ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
                 if emitido:
                     yield "data: [DONE]\n\n"
                     return
@@ -829,33 +829,33 @@ class Proxy:
         yield 'data: {"error":{"message":"sin rutas disponibles"}}\n\n'
         yield "data: [DONE]\n\n"
 
-    def _castigar(self, clave: str, ahora: float) -> None:
+    def _punish(self, clave: str, ahora: float) -> None:
         """Castigo con backoff exponencial -- SONDA confirmada (periodica o
-        bajo demanda) o fallos de pago directos (`_sospechar_pago`). Round
-        9: el 429 YA NO pasa por aca, ver `_castigar_429`."""
-        n = self._castigos.get(clave, 0) + 1
-        self._castigos[clave] = n
-        self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_TOPE_S)
-        self._generacion_cooldown[clave] = self._generacion_cooldown.get(clave, 0) + 1
+        bajo demanda) o fallos de pago directos (`_suspect_paid`). Round
+        9: el 429 YA NO pasa por aca, ver `_punish_429`."""
+        n = self._punishments.get(clave, 0) + 1
+        self._punishments[clave] = n
+        self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_CAP_S)
+        self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
 
-    def _castigar_429(self, clave: str, ahora: float, resp: httpx.Response | None) -> None:
+    def _punish_429(self, clave: str, ahora: float, resp: httpx.Response | None) -> None:
         """Round 9, MEDIUM 7: el 429 sigue castigando de inmediato (senal
         inequivoca de la ruta, no necesita sonda) pero YA NO reutiliza el
         backoff exponencial de `_castigar` (que podia escalar hasta
-        COOLDOWN_TOPE_S=3600s). Se respeta el `Retry-After` del proveedor
+        COOLDOWN_CAP_S=3600s). Se respeta el `Retry-After` del proveedor
         cuando lo manda; si no, se usa un default corto
         (COOLDOWN_429_DEFAULT_S); en cualquier caso se topea a
-        COOLDOWN_429_MAXIMO_S. Ver el comentario de cabecera de las
+        COOLDOWN_429_MAX_S. Ver el comentario de cabecera de las
         constantes para la medicion que motivo el cambio."""
-        duracion = self._retry_after_segundos(resp)
+        duracion = self._retry_after_seconds(resp)
         if duracion is None:
             duracion = COOLDOWN_429_DEFAULT_S
-        duracion = min(duracion, COOLDOWN_429_MAXIMO_S)
+        duracion = min(duracion, COOLDOWN_429_MAX_S)
         self.cooldowns[clave] = ahora + duracion
-        self._generacion_cooldown[clave] = self._generacion_cooldown.get(clave, 0) + 1
+        self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
 
     @staticmethod
-    def _retry_after_segundos(resp: httpx.Response | None) -> float | None:
+    def _retry_after_seconds(resp: httpx.Response | None) -> float | None:
         """Parsea `Retry-After` (segundos, o una fecha HTTP) si el proveedor
         lo manda. `None` si falta o no se puede interpretar -- el llamador
         cae a un default.
@@ -892,62 +892,62 @@ class Proxy:
         except Exception:
             return None
 
-    def _limpiar_castigo(self, clave: str) -> None:
+    def _clear_punishment(self, clave: str) -> None:
         """Un exito borra TODO rastro de castigo previo -- 429 y sondas
         fallidas por igual. Factorizado para que completar() y
         completar_stream() (con su _registrar_exito_una_vez) no puedan
         desincronizarse en cuales diccionarios limpian."""
-        self._castigos.pop(clave, None)
+        self._punishments.pop(clave, None)
         self.cooldowns.pop(clave, None)
-        self._generacion_cooldown[clave] = self._generacion_cooldown.get(clave, 0) + 1
+        self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
 
-    def _reaccionar_a_fallo_no_429(self, ruta: Route, ahora: float, ahora_del_castigo: float,
-                                    es_sonda: bool) -> None:
+    def _react_to_non_429_failure(self, ruta: Route, ahora: float, ahora_del_castigo: float,
+                                    is_probe: bool) -> None:
         """Punto UNICO de decision para un fallo NO-429 (ver
-        _es_error_del_cliente) -- lo comparten completar() y
+        _is_client_error) -- lo comparten completar() y
         completar_stream() para que las dos ramas no puedan
         desincronizarse en como tratan la misma situacion: ese fue
         exactamente el vector de round 8 (la rama `if emitido:` de
         completar_stream tenia su propio atajo)."""
-        if es_sonda:
-            self._castigar(ruta.key, ahora_del_castigo)
+        if is_probe:
+            self._punish(ruta.key, ahora_del_castigo)
         elif ruta.tier == "pago":
-            self._sospechar_pago(ruta, ahora_del_castigo)
+            self._suspect_paid(ruta, ahora_del_castigo)
         else:
-            self._sospechar(ruta, ahora)
+            self._suspect(ruta, ahora)
 
-    def _sospechar(self, ruta: Route, ahora: float) -> None:
+    def _suspect(self, ruta: Route, ahora: float) -> None:
         """Round 8/9: un fallo de TRAFICO REAL nunca excluye una ruta el
-        mismo -- solo acumula sospecha. Al cruzar UMBRAL_SOSPECHA fallos
+        mismo -- solo acumula sospecha. Al cruzar SUSPICION_THRESHOLD fallos
         CONSECUTIVOS (round 9, HIGH 3: ya no "dentro de una ventana de
-        tiempo" -- ver el comentario de cabecera de UMBRAL_SOSPECHA), la
+        tiempo" -- ver el comentario de cabecera de SUSPICION_THRESHOLD), la
         ruta queda ANOTADA como candidata a una sonda BAJO DEMANDA (mismo
-        payload fijo `PING` que la sonda periodica); `_admitir_sondas_pendientes`
+        payload fijo `PING` que la sonda periodica); `_admit_pending_probes`
         decide, con criterio de EQUIDAD, a quien de los candidatos le toca
         el proximo cupo. Es esa sonda -- nunca este metodo, nunca el pedido
         del cliente -- la que decide si la ruta se castiga
-        (`completar(..., es_sonda=True)`, en `_probar_bajo_demanda`).
+        (`completar(..., is_probe=True)`, en `_probe_on_demand`).
 
-        Solo para rutas GRATIS -- las de pago pasan por `_sospechar_pago`
-        (ver `_reaccionar_a_fallo_no_429`), que castiga DIRECTO sin sonda:
+        Solo para rutas GRATIS -- las de pago pasan por `_suspect_paid`
+        (ver `_react_to_non_429_failure`), que castiga DIRECTO sin sonda:
         una sonda bajo demanda gastaria PLATA REAL contra un proveedor de
         pago sin un dueno natural de esa cuenta (el tope diario es POR
         LLAVE, no por ruta)."""
-        self._sospechas[ruta.key] = min(self._sospechas.get(ruta.key, 0) + 1, UMBRAL_SOSPECHA)
-        if self._sospechas[ruta.key] < UMBRAL_SOSPECHA:
+        self._suspicions[ruta.key] = min(self._suspicions.get(ruta.key, 0) + 1, SUSPICION_THRESHOLD)
+        if self._suspicions[ruta.key] < SUSPICION_THRESHOLD:
             return
-        if ruta.key in self._sondas_en_curso:
+        if ruta.key in self._probes_in_flight:
             return  # ya hay una sonda en vuelo para esta ruta -- no duplicar
-        ultimo = self._ultimo_probe_bajo_demanda.get(ruta.key, float("-inf"))
-        if ahora - ultimo < LIMITE_PROBE_BAJO_DEMANDA_S:
+        ultimo = self._last_on_demand_probe.get(ruta.key, float("-inf"))
+        if ahora - ultimo < ON_DEMAND_PROBE_LIMIT_S:
             return  # rate-limitada por ruta -- la sospecha queda para la proxima oportunidad
         # No se decide ACA si hay cupo -- se anota como candidata y se le
-        # pide a `_admitir_sondas_pendientes` que reparta el cupo disponible
+        # pide a `_admit_pending_probes` que reparta el cupo disponible
         # por EQUIDAD entre TODAS las candidatas actuales, no solo esta.
-        self._esperando_sonda[ruta.key] = ruta
-        self._admitir_sondas_pendientes(ahora)
+        self._awaiting_probe[ruta.key] = ruta
+        self._admit_pending_probes(ahora)
 
-    def _admitir_sondas_pendientes(self, ahora: float) -> None:
+    def _admit_pending_probes(self, ahora: float) -> None:
         """Round 10, HIGH del gate: reparte el cupo global (round 9,
         MEDIUM 6) por EQUIDAD, no por orden de llegada. `completar()`
         recorre la cadena en el MISMO orden en cada pedido (prioridad,
@@ -969,26 +969,26 @@ class Proxy:
         gane la proxima vez, sin importar en que orden pidieron dentro de
         una misma cadena. El TOPE global sigue siendo el mismo (round 9):
         esto cambia A QUIEN se admite, no CUANTAS sondas por minuto."""
-        corte_global = ahora - VENTANA_PROBE_GLOBAL_S
-        self._probes_recientes[:] = [m for m in self._probes_recientes if m >= corte_global]
+        corte_global = ahora - GLOBAL_PROBE_WINDOW_S
+        self._recent_probes[:] = [m for m in self._recent_probes if m >= corte_global]
         candidatas = sorted(
-            self._esperando_sonda.values(),
-            key=lambda r: self._ultimo_probe_bajo_demanda.get(r.key, float("-inf")))
+            self._awaiting_probe.values(),
+            key=lambda r: self._last_on_demand_probe.get(r.key, float("-inf")))
         for ruta in candidatas:
-            if len(self._probes_recientes) >= LIMITE_PROBE_GLOBAL_POR_MINUTO:
+            if len(self._recent_probes) >= GLOBAL_PROBE_LIMIT_PER_MINUTE:
                 break  # cupo agotado -- las que quedan esperan a la proxima oportunidad
-            if ruta.key in self._sondas_en_curso:
-                self._esperando_sonda.pop(ruta.key, None)
+            if ruta.key in self._probes_in_flight:
+                self._awaiting_probe.pop(ruta.key, None)
                 continue
-            self._esperando_sonda.pop(ruta.key, None)
-            self._probes_recientes.append(ahora)
-            self._ultimo_probe_bajo_demanda[ruta.key] = ahora
-            tarea = asyncio.create_task(self._probar_bajo_demanda(ruta, ahora))
-            self._sondas_en_curso[ruta.key] = tarea
+            self._awaiting_probe.pop(ruta.key, None)
+            self._recent_probes.append(ahora)
+            self._last_on_demand_probe[ruta.key] = ahora
+            tarea = asyncio.create_task(self._probe_on_demand(ruta, ahora))
+            self._probes_in_flight[ruta.key] = tarea
             tarea.add_done_callback(
-                lambda _t, clave=ruta.key: self._sondas_en_curso.pop(clave, None))
+                lambda _t, clave=ruta.key: self._probes_in_flight.pop(clave, None))
 
-    def _sospechar_pago(self, ruta: Route, ahora: float) -> None:
+    def _suspect_paid(self, ruta: Route, ahora: float) -> None:
         """HIGH 4 (round 9): las rutas de pago quedan afuera de sospecha+
         sonda (ver _sospechar) porque una sonda bajo demanda gastaria plata
         real sin dueno -- pero eso NO puede significar que nada las
@@ -1011,18 +1011,18 @@ class Proxy:
         tenia antes de round 9, en otro lugar. Medido a traves de la API
         real: 60->120->...->3600s en 24 pedidos de una llave, con el
         fallback de pago afuera para TODAS las llaves por una hora. Flat,
-        capped (`COOLDOWN_PAGO_DIRECTO_S`), sin escalar -- igual que
-        `_castigar_429`."""
-        n = min(self._fallos_pago.get(ruta.key, 0) + 1, UMBRAL_SOSPECHA)
-        self._fallos_pago[ruta.key] = n
-        if n >= UMBRAL_SOSPECHA:
-            self.cooldowns[ruta.key] = ahora + COOLDOWN_PAGO_DIRECTO_S
-            self._generacion_cooldown[ruta.key] = self._generacion_cooldown.get(ruta.key, 0) + 1
-            self._fallos_pago.pop(ruta.key, None)
+        capped (`PAID_DIRECT_COOLDOWN_S`), sin escalar -- igual que
+        `_punish_429`."""
+        n = min(self._paid_failures.get(ruta.key, 0) + 1, SUSPICION_THRESHOLD)
+        self._paid_failures[ruta.key] = n
+        if n >= SUSPICION_THRESHOLD:
+            self.cooldowns[ruta.key] = ahora + PAID_DIRECT_COOLDOWN_S
+            self._cooldown_generation[ruta.key] = self._cooldown_generation.get(ruta.key, 0) + 1
+            self._paid_failures.pop(ruta.key, None)
 
-    async def _probar_bajo_demanda(self, ruta: Route, ahora: float) -> None:
+    async def _probe_on_demand(self, ruta: Route, ahora: float) -> None:
         """La sonda que `_sospechar` programa. Reutiliza completar() con
-        `es_sonda=True` sobre una cadena de UNA sola ruta -- el mismo
+        `is_probe=True` sobre una cadena de UNA sola ruta -- el mismo
         camino que ya castiga de forma inequivoca -- y ademas deja
         constancia en `sondas` (tabla que alimenta tanto confiabilidad como
         `Storage.has_liveness_evidence`), exactamente como
@@ -1048,12 +1048,12 @@ class Proxy:
         vieja pegada). Se atrapa, se loguea, y se limpia `_sospechas`
         SIEMPRE para no dejar la ruta en un estado a medio camino."""
         if self.cooldowns.get(ruta.key, 0.0) > ahora:
-            self._sospechas.pop(ruta.key, None)
+            self._suspicions.pop(ruta.key, None)
             return
-        generacion_antes = self._generacion_cooldown.get(ruta.key, 0)
+        generacion_antes = self._cooldown_generation.get(ruta.key, 0)
         try:
             t0 = time.monotonic()
-            r = await self.completar([ruta], dict(PING), ahora, es_sonda=True)
+            r = await self.complete([ruta], dict(PING), ahora, is_probe=True)
             ms = int((time.monotonic() - t0) * 1000)
             # Round 10, fix chico: se estampa con AHORA + cuanto tardo la
             # sonda, no con el `ahora` de cuando se PROGRAMO -- misma clase
@@ -1062,9 +1062,9 @@ class Proxy:
             # fechada hasta 90s en el pasado, pudiendo des-ordenar el
             # `ORDER BY momento DESC` que usa `tiene_evidencia_de_vida`.
             ahora_resuelto = ahora + ms / 1000.0
-            if r.codigo_upstream != 429:
+            if r.upstream_code != 429:
                 # Fix chico: un 429 contra la SONDA ya tiene su propio
-                # castigo proporcional (_castigar_429, adentro de
+                # castigo proporcional (_punish_429, adentro de
                 # completar()) -- es evidencia de que la ruta esta
                 # rate-limitada AHORA, no de que este rota. Grabarlo
                 # TAMBIEN como sonda de salud fallida lo confundiria con
@@ -1072,10 +1072,10 @@ class Proxy:
                 # sonda bastarian para que `tiene_evidencia_de_vida`
                 # (round 9) la de por muerta -- una senal de capacidad
                 # momentanea no es evidencia de muerte.
-                self.almacen.record_probe(ruta.key, "salud", r.estado == 200, ms, 0,
-                                             r.codigo_upstream, 0, 0, ahora_resuelto)
-            if r.estado == 200 and self._generacion_cooldown.get(ruta.key, 0) == generacion_antes:
-                self._limpiar_castigo(ruta.key)
+                self.almacen.record_probe(ruta.key, "salud", r.status == 200, ms, 0,
+                                             r.upstream_code, 0, 0, ahora_resuelto)
+            if r.status == 200 and self._cooldown_generation.get(ruta.key, 0) == generacion_antes:
+                self._clear_punishment(ruta.key)
         except Exception:
             log.exception(
                 "sonda bajo demanda de %s fallo con una excepcion no-HTTP "
@@ -1083,21 +1083,21 @@ class Proxy:
                 "sonda ni se castiga/limpia: la ruta queda SIN VEREDICTO, "
                 "no muerta por accidente.", ruta.key)
         finally:
-            self._sospechas.pop(ruta.key, None)
+            self._suspicions.pop(ruta.key, None)
 
-    async def esperar_sondas_pendientes(self) -> None:
+    async def wait_for_pending_probes(self) -> None:
         """Solo para tests: las sondas bajo demanda corren en segundo plano
         (ver _sospechar) para no sumarle latencia al pedido del cliente que
         las disparo. Awaitear esto deja que las que esten en vuelo AHORA
         terminen antes de afirmar sobre cooldowns/sondas -- sin esto, un
         test que revisa `p.cooldowns` justo despues de disparar el umbral
         puede correr antes de que la sonda en background haya corrido."""
-        tareas = list(self._sondas_en_curso.values())
+        tareas = list(self._probes_in_flight.values())
         if tareas:
             await asyncio.gather(*tareas)
 
     @staticmethod
-    def _limpiar(datos: dict, desenvolver_canvas: bool) -> str:
+    def _clean(datos: dict, desenvolver_canvas: bool) -> str:
         razon_total = ""
         for eleccion in datos.get("choices", []):
             msg = eleccion.get("message") or {}

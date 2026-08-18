@@ -420,13 +420,13 @@ async def test_la_sonda_de_salud_registra_el_fallo_de_un_modelo_que_ya_no_existe
 
 
 # --- Round 9, HIGH 1 del gate: probe_health llamaba proxy.completar SIN
-#     es_sonda=True -- round 8 gateo el castigo directo detras de esa
+#     is_probe=True -- round 8 gateo el castigo directo detras de esa
 #     bandera, y este llamador nunca se actualizo. Una sonda periodica
-#     corre UNA vez cada 5h por ruta; sin es_sonda=True, un fallo solo
+#     corre UNA vez cada 5h por ruta; sin is_probe=True, un fallo solo
 #     acumulaba sospecha (que necesita 3 consecutivos), asi que 20 sondas
 #     periodicas contra una ruta muerta (100h) dejaban 20 filas
 #     `sondas ok=0` y CERO cooldowns -- la sonda perdio su autoridad para
-#     excluir. Con es_sonda=True, UNA sola sonda fallida ya castiga. ---
+#     excluir. Con is_probe=True, UNA sola sonda fallida ya castiga. ---
 
 async def test_la_sonda_de_salud_castiga_de_inmediato_con_un_solo_fallo():
     p = _proxy(lambda req: httpx.Response(500))
@@ -450,7 +450,7 @@ async def test_la_sonda_de_calidad_guarda_casos_pasados_sobre_totales():
 
 # --- Round 10, fix chico del gate: mismo hueco de wiring que HIGH 1
 #     (round 9), una funcion mas alla -- `probe_quality` llamaba
-#     completar() sin es_sonda=True, asi que un caso de bateria fallido
+#     completar() sin is_probe=True, asi que un caso de bateria fallido
 #     alimentaba `_sospechar` (pensada para trafico de CLIENTE) y gastaba
 #     cupo del presupuesto de sondas bajo demanda, escaso y compartido con
 #     el trafico real. `caso.body` es tan gateway-autor como PING. ---
@@ -459,7 +459,7 @@ async def test_la_sonda_de_calidad_castiga_directo_sin_pasar_por_sospecha():
     p = _proxy(lambda req: httpx.Response(500))
     await probe_quality(p, p.almacen, [_ruta()], now=100.0)
     assert p.cooldowns["kilo/x:free"] > 0.0
-    # Directo -- nunca via sospecha (que necesitaria UMBRAL_SOSPECHA
+    # Directo -- nunca via sospecha (que necesitaria SUSPICION_THRESHOLD
     # fallos, y ademas dispararia una sonda de tipo 'salud' aparte).
     assert p.almacen._con.execute(
         "SELECT COUNT(*) FROM sondas WHERE tipo='salud'").fetchone()[0] == 0

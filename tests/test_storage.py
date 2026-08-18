@@ -451,7 +451,7 @@ def test_tiene_evidencia_de_vida_con_una_sonda_de_salud_exitosa_reciente(almacen
 # --- Round 10, MEDIUM del gate: el chequeo de respaldo ("nada dentro de la
 #     ventana") miraba CUALQUIER evento real -- exito o FALLO -- para
 #     decidir "hay historia, declarar muerta". Medido: un solo pedido real
-#     fallido (menos que UMBRAL_SOSPECHA, asi que ninguna sonda bajo
+#     fallido (menos que SUSPICION_THRESHOLD, asi que ninguna sonda bajo
 #     demanda llega a dispararse) bastaba para tirar /health a "caido" --
 #     contradice el principio del modulo, "mil fallos de un mismo cliente
 #     no prueban que la ruta este rota". Ahora SOLO una SONDA (nunca un

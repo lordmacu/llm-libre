@@ -251,29 +251,29 @@ def crear_app(estado: Estado) -> FastAPI:
             # 200 vacio, y una razonamiento que se gasto el presupuesto por
             # igual (genera tokens en los tres casos); solo un error de RED
             # o un status distinto de 200 no genera cobro. Antes esto solo
-            # se llamaba en el EXITO (`r.ruta`/`en_ruta_comprometida`): un
+            # se llamaba en el EXITO (`r.route`/`on_route_committed`): un
             # 200-vacio de una ruta de pago se facturaba de verdad y no
             # aparecia ni en /v1/uso ni contra TOPE_PAGO_DIARIO -- medido,
             # 40/40 llamadas facturables con `pago_hoy: 0`. Ver proxy.py
-            # (`en_intento_facturable`) para donde se decide "facturable".
+            # (`on_billable_attempt`) para donde se decide "facturable".
             estado.almacen.add_paid_usage(
                 llave, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
         if cuerpo.get("stream"):
             return StreamingResponse(
-                estado.proxy.completar_stream(
+                estado.proxy.complete_stream(
                     rutas, cuerpo, ahora, crudo,
-                    en_intento_facturable=_contar_uso_pago),
+                    on_billable_attempt=_contar_uso_pago),
                 media_type="text/event-stream")
-        r = await estado.proxy.completar(rutas, cuerpo, ahora, crudo,
-                                         en_intento_facturable=_contar_uso_pago)
-        if r.estado == 503 and r.codigo_upstream == 404 and pedido.model is not None:
+        r = await estado.proxy.complete(rutas, cuerpo, ahora, crudo,
+                                         on_billable_attempt=_contar_uso_pago)
+        if r.status == 503 and r.upstream_code == 404 and pedido.model is not None:
             # ALSO de la revision round 6 -- literalmente la razon de ser
             # del proyecto: `pedido.model` SIGUE en nuestro catalogo (paso
             # el check 404 de `_rutas_para`, mas arriba) pero el proveedor
             # real ya no lo tiene: un 404 genuino, en vivo. La ruta ya se
             # llevo el golpe de confiabilidad (404 es evidencia de la ruta
-            # por default, ver proxy._es_error_del_cliente), pero sin este
+            # por default, ver proxy._is_client_error), pero sin este
             # chequeo el cliente solo veia un 503 generico
             # ("detalle": "HTTP 404") -- indistinguible de cualquier otra
             # indisponibilidad transitoria, durante toda la ventana de hasta
@@ -292,12 +292,12 @@ def crear_app(estado: Estado) -> FastAPI:
                 "message": f"el modelo '{pedido.model}' ya no existe",
                 "sugerencias": _parecidos(pedido.model, estado.almacen.active_routes()),
             })
-        cabeceras = {"X-Intentos": str(r.intentos)}
-        if r.ruta is not None:
-            cabeceras["X-Ruta-Usada"] = r.ruta.key
-            cabeceras["X-Tier"] = r.ruta.tier
+        cabeceras = {"X-Intentos": str(r.attempts)}
+        if r.route is not None:
+            cabeceras["X-Ruta-Usada"] = r.route.key
+            cabeceras["X-Tier"] = r.route.tier
         cuerpo_resp = r.json
-        if r.estado == 200 and r.razonamiento and isinstance(cuerpo_resp, dict):
+        if r.status == 200 and r.reasoning and isinstance(cuerpo_resp, dict):
             # §6.1: el razonamiento recortado se devuelve en un campo aparte,
             # "para quien lo quiera". Antes se recortaba de `content` y se
             # tiraba, asi que con el default `x_crudo: false` no habia forma de
@@ -311,8 +311,8 @@ def crear_app(estado: Estado) -> FastAPI:
             # que este contrato existe para complacer. Un cliente que streamea
             # y quiere el razonamiento pide `x_crudo: true` y lo recibe dentro
             # del `content`, tal cual lo mando el proveedor.
-            cuerpo_resp = {**cuerpo_resp, "x_razonamiento": r.razonamiento}
-        return JSONResponse(cuerpo_resp, status_code=r.estado, headers=cabeceras)
+            cuerpo_resp = {**cuerpo_resp, "x_razonamiento": r.reasoning}
+        return JSONResponse(cuerpo_resp, status_code=r.status, headers=cabeceras)
 
     @app.get("/v1/models", **MODELOS_DOCS)
     def modelos(x_api_key: str | None = Header(None), authorization: str | None = Header(None)):
@@ -381,7 +381,7 @@ def crear_app(estado: Estado) -> FastAPI:
         # 8: SOLO lo dispara un 429 de inmediato, o una SONDA -- periodica o
         # bajo demanda -- que confirma que la ruta esta rota; el trafico de
         # un cliente real nunca excluye una ruta directo, ver el comentario
-        # de cabecera de UMBRAL_SOSPECHA en proxy.py) Y evidencia POSITIVA de
+        # de cabecera de SUSPICION_THRESHOLD en proxy.py) Y evidencia POSITIVA de
         # que sirve (`Storage.tiene_evidencia_de_vida`).
         #
         # Task 13, revision round 6, Parte 2: ESTO YA NO MIRA `confiabilidad`.

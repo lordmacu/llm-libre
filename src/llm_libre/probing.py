@@ -13,7 +13,7 @@ from llm_libre.quality_suite import CASES, evaluate
 log = logging.getLogger(__name__)
 
 # `PING` has lived in proxy.py since round 8: the proxy also fires probes of its
-# own (on demand, see UMBRAL_SOSPECHA there) and needs the SAME fixed payload as
+# own (on demand, see SUSPICION_THRESHOLD there) and needs the SAME fixed payload as
 # this periodic probe so the two are, literally, the same request -- it is
 # imported from there instead of duplicated. It is re-exported here (the import
 # above) so anyone already doing `from llm_libre.probing import PING` keeps
@@ -131,14 +131,14 @@ async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
     # TOPE_PAGO_DIARIO. Real money, invisible.
     for route in (r for r in routes if r.tier == "gratis"):
         t0 = time.monotonic()
-        # HIGH 1 (round 9): without `es_sonda=True` a failure here only
+        # HIGH 1 (round 9): without `is_probe=True` a failure here only
         # accumulated SUSPICION (round 8) -- this periodic probe runs ONCE every
         # 5h per route, far below any suspicion threshold, so it never got to
         # punish anything: 20 periodic probes against a dead route, 20
         # `sondas ok=0` rows, zero cooldowns. A probe (periodic or on demand) is
         # the only source that can punish unambiguously -- see the header comment
-        # of UMBRAL_SOSPECHA in proxy.py.
-        r = await proxy.completar([route], dict(PING), now, es_sonda=True)
+        # of SUSPICION_THRESHOLD in proxy.py.
+        r = await proxy.complete([route], dict(PING), now, is_probe=True)
         ms = int((time.monotonic() - t0) * 1000)
         # `ttft_ms=0`, not `ms`: this probe is non-streaming, so what it measured
         # is a complete round-trip and not a time-to-first-token. Writing it into
@@ -152,15 +152,15 @@ async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
         # killing healthy routes.
         #
         # Round 10, small fix: a 429 against the probe is NOT recorded here -- it
-        # already has its own proportional punishment (Proxy._castigar_429, inside
+        # already has its own proportional punishment (Proxy._punish_429, inside
         # completar()), and it is evidence that the route is rate-limited NOW, not
         # that it is broken. Recording it as a failed health probe too would
         # confuse it with a downed route: two consecutive 429s would be enough for
         # has_liveness_evidence (round 9) to declare it dead -- a momentary
         # capacity signal is not evidence of death.
-        if r.codigo_upstream != 429:
-            store.record_probe(route.key, "salud", r.estado == 200, ms, 0,
-                               r.codigo_upstream, 0, 0, now)
+        if r.upstream_code != 429:
+            store.record_probe(route.key, "salud", r.status == 200, ms, 0,
+                               r.upstream_code, 0, 0, now)
 
 
 async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
@@ -184,11 +184,11 @@ async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
             # function further along. `case.body` is as gateway-authored as `PING`
             # -- they are fixed CASES from quality_suite.py, never something a real
             # client writes -- so a failure here is evidence about the route just
-            # as unambiguously. Without `es_sonda=True`, a battery failure fed
+            # as unambiguously. Without `is_probe=True`, a battery failure fed
             # `_sospechar` (meant for CLIENT traffic) and burned quota from the
             # on-demand probe budget, which is scarce and shared with real traffic.
-            r = await proxy.completar([route], body, now, es_sonda=True)
-            results.append(r.estado == 200 and case.check(r.json))
+            r = await proxy.complete([route], body, now, is_probe=True)
+            results.append(r.status == 200 and case.check(r.json))
         passed, total = evaluate(results)
         store.record_probe(route.key, "calidad", passed > 0, 0, 0, 200,
                            passed, total, now)

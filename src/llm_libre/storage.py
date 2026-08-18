@@ -388,7 +388,7 @@ class Storage:
         # since round 8 (a client's traffic can only ask the gateway to go and
         # look, never exclude a route itself). Measured: ONE failed real request
         # was enough to drop /health to "caido" without ANY probe having run --
-        # fewer than UMBRAL_SOSPECHA, so no on-demand probe ever fires to rescue
+        # fewer than SUSPICION_THRESHOLD, so no on-demand probe ever fires to rescue
         # it. It directly contradicts the module's principle: "a thousand failures
         # from one client do not prove the route is broken". Now ONLY a PROBE
         # (periodic or on-demand, successful or not) counts as "there is history"
