@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from llm_libre import tool_emulator as _emu
 from llm_libre.bateria import TOPE_CORTO
 from llm_libre.cliente import armar_peticion
 from llm_libre.modelos import Ruta
@@ -488,6 +489,8 @@ class Proxy:
                 # de limpiar) -- completar() no puede saber eso desde aca.
                 if not es_sonda:
                     self._limpiar_castigo(ruta.clave)
+                if proveedor.emula_tools:
+                    datos = _emu.detect_and_convert(datos)
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
@@ -588,6 +591,49 @@ class Proxy:
                     if ruta.tier == "pago" and en_intento_facturable is not None:
                         en_intento_facturable(ruta)
                     rec = RecortadorStreamCompuesto(desenvolver_canvas=proveedor.desenvuelve_canvas)
+
+                    # Tool-call emulation: buffer the entire response before deciding
+                    # whether it is a tool call (detection requires the full JSON text).
+                    if proveedor.emula_tools and cuerpo.get("tools"):
+                        buffered = ""
+                        async for linea in resp.aiter_lines():
+                            if not linea.startswith("data:"):
+                                continue
+                            carga = linea[5:].strip()
+                            if carga == "[DONE]":
+                                break
+                            try:
+                                obj_buf = json.loads(carga)
+                            except json.JSONDecodeError:
+                                continue
+                            elec_buf = (obj_buf.get("choices") or [{}])[0]
+                            delta_buf = (elec_buf.get("delta") or {}) if isinstance(elec_buf, dict) else {}
+                            frag = delta_buf.get("content") or ""
+                            if not crudo and isinstance(frag, str):
+                                frag = rec.alimentar(frag)
+                            buffered += frag
+                        buffered += rec.cerrar()
+                        parsed = _emu.parse_tool_calls(buffered.strip())
+                        if parsed:
+                            _registrar_exito_una_vez()
+                            util = True
+                            yield f"data: {json.dumps(_emu.build_synthetic_stream_chunk(parsed))}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+                        if buffered.strip():
+                            _registrar_exito_una_vez()
+                            util = True
+                            yield ('data: {"choices":[{"delta":{"content":%s},"finish_reason":"stop"}]}\n\n'
+                                   % json.dumps(buffered))
+                            yield "data: [DONE]\n\n"
+                            return
+                        if not evento_registrado:
+                            self.almacen.registrar_evento(ruta.clave, False, 0, 200, ahora)
+                            evento_registrado = True
+                            self._reaccionar_a_fallo_no_429(
+                                ruta, ahora, ahora + (time.monotonic() - t0), es_sonda=False)
+                        continue
+
                     # Chunks recibidos que todavia no llevan nada util. Se
                     # retienen (no se emiten) hasta que llegue el primero que
                     # SI: mientras nada haya salido, el failover sigue siendo

@@ -1,3 +1,4 @@
+from llm_libre import tool_emulator as _emu
 from llm_libre.modelos import EXTENSIONES_GATEWAY
 from llm_libre.proveedores import Proveedor, unir_ruta
 
@@ -27,4 +28,6 @@ def armar_peticion(p: Proveedor, cuerpo: dict,
     nuevo = {k: v for k, v in cuerpo.items() if k not in EXTENSIONES_GATEWAY}
     if modelo_real is not None:
         nuevo["model"] = modelo_real
+    if p.emula_tools and nuevo.get("tools"):
+        nuevo = _emu.inject_into_body(nuevo)
     return url, cabeceras, nuevo

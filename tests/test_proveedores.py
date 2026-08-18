@@ -25,14 +25,14 @@ def test_carga_los_proveedores_registrados():
                                   "kilo", "minimax"]
 
 
-def test_perplexity_declara_una_sola_ruta_sin_tools():
-    # Verificado contra el proxy real: no hay function calling, asi que una
-    # peticion con tools NUNCA debe rutearse aca -- lo garantiza esta
-    # declaracion, no el proveedor.
+def test_perplexity_declara_una_sola_ruta_con_tools_emuladas():
+    # No native tool calling, but emula_tools:true makes the route report tools=True
+    # via prompt-injection emulation (see tool_emulator.py).
     pplx = next(p for p in cargar(YAML, {}) if p.id == "perplexity")
+    assert pplx.emula_tools is True
     rutas = rutas_fijas(pplx)
     assert [r.clave for r in rutas] == ["perplexity/turbo"]
-    assert rutas[0].capacidades.tools is False
+    assert rutas[0].capacidades.tools is True
     assert rutas[0].tier == "gratis"
     assert pplx.base_url.endswith("/v1")   # sin el /v1 todo da 404
 
@@ -393,16 +393,16 @@ def test_rutas_fijas_usa_la_prioridad_real_del_proveedor_no_una_constante(tmp_pa
     assert rutas[0].prioridad == 77
 
 
-def test_deepseek_declara_dos_rutas_sin_tools():
-    # Verificado contra el proxy real (2026-08-17): manda tools sin reventar pero
-    # nunca devuelve tool_calls -- contesta en prosa. Un cliente agentico recibiria
-    # texto donde espera una llamada estructurada, asi que esta declaracion es lo
-    # unico que impide que el router le mande un pedido con herramientas.
+def test_deepseek_declara_dos_rutas_con_tools_emuladas():
+    # deepseek-chat and deepseek-reasoner don't support native tool calling, but
+    # emula_tools:true makes rutas_fijas() report tools=True in capabilities:
+    # prompt-injection emulation (tool_emulator.py) is transparent to the router.
     # deepseek-vision NO se declara: no se verifico entrada de imagenes.
     ds = next(p for p in cargar(YAML, {}) if p.id == "deepseek")
+    assert ds.emula_tools is True
     rutas = rutas_fijas(ds)
     assert [r.modelo_id for r in rutas] == ["deepseek-chat", "deepseek-reasoner"]
-    assert all(r.capacidades.tools is False for r in rutas)
+    assert all(r.capacidades.tools is True for r in rutas)
     assert all(r.capacidades.vision is False for r in rutas)
     assert ds.base_url.endswith("/v1")
     assert ds.timeout_s == 60.0   # el proof-of-work en WASM suma tiempo variable

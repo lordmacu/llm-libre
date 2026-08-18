@@ -50,6 +50,11 @@ class Proveedor:
     # todos -- util para uno que puede colgarse (ver el cooldown de fallos
     # duros en Proxy, la razon por la que esto se agrego).
     timeout_s: float | None = None
+    # Tool-calling emulation via prompt injection: True = this provider does not
+    # support native tools, but inject_into_body converts `tools` to system-prompt
+    # text and proxy.py detects JSON tool-call responses and converts them to the
+    # OpenAI tool_calls format. See tool_emulator.py.
+    emula_tools: bool = False
 
 
 def unir_ruta(base_url: str, sufijo: str) -> str:
@@ -162,12 +167,14 @@ def cargar(ruta_yaml: str, entorno: dict) -> list[Proveedor]:
         excepciones=_excepciones(p),
         desenvuelve_canvas=bool(p.get("desenvuelve_canvas", False)),
         timeout_s=(float(p["timeout_s"]) if p.get("timeout_s") is not None else None),
+        emula_tools=bool(p.get("emula_tools", False)),
     ) for p in datos["proveedores"]]
 
 
 def rutas_fijas(p: Proveedor) -> list[Ruta]:
     return [Ruta(p.id, m["id"], p.tier,
-                 Capacidades(tools=bool(m["tools"]), vision=bool(m["vision"]),
+                 Capacidades(tools=True if p.emula_tools else bool(m["tools"]),
+                             vision=bool(m["vision"]),
                              contexto=int(m["contexto"]), max_salida=int(m["max_salida"])),
                  prioridad=p.prioridad)
             for m in p.modelos_fijos]

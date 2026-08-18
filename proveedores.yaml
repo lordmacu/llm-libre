@@ -51,25 +51,16 @@ proveedores:
                                 # content -- ':::nota{...}' tambien es sintaxis Docusaurus/MDX
                                 # legitima, y aplicarla a ciegas le arranca las marcas a Kilo/
                                 # OpenRouter (verificado en vivo).
+    # emula_tools: inject_into_body convierte `tools` en instrucciones de texto
+    # antes de mandar al proxy; el proxy nunca ve el campo `tools`. La advertencia
+    # anterior ("tools:false OBLIGATORIO") ya no aplica: la barrera esta en la capa
+    # de emulacion, no en declarar la capacidad como false.
+    emula_tools: true
     capacidades_por_defecto:
-      # Su /v1/models SI es dinamico (TTL cache contra el backend real de
-      # ChatGPT, con fallback a la cache vieja si falla) pero NUNCA trae
-      # metadatos de capacidad -- por eso se declaran una sola vez aca y
-      # catalogo.normalizar las aplica a cada id que descubra.
-      #
-      # tools:false queda OBLIGATORIO -- releido y confirmado 2026-08-16.
-      # El proxy YA NO devuelve HTTP 500 al mandarle tools (eso cambio), pero
-      # sigue sin soportar function calling: con tool_choice:"required"
-      # devuelve tool_calls:None y prosa en texto plano. Su propio docstring
-      # distingue las dos cosas -- "Tools avanzados: reservas, shopping,
-      # widgets, canvas" (SI soportado) vs "Function calling / tool_calls en
-      # respuesta: no soportado por el backend anonimo" (NO) -- y lo que la
-      # capacidad `tools` de llm-libre significa es function calling, no la
-      # primera. El nuevo comportamiento es MAS peligroso que el 500 viejo:
-      # un 500 fallaba honesto y disparaba failover; devolver prosa en
-      # silencio le entregaria texto a un cliente agentic que espera una
-      # llamada estructurada, sin que nada avise del error. Esta declaracion
-      # es hoy la UNICA barrera que evita eso.
+      # Su /v1/models SI es dinamico pero NUNCA trae metadatos de capacidad;
+      # capacidades se declaran aca y catalogo.normalizar las aplica a cada id.
+      # tools:false en el catalogo — emula_tools:true lo eleva a true via la capa
+      # de emulacion (ver tool_emulator.py y catalogo.normalizar).
       tools: false
       vision: false
       contexto: 128000
@@ -96,8 +87,10 @@ proveedores:
     # propio modelo respondiendo "Perplexity". Declarar las 124 seria mentirle al
     # ranking: mediria 124 nombres que son el mismo modelo y gastaria 124 veces la
     # cuota de sondeo. Por eso va UNA ruta declarada, no catalogo descubierto.
+    # emula_tools: tool calling via prompt injection, mismo mecanismo que deepseek.
+    emula_tools: true
     modelos_fijos:
-      # tools:false verificado: no hay rastro de function calling en el proxy.
+      # tools:false nativo verificado; emula_tools:true lo eleva via la capa de emulacion.
       # vision:false: no soporta imagenes de entrada.
       # contexto: piso conservador, el proxy ignora max_tokens de todas formas.
       - id: turbo
@@ -140,6 +133,11 @@ proveedores:
     # Latencia medida: 4.2-4.5s. 60s de techo: el proof-of-work en WASM suma
     # tiempo variable antes de que DeepSeek siquiera empiece a responder.
     timeout_s: 60
+    # Experimento de emulacion de tool calling via prompt injection.
+    # armar_peticion convierte `tools` en instrucciones de texto en el system
+    # prompt; proxy.py detecta si la respuesta es un JSON de tool call y lo
+    # convierte al formato OpenAI. Ver emulador_tools.py y test_emulador_tools.py.
+    emula_tools: true
 
   - id: grok
     tier: gratis          # el proxy corre sobre el tier gratuito de Grok

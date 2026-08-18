@@ -97,7 +97,8 @@ def _es_alias(m: dict) -> bool:
 
 def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100,
               capacidades_por_defecto: Capacidades | None = None,
-              excepciones: dict | None = None) -> list[Ruta]:
+              excepciones: dict | None = None,
+              emula_tools: bool = False) -> list[Ruta]:
     """Convierte la respuesta de /models en rutas gratis utilizables para chat.
 
     `prioridad` es la del PROVEEDOR (ver Proveedor.prioridad), no algo que
@@ -168,6 +169,8 @@ def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100,
                 contexto=int(m.get("context_length") or top.get("context_length") or 0),
                 max_salida=int(top.get("max_completion_tokens") or 0),
             )
+        if emula_tools:
+            capacidades = replace(capacidades, tools=True)
         rutas.append(Ruta(
             proveedor=proveedor,
             modelo_id=m["id"],
