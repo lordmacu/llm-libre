@@ -46,6 +46,9 @@ route with `priority: 0` still always goes last. Money outranks manual order.
 - **[`docs/configuration.md`](docs/configuration.md)** — every environment
   variable, including why `KILO_API_KEY` must stay genuinely unset and why
   `CHATGPT_PROXY_URL` needs its path suffix.
+- **[`docs/local-access.md`](docs/local-access.md)** — how to reach the
+  running gateway: over SSH on the server, through a tunnel from your
+  laptop, or via the public URL, and where to read the API key from.
 - **[`docs/providers.md`](docs/providers.md)** — how a provider is
   declared, the three registration patterns, and what
   `default_capabilities` is for, so adding a provider is a config
