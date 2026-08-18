@@ -152,7 +152,8 @@ def test_yaml_keys_are_still_understood():
     """proveedores.cargar reads these as string literals; the file must keep them."""
     provs = load(YAML, {})
     assert provs, "no providers loaded"
-    assert {p.id for p in provs} >= {"chatgpt", "perplexity", "deepseek", "kilo", "minimax"}
+    assert {p.id for p in provs} >= {"chatgpt", "perplexity", "deepseek", "grok",
+                                     "mistral", "kilo", "minimax"}
     ds = next(p for p in provs if p.id == "deepseek")
     assert ds.tier == "free"
     assert ds.dialect == "openai"

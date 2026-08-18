@@ -20,9 +20,13 @@ def test_it_loads_the_registered_providers():
     # from /models and capabilities declared (its catalogue does not carry them).
     # It is the only free route with tools AND vision, both verified live against
     # the deployed proxy.
+    # mistral joined on 2026-08-18, also with ONE declared route: its /v1/models
+    # publishes ten ids but the proxy never forwards `model` to Le Chat, so all
+    # ten are the same backend -- the perplexity lesson, applied before it cost
+    # anything.
     ps = load(YAML, {"MINIMAX_API_KEY": "mm"})
     assert [p.id for p in ps] == ["chatgpt", "perplexity", "deepseek", "grok",
-                                  "kilo", "minimax"]
+                                  "mistral", "kilo", "minimax"]
 
 
 def test_perplexity_declares_a_single_route_without_tools():
@@ -404,3 +408,46 @@ def test_deepseek_declares_two_routes_with_emulated_tools():
     assert all(r.capabilities.vision is False for r in routes)
     assert ds.base_url.endswith("/v1")
     assert ds.timeout_s == 60.0   # the WASM proof-of-work adds variable time
+
+
+def test_mistral_declares_one_route_not_the_ten_its_catalogue_publishes():
+    """The perplexity lesson, applied to a second provider.
+
+    mistral-proxy's /v1/models advertises ten ids (mistral-small-latest,
+    mistral-large-latest, codestral-latest, open-mistral-7b and six more). They
+    are all the SAME model: the proxy echoes the requested `model` back in the
+    response envelope but never forwards it -- Le Chat's tRPC newChat body has
+    no model field at all. Measured 2026-08-18: four different ids asked
+    "exactly which model are you?" all answered "Mistral Medium 3.5".
+
+    Discovering that catalogue would put ten routes in the table, each probed
+    and scored independently, all hitting one backend -- 10x the probe quota
+    spent ranking a single model against itself, and a /v1/ranking that lies
+    about what is behind each row. So: fixed_models with one honest id."""
+    ms = next(p for p in load(YAML, {}) if p.id == "mistral")
+    routes = fixed_routes(ms)
+    assert [r.key for r in routes] == ["mistral/mistral-medium-latest"]
+    assert not ms.models_path, "discovery must stay off: the ten ids are one model"
+    assert routes[0].tier == "free"
+    assert ms.base_url.endswith("/v1")   # without the /v1 everything 404s
+
+
+def test_mistral_emulates_tools_and_really_sees_images():
+    # tools:false natively (3/3 tool_calls:None with tool_choice:"required"),
+    # but 6/6 through the emulation layer -- the only provider besides deepseek
+    # to earn emulates_tools. fixed_routes() therefore reports tools=True:
+    # emulation is transparent to the router.
+    #
+    # vision:true is MEASURED, not declared out of optimism: a 64x64 solid red
+    # PNG came back named "Red". It is the only free route with vision besides
+    # grok.
+    ms = next(p for p in load(YAML, {}) if p.id == "mistral")
+    assert ms.emulates_tools is True
+    caps = fixed_routes(ms)[0].capabilities
+    assert caps.tools is True
+    assert caps.vision is True
+    # 60s because of CONCURRENCY, not single-request latency: alone it answers
+    # in 3.5-7.4s, but three concurrent requests measured 4.9/12.6/16.2s against
+    # one shared account session. A 45s ceiling would be within ~3x of an
+    # observed real request under load.
+    assert ms.timeout_s == 60.0

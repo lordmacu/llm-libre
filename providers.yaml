@@ -209,6 +209,63 @@ providers:
       imagine-agent-mode-dev:      {tools: false, vision: false}
       imagine-agent-mode-grok-4-5: {tools: false, vision: false}
 
+  - id: mistral
+    tier: free          # a free Le Chat account: no per-request billing
+    # The same priority as the other free third parties: no evidence it is
+    # better or worse, so the measured ranking decides.
+    priority: 1
+    dialect: openai
+    base_url_env: MISTRAL_PROXY_URL
+    base_url: http://127.0.0.1:8894/v1   # default; the /v1 is mandatory (see chatgpt)
+    # ONE declared route, not the ten its /v1/models publishes. That endpoint
+    # advertises mistral-small-latest, mistral-large-latest, codestral-latest,
+    # open-mistral-7b and six more -- and every one of them is the same model.
+    # Measured 2026-08-18: asked "exactly which model are you?" through four
+    # different ids, all four answered "Mistral Medium 3.5". The proxy echoes
+    # the requested `model` back in the response envelope but never forwards it:
+    # Le Chat's tRPC newChat body has no model field at all, so the id is
+    # decorative. Declaring the ten would be the perplexity mistake again --
+    # ten names measured and probed independently, all hitting one backend,
+    # spending 10x the probe quota to rank a single model against itself.
+    #
+    # The declared id is the honest one: mistral-medium-latest is what actually
+    # answers, so a client asking for it gets what it asked for.
+    fixed_models:
+      - id: mistral-medium-latest
+        # tools:false MEASURED, not assumed: with tool_choice:"required" and a
+        # weather tool it returned tool_calls:None and the prose "I cannot
+        # access real-time weather data", 3/3. The proxy's request schema has no
+        # `tools` field at all, so nothing was ever going to reach the model.
+        tools: false
+        # vision:true MEASURED: a 64x64 solid red PNG sent as a data: URI came
+        # back named "Red". The proxy uploads images to Mistral's Azure Blob
+        # storage and passes them in the files array -- a real path, not a claim.
+        vision: true
+        # Both are conservative FLOORS, DECLARED not measured: Mistral Medium
+        # 3.5's published window is larger, but nothing here verified it, and
+        # `context` is only used to filter by x_min_context. Raise it when it is
+        # confirmed.
+        context: 32000
+        max_output: 8192
+    # 60s, and the reason is CONCURRENCY, not single-request latency. Alone it
+    # answers in 3.5-7.4s (streaming ttft 3.5s). But the proxy holds ONE shared
+    # account session, and three concurrent requests measured 4.9s / 12.6s /
+    # 16.2s with a 16.2s wall clock -- it serialises rather than parallelising.
+    # A 45s ceiling like chatgpt's would be within ~3x of an observed real
+    # request under load, which is how a healthy provider gets timed out for
+    # being busy rather than broken.
+    timeout_s: 60
+    # emulates_tools ON, and this is the ONE provider besides deepseek that
+    # earned it. Measured 2026-08-18 by running llm-libre's own tool_emulator
+    # against the real backend: 6/6 across three cases x two attempts --
+    # single tool with tool_choice:"required", two tools where it had to pick
+    # the right one (it picked web_search over get_weather and filled both
+    # `query` and `limit`), and tool_choice:"auto" where a tool was clearly
+    # warranted. Compare chatgpt and perplexity, both 0/3 on the same test and
+    # both left OFF: this flag is a claim about a provider, and a claim about a
+    # provider gets measured.
+    emulates_tools: true
+
   - id: kilo
     tier: free
     priority: 1
