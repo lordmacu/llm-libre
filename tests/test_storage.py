@@ -7,7 +7,7 @@ from llm_libre.models import Capabilities, Route
 
 
 def _route(modelo="a:free", provider="kilo", tools=True, priority=100):
-    return Route(provider, modelo, "gratis",
+    return Route(provider, modelo, "free",
                 Capabilities(tools=tools, vision=False, context=1000, max_output=100),
                 priority=priority)
 
@@ -34,7 +34,7 @@ def test_a_route_that_disappears_is_deactivated_not_deleted(store):
     assert active == ["nueva:free"]
     # still in the table: the history is what detects renames
     row = store._con.execute(
-        "SELECT activa FROM rutas WHERE modelo_id = 'vieja:free'").fetchone()
+        "SELECT active FROM routes WHERE model_id = 'vieja:free'").fetchone()
     assert row[0] == 0
 
 
@@ -51,7 +51,7 @@ def test_it_deactivates_nothing_when_asked_to_keep(store):
     active = sorted(r.model_id for r in store.active_routes())
     assert active == ["nueva:free", "vieja:free"]
     row = store._con.execute(
-        "SELECT visto_por_ultima_vez FROM rutas WHERE modelo_id = 'nueva:free'").fetchone()
+        "SELECT last_seen FROM routes WHERE model_id = 'nueva:free'").fetchone()
     assert row[0] == 200.0
 
 
@@ -96,7 +96,7 @@ def test_deactivating_unregistered_providers_switches_off_the_departed_ones_rout
     # Not deleted: still in the table, only inactive -- the same principle as
     # upsert_routes with routes that vanish from a provider's catalogue.
     row = store._con.execute(
-        "SELECT activa FROM rutas WHERE clave = 'openrouter/b:free'").fetchone()
+        "SELECT active FROM routes WHERE key = 'openrouter/b:free'").fetchone()
     assert row == (0,)
 
 
@@ -141,14 +141,14 @@ def test_deactivating_unregistered_providers_with_an_empty_set_switches_off_noth
 
 def test_quality_comes_from_the_last_quality_probe(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 2, 5, 100.0)
-    store.record_probe("kilo/a:free", "calidad", True, 500, 200, 200, 4, 5, 200.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 2, 5, 100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 4, 5, 200.0)
     assert store.metrics()["kilo/a:free"].quality == pytest.approx(0.8)
 
 
 def test_reliability_mixes_probes_and_events(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 100.0)
+    store.record_probe("kilo/a:free", "health", True, 100, 50, 200, 0, 0, 100.0)
     store.record_event("kilo/a:free", False, 0, 500, 150.0)
     m = store.metrics()["kilo/a:free"]
     assert 0.0 < m.reliability < 1.0
@@ -231,14 +231,14 @@ def test_it_migrates_an_old_database_without_the_client_error_flag(tmp_path):
     # historical behaviour: it DOES count as a failure) -- an event that never
     # distinguished the cause cannot be reclassified retroactively.
     row = store._con.execute(
-        "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free'").fetchone()
+        "SELECT is_client_error FROM events WHERE key = 'kilo/vieja:free'").fetchone()
     assert row[0] == 0
 
     # And the migrated database is still writable with the new flag.
     store.record_event("kilo/vieja:free", False, 0, 400, 70.0, is_client_error=True)
     rows = store._con.execute(
-        "SELECT es_error_cliente FROM eventos WHERE clave = 'kilo/vieja:free' "
-        "ORDER BY momento").fetchall()
+        "SELECT is_client_error FROM events WHERE key = 'kilo/vieja:free' "
+        "ORDER BY at").fetchall()
     assert [f[0] for f in rows] == [0, 1]
 
 
@@ -269,8 +269,8 @@ def test_a_never_probed_route_declares_no_quality_timestamp(store):
 
 def test_a_probed_route_declares_the_time_of_its_last_quality_probe(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 2, 5, 300.0)
-    store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 900.0)
+    store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 2, 5, 300.0)
+    store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 4, 5, 900.0)
     m = store.metrics()["kilo/a:free"]
     assert m.quality_measured_at == 900.0
     assert m.quality == pytest.approx(0.8)
@@ -278,8 +278,8 @@ def test_a_probed_route_declares_the_time_of_its_last_quality_probe(store):
 
 def test_the_last_probe_counts_health_probes_too(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 4, 5, 300.0)
-    store.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0, 800.0)
+    store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 4, 5, 300.0)
+    store.record_probe("kilo/a:free", "health", True, 120, 0, 200, 0, 0, 800.0)
     m = store.metrics()["kilo/a:free"]
     assert m.last_probe_at == 800.0        # the most recent of any kind
     assert m.quality_measured_at == 300.0  # but the QUALITY one is still its own
@@ -341,11 +341,11 @@ def test_resyncing_updates_an_existing_routes_priority(store):
     assert store.active_routes()[0].priority == 0
 
 
-# `_migrate()` already has a case (eventos.latencia_ms, see the header comment
+# `_migrate()` already has a case (events.latency_ms, see the header comment
 # of storage.py) that adds a column to a table that ALREADY exists using
 # `ALTER TABLE ... ADD COLUMN` -- because `CREATE TABLE IF NOT EXISTS` does not
 # touch an existing table. This test reproduces the same risk for
-# `rutas.prioridad`: production's `rutas` table (the /datos volume) exists from
+# `routes.priority`: production's routes table (the /datos volume) exists from
 # BEFORE this feature and already has rows. If the migration were not idempotent
 # and compatible with existing data, a redeploy against that database would blow
 # up at startup (or silently lose the column).
@@ -439,7 +439,7 @@ def test_liveness_evidence_from_a_recent_success_despite_many_failures(store):
 
 def test_liveness_evidence_from_a_recent_successful_health_probe(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    store.record_probe("kilo/a:free", "health", True, 100, 50, 200, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
@@ -467,8 +467,8 @@ def test_real_failures_with_two_failed_probes_confirming_do_declare_it_dead(stor
     store.upsert_routes([_route()], timestamp=100.0)
     for i in range(30):
         store.record_event("kilo/a:free", False, 0, 500, 100.0 + i)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 131.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 132.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 131.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 132.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is False
 
 
@@ -498,8 +498,8 @@ def test_a_success_outside_the_window_with_two_recent_failed_probes_is_dead(stor
     store.upsert_routes([_route()], timestamp=100.0)
     store.record_event("kilo/a:free", True, 50, 200, 100.0)
     now = 100.0 + LIVENESS_WINDOW_S + 1.0
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now - 1)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, now - 1)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, now)
     assert store.has_liveness_evidence("kilo/a:free", now=now) is False
 
 
@@ -513,14 +513,14 @@ def test_a_success_outside_the_window_with_two_recent_failed_probes_is_dead(stor
 
 def test_a_single_failed_probe_is_no_longer_enough_to_declare_it_dead(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_two_consecutive_failed_probes_do_declare_it_dead(store):
     store.upsert_routes([_route()], timestamp=100.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 140.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 140.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is False
 
 
@@ -529,7 +529,7 @@ def test_a_failed_probe_right_after_a_success_is_not_enough(store):
     # of the last two signals is a success, not another failure.
     store.upsert_routes([_route()], timestamp=100.0)
     store.record_event("kilo/a:free", True, 50, 200, 140.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 150.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
@@ -555,7 +555,7 @@ def test_a_failed_probe_newer_than_an_old_success_declares_the_route_dead(store)
     # Four FAILED health probes since then, one every 5h -- all of them newer than
     # the success above, the LAST one barely 1h ago.
     for i in range(1, 5):
-        store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0,
+        store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0,
                                 now - twenty_hours + i * five_hours)
     assert store.has_liveness_evidence("kilo/a:free", now=now) is False
 
@@ -566,13 +566,13 @@ def test_a_real_success_newer_than_a_failed_probe_declares_the_route_alive(store
     # wins -- the route is alive NOW, regardless of the probe stumbling
     # earlier.
     store.upsert_routes([_route()], timestamp=0.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 100.0)
     store.record_event("kilo/a:free", True, 50, 200, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
 
 
 def test_a_successful_probe_newer_than_a_failed_one_declares_the_route_alive(store):
     store.upsert_routes([_route()], timestamp=0.0)
-    store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, 100.0)
-    store.record_probe("kilo/a:free", "salud", True, 100, 50, 200, 0, 0, 150.0)
+    store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 100.0)
+    store.record_probe("kilo/a:free", "health", True, 100, 50, 200, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True

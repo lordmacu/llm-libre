@@ -53,7 +53,7 @@ def _build_proxy(url: str):
     from llm_libre.proxy import Proxy
 
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
-    route = Route("deepseek", "deepseek-chat", "gratis",
+    route = Route("deepseek", "deepseek-chat", "free",
                  Capabilities(tools=True, vision=False, context=64000, max_output=8192))
     store = Storage(":memory:")
     store.create_schema()

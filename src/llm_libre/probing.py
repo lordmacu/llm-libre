@@ -129,7 +129,7 @@ async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
     # every pass used to hit it: ~5 billable calls a day that also bypass
     # add_paid_usage, so they show up neither in /v1/uso nor against
     # TOPE_PAGO_DIARIO. Real money, invisible.
-    for route in (r for r in routes if r.tier == "gratis"):
+    for route in (r for r in routes if r.tier == "free"):
         t0 = time.monotonic()
         # HIGH 1 (round 9): without `is_probe=True` a failure here only
         # accumulated SUSPICION (round 8) -- this periodic probe runs ONCE every
@@ -159,14 +159,14 @@ async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
         # has_liveness_evidence (round 9) to declare it dead -- a momentary
         # capacity signal is not evidence of death.
         if r.upstream_code != 429:
-            store.record_probe(route.key, "salud", r.status == 200, ms, 0,
+            store.record_probe(route.key, "health", r.status == 200, ms, 0,
                                r.upstream_code, 0, 0, now)
 
 
 async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
     # Paid routes are not probed: there is no sense in spending money scoring the
     # emergency escape hatch.
-    for route in (r for r in routes if r.tier == "gratis"):
+    for route in (r for r in routes if r.tier == "free"):
         results = []
         for case in CASES:
             if case.name == "tools" and not route.capabilities.tools:
@@ -190,7 +190,7 @@ async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
             r = await proxy.complete([route], body, now, is_probe=True)
             results.append(r.status == 200 and case.check(r.json))
         passed, total = evaluate(results)
-        store.record_probe(route.key, "calidad", passed > 0, 0, 0, 200,
+        store.record_probe(route.key, "quality", passed > 0, 0, 0, 200,
                            passed, total, now)
 
 

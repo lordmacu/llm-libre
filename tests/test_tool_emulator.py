@@ -539,7 +539,7 @@ async def test_deepseek_emulates_tool_call():
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
     assert providers["deepseek"].emulates_tools, "deepseek.emulates_tools not active in YAML"
 
-    route = Route("deepseek", "deepseek-chat", "gratis",
+    route = Route("deepseek", "deepseek-chat", "free",
                  Capabilities(tools=True, vision=False, context=64000, max_output=8192))
     store = Storage(":memory:")
     store.create_schema()
@@ -579,7 +579,7 @@ async def test_deepseek_text_response_without_tools():
     from llm_libre.proxy import Proxy
 
     providers = {p.id: p for p in load(YAML, {"DEEPSEEK_PROXY_URL": url})}
-    route = Route("deepseek", "deepseek-chat", "gratis",
+    route = Route("deepseek", "deepseek-chat", "free",
                  Capabilities(tools=False, vision=False, context=64000, max_output=8192))
     store = Storage(":memory:")
     store.create_schema()

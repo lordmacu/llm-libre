@@ -411,7 +411,7 @@ def create_app(estado: State) -> FastAPI:
                     and estado.store.has_liveness_evidence(r.key, ahora))
 
         libres = [r for r in activas if _viva(r)]
-        gratis = [r for r in libres if r.tier == "gratis"]
+        gratis = [r for r in libres if r.tier == "free"]
         if gratis:
             situacion = "ok"
         elif libres:

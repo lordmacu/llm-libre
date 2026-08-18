@@ -36,14 +36,14 @@ def test_perplexity_declares_a_single_route_without_tools():
     routes = fixed_routes(pplx)
     assert [r.key for r in routes] == ["perplexity/turbo"]
     assert routes[0].capabilities.tools is False
-    assert routes[0].tier == "gratis"
+    assert routes[0].tier == "free"
     assert pplx.base_url.endswith("/v1")   # without the /v1 everything 404s
 
 
 def test_kilo_without_a_key_keeps_an_empty_key_and_stays_valid():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
     assert kilo.api_key == ""
-    assert kilo.tier == "gratis"
+    assert kilo.tier == "free"
 
 
 def test_it_resolves_the_keys_from_the_environment():
@@ -76,7 +76,7 @@ def test_fixed_models_become_paid_routes():
     routes = fixed_routes(minimax)
     assert len(routes) == 1
     assert routes[0].key == "minimax/MiniMax-M3"
-    assert routes[0].tier == "pago"
+    assert routes[0].tier == "paid"
     assert routes[0].capabilities.tools is True
     # vision became True on 2026-08-18: it was False only because nobody had
     # measured it. The capability sweep showed it correctly names the colour of a
@@ -105,7 +105,7 @@ def test_a_whitespace_only_key_is_normalised_to_empty():
 
 def test_chatgpt_has_priority_zero_and_is_free():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
-    assert chatgpt.tier == "gratis"
+    assert chatgpt.tier == "free"
     assert chatgpt.priority == 0
 
 

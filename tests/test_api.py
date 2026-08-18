@@ -170,8 +170,8 @@ def client():
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -188,8 +188,8 @@ def state_client():
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -214,7 +214,7 @@ def test_completions_answers_and_marks_the_route_used(client):
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
     assert r.headers["X-Ruta-Usada"] == "kilo/a:free"
-    assert r.headers["X-Tier"] == "gratis"
+    assert r.headers["X-Tier"] == "free"
     assert r.json()["choices"][0]["message"]["content"] == "hola"
 
 
@@ -293,8 +293,8 @@ def test_an_unknown_field_reaches_the_provider_verbatim():
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     state = State(store=store, proxy=Proxy(prov, store, http),
                     api_keys={"buena"}, daily_paid_cap=200)
@@ -379,8 +379,8 @@ def test_an_explicit_model_gone_upstream_returns_404_not_503(state_client):
 def test_the_live_404_suggestions_exclude_the_model_just_declared_dead(state_client):
     state, client = state_client
     state.store.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096)),
-         Route("kilo", "a:freebie", "gratis", Capabilities(True, False, 100000, 4096))],
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096)),
+         Route("kilo", "a:freebie", "free", Capabilities(True, False, 100000, 4096))],
         1.0)
     state.proxy.http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(404, json={"error": {"message": "model not found"}})))
@@ -433,8 +433,8 @@ def test_health_is_not_ok_when_the_free_route_genuinely_fails(state_client):
     # Round 9: a single failed probe is no longer enough for /health (see
     # Storage.has_liveness_evidence) -- two consecutive ones, with no success in
     # between, are.
-    state.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now - 1)
-    state.store.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now)
+    state.store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, now - 1)
+    state.store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, now)
     assert state.proxy.cooldowns == {}  # confirms it is not because of a cooldown
 
     r = client.get("/health")
@@ -446,7 +446,7 @@ def test_health_is_ok_when_the_free_route_has_no_telemetry_yet(state_client):
     # A freshly synced route, with no events yet, carries the NEUTRAL reliability
     # (not zero) and must keep counting as alive.
     state, client = state_client
-    rows = state.store._con.execute("SELECT COUNT(*) FROM eventos").fetchone()
+    rows = state.store._con.execute("SELECT COUNT(*) FROM events").fetchone()
     assert rows[0] == 0
     assert client.get("/health").json()["estado"] == "ok"
 
@@ -542,12 +542,12 @@ def test_health_after_a_process_restart_stays_ok_with_403s_and_one_success(tmp_p
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     store1.record_event("kilo/a:free", True, 50, 200, now)
     for _ in range(30):
         store1.record_event("kilo/a:free", False, 0, 403, now)
     proxy1 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
@@ -557,7 +557,7 @@ def test_health_after_a_process_restart_stays_ok_with_403s_and_one_success(tmp_p
     store2 = Storage(db_path)
     store2.create_schema()
     proxy2 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
     estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
@@ -575,14 +575,14 @@ def test_health_after_a_process_restart_stays_down_with_no_successes_or_probe(tm
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     for _ in range(10):
         store1.record_event("kilo/a:free", False, 0, 500, now)
     # Round 9: TWO consecutive failed probes are required, not one.
-    store1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now - 1)
-    store1.record_probe("kilo/a:free", "salud", False, 100, 0, 500, 0, 0, now)
+    store1.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, now - 1)
+    store1.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, now)
     proxy1 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
@@ -597,7 +597,7 @@ def test_health_after_a_process_restart_stays_down_with_no_successes_or_probe(tm
     store2 = Storage(db_path)
     store2.create_schema()
     proxy2 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -617,7 +617,7 @@ def test_health_after_a_process_restart_stays_ok_with_no_telemetry(tmp_path):
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     estado1 = State(store=store1, proxy=Proxy({}, store1, httpx.AsyncClient()),
                      api_keys={"buena"}, daily_paid_cap=200)
     cliente1 = TestClient(create_app(estado1))
@@ -640,7 +640,7 @@ def test_health_after_a_process_restart_stays_ok_with_no_telemetry(tmp_path):
 #     while a DIFFERENT key with a
 #     VALID request keeps receiving 200s the whole time. Worse than the previous
 #     round's 503: Coolify uses /health as its health check and RESTARTS the
-#     container when it fails -- but `eventos` lives on the
+#     container when it fails -- but `events` lives on the
 #     persistent /datos volume, so a fresh process against the SAME database keeps
 #     seeing the same 26 failures and keeps reporting "caido". A restart loop that
 #     restarting cannot break, against a service that
@@ -683,7 +683,7 @@ def test_health_falls_with_30_consecutive_500s_as_before(state_client):
 
 
 def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path):
-    # The restart-loop case: `eventos` lives in a real file (the
+    # The restart-loop case: `events` lives in a real file (the
     # /datos volume), not in process memory. A fresh Storage/Proxy/State
     # SECOND one, against the SAME database, has to read the same result as the
     # first -- if the fix depended on some in-memory state of the old process,
@@ -693,9 +693,9 @@ def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path)
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(400, json={"error": "bad request"}))))
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
@@ -713,7 +713,7 @@ def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path)
     store2 = Storage(db_path)
     store2.create_schema()
     proxy2 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -791,9 +791,9 @@ def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_pat
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(401, json={"error": "invalid api key"}))))
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
@@ -811,7 +811,7 @@ def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_pat
     # directly: the mechanism by which the FIRST probe fires on its own is
     # already covered in test_proxy.py; this test is about PERSISTENCE after
     # a restart, not about the real 60s rate limit between probes.
-    store1.record_probe("kilo/a:free", "salud", False, 100, 0, 401, 0, 0, time.time())
+    store1.record_probe("kilo/a:free", "health", False, 100, 0, 401, 0, 0, time.time())
     cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
@@ -824,7 +824,7 @@ def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_pat
     store2 = Storage(db_path)
     store2.create_schema()
     proxy2 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -939,9 +939,9 @@ def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(t
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store1, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
 
@@ -960,7 +960,7 @@ def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(t
     store2 = Storage(db_path)
     store2.create_schema()
     proxy2 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
@@ -969,16 +969,16 @@ def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(t
 
 def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tmp_path):
     # The flip side: the ON-DEMAND probe (not the periodic one) wrote the row
-    # in `sondas` that declares the route dead -- it has to persist all the same.
+    # in `probes` that declares the route dead -- it has to persist all the same.
     db_path = str(tmp_path / "salud_sospecha_caida.sqlite3")
     now = time.time()
 
     store1 = Storage(db_path)
     store1.create_schema()
     store1.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
     proxy1 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store1, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(500))))   # rota para CUALQUIER payload, incluida la sonda
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
@@ -1004,9 +1004,9 @@ def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tm
     assert r1.json()["estado"] != "ok"
 
     rows = store1._con.execute(
-        "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchall()
+        "SELECT kind, ok FROM probes WHERE key = 'kilo/a:free'").fetchall()
     assert len(rows) == 2
-    assert all(f == ("salud", 0) for f in rows)
+    assert all(f == ("health", 0) for f in rows)
 
     # A second process, with a HEALTHY transport -- to prove that "caido" comes
     # from the ALREADY PERSISTED probe, not from new traffic this process
@@ -1014,7 +1014,7 @@ def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tm
     store2 = Storage(db_path)
     store2.create_schema()
     proxy2 = Proxy(
-        {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])},
+        {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])},
         store2, httpx.AsyncClient(transport=httpx.MockTransport(
             lambda req: httpx.Response(200, json={"choices": [
                 {"message": {"role": "assistant", "content": "hola"}}]}))))
@@ -1060,14 +1060,14 @@ def test_the_ranking_breaks_down_the_components(client):
 def test_the_ranking_orders_by_priority_not_only_by_score(state_client):
     state, client = state_client
     state.store.upsert_routes([
-        Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
+        Route("chatgpt", "gpt-5:free", "free", Capabilities(True, False, 100000, 4096),
              priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: prioridad maxima (0) pero puntaje MALO.
-    state.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 1, 5, 10.0)
+    state.store.record_probe("chatgpt/gpt-5:free", "quality", True, 0, 0, 200, 1, 5, 10.0)
     state.store.record_event("chatgpt/gpt-5:free", False, 0, 500, 20.0)
     # kilo/a:free (priority 100, the fixture's default): a BETTER score.
-    state.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    state.store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 5, 5, 10.0)
     state.store.record_event("kilo/a:free", True, 50, 200, 20.0)
 
     rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
@@ -1090,11 +1090,11 @@ def test_the_ranking_sends_a_route_in_cooldown_last_even_if_it_scores_better(sta
     # puntaje.
     state, client = state_client
     state.store.upsert_routes([
-        Route("chatgpt", "gpt-5:free", "gratis", Capabilities(True, False, 100000, 4096),
+        Route("chatgpt", "gpt-5:free", "free", Capabilities(True, False, 100000, 4096),
              priority=0),
     ], 2.0, deactivate_missing=False)
     # chatgpt: the best priority AND the best score -- but it is punished.
-    state.store.record_probe("chatgpt/gpt-5:free", "calidad", True, 0, 0, 200, 5, 5, 10.0)
+    state.store.record_probe("chatgpt/gpt-5:free", "quality", True, 0, 0, 200, 5, 5, 10.0)
     state.store.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
     state.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
 
@@ -1116,12 +1116,12 @@ def _free_and_paid_state(daily_paid_cap, make_free_response, make_paid_response)
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes([
-        Route("free_prov", "f:free", "gratis", Capabilities(True, False, 100000, 4096)),
-        Route("paid_prov", "p:paid", "pago", Capabilities(True, False, 100000, 4096)),
+        Route("free_prov", "f:free", "free", Capabilities(True, False, 100000, 4096)),
+        Route("paid_prov", "p:paid", "paid", Capabilities(True, False, 100000, 4096)),
     ], 1.0)
     prov = {
-        "free_prov": Provider("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
-        "paid_prov": Provider("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
+        "free_prov": Provider("free_prov", "free", "openai", "https://f.test", "", "/models", {}, []),
+        "paid_prov": Provider("paid_prov", "paid", "openai", "https://p.test", "", "/models", {}, []),
     }
 
     def responder(req):
@@ -1183,12 +1183,12 @@ def test_paid_non_streaming_bills_an_empty_200_even_though_it_serves_nothing():
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes([
-        Route("free_prov", "f:free", "gratis", Capabilities(True, False, 100000, 4096)),
-        Route("paid_prov", "p:paid", "pago", Capabilities(True, False, 100000, 4096)),
+        Route("free_prov", "f:free", "free", Capabilities(True, False, 100000, 4096)),
+        Route("paid_prov", "p:paid", "paid", Capabilities(True, False, 100000, 4096)),
     ], 1.0)
     prov = {
-        "free_prov": Provider("free_prov", "gratis", "openai", "https://f.test", "", "/models", {}, []),
-        "paid_prov": Provider("paid_prov", "pago", "openai", "https://p.test", "", "/models", {}, []),
+        "free_prov": Provider("free_prov", "free", "openai", "https://f.test", "", "/models", {}, []),
+        "paid_prov": Provider("paid_prov", "paid", "openai", "https://p.test", "", "/models", {}, []),
     }
     vacio = {"choices": [{"message": {"role": "assistant", "content": None}}]}
 
@@ -1240,7 +1240,7 @@ def test_streaming_with_no_live_route_counts_no_paid_usage():
 
 
 def test_paid_streaming_counts_once_not_per_chunk():
-    # (d) a paid stream with SEVERAL chunks must increment uso_pago by exactly 1,
+    # (d) a paid stream with SEVERAL chunks must increment paid_usage by exactly 1,
     # not once per chunk.
     state, client = _free_and_paid_state(
         daily_paid_cap=5,
@@ -1303,8 +1303,8 @@ def test_the_per_minute_limit_counts_the_same_whichever_header_is_used():
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={
             "choices": [{"message": {"role": "assistant", "content": "hola"}}]})))
@@ -1339,9 +1339,9 @@ def test_the_ranking_marks_a_route_without_a_quality_probe_as_unmeasured(client)
 def test_the_ranking_carries_the_date_of_the_last_probe(state_client):
     state, client = state_client
     # 2026-08-17T12:00:00Z y 2026-08-17T18:00:00Z
-    state.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 3, 5,
+    state.store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 3, 5,
                                    1786968000.0)
-    state.store.record_probe("kilo/a:free", "salud", True, 120, 0, 200, 0, 0,
+    state.store.record_probe("kilo/a:free", "health", True, 120, 0, 200, 0, 0,
                                    1786989600.0)
     row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
     assert row["calidad_medida"] is True
@@ -1356,7 +1356,7 @@ def test_a_route_in_cooldown_does_not_lose_its_measured_quality_mark(state_clien
     # the newer fields: a punished route showed up as "never measured" and the
     # router sent it to the bottom twice over.
     state, client = state_client
-    state.store.record_probe("kilo/a:free", "calidad", True, 0, 0, 200, 5, 5,
+    state.store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 5, 5,
                                    1786968000.0)
     state.proxy.cooldowns["kilo/a:free"] = time.time() + 600
     row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
@@ -1444,8 +1444,8 @@ def _client_that_thinks(contenido):
     store = Storage(":memory:")
     store.create_schema()
     store.upsert_routes(
-        [Route("kilo", "a:free", "gratis", Capabilities(True, False, 100000, 4096))], 1.0)
-    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "",
+        [Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096))], 1.0)
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "",
                               "/models", {}, [])}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json={"choices": [

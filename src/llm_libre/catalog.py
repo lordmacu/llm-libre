@@ -169,7 +169,7 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
         routes.append(Route(
             provider=provider,
             model_id=m["id"],
-            tier="gratis",
+            tier="free",
             capabilities=capabilities,
             priority=priority,
         ))

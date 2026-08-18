@@ -416,8 +416,8 @@ stripping entirely.
             "headers": {
                 "X-Ruta-Usada": {"schema": {"type": "string"}, "example": "chatgpt/gpt-5-3-mini",
                                  "description": "Non-streaming only."},
-                "X-Tier": {"schema": {"type": "string", "enum": ["gratis", "pago"]},
-                          "example": "gratis", "description": "Non-streaming only."},
+                "X-Tier": {"schema": {"type": "string", "enum": ["free", "paid"]},
+                          "example": "free", "description": "Non-streaming only."},
                 "X-Intentos": {"schema": {"type": "integer"}, "example": 1,
                               "description": "Non-streaming only."},
             },
@@ -594,7 +594,7 @@ RANKING_DOCS = {
     "description": (
         "One row per active route, with every component that feeds its score "
         "broken out, **sorted with the exact same key the router uses** "
-        "(`(en_cooldown, tier == \"pago\", prioridad, unmeasured, -puntaje)`), "
+        "(`(en_cooldown, tier == \"paid\", prioridad, unmeasured, -puntaje)`), "
         "not by score alone -- so the top row here is genuinely the route the "
         "router would try first right now, matching `X-Ruta-Usada` on the next "
         "request. A route currently in cooldown sorts to the bottom of the "
@@ -619,14 +619,14 @@ RANKING_DOCS = {
     "responses": {
         200: {"description": "The ranking table.", "content": {"application/json": {"example": {
             "rutas": [
-                {"clave": "chatgpt/gpt-5-3-mini", "tier": "gratis", "prioridad": 0,
+                {"clave": "chatgpt/gpt-5-3-mini", "tier": "free", "prioridad": 0,
                  "puntaje": 0.7912, "calidad": 0.8, "calidad_medida": True,
                  "calidad_asumida": None, "ultima_sonda_calidad": "2026-08-17T03:12:04Z",
                  "ultima_sonda": "2026-08-17T08:00:11Z", "confiabilidad": 0.98,
                  "ttft_p50_ms": 900.0, "latencia_p50_ms": 4500.0,
                  "en_cooldown_hasta": 0.0, "tools": False, "vision": False,
                  "contexto": 128000},
-                {"clave": "kilo/cohere/north-mini-code:free", "tier": "gratis",
+                {"clave": "kilo/cohere/north-mini-code:free", "tier": "free",
                  "prioridad": 1, "puntaje": 0.8420, "calidad": 0.8,
                  "calidad_medida": True, "calidad_asumida": None,
                  "ultima_sonda_calidad": "2026-08-17T03:14:51Z",
@@ -634,14 +634,14 @@ RANKING_DOCS = {
                  "ttft_p50_ms": 650.0, "latencia_p50_ms": 2100.0,
                  "en_cooldown_hasta": 0.0, "tools": True, "vision": False,
                  "contexto": 128000},
-                {"clave": "kilo/poolside/laguna-s-2.1:free", "tier": "gratis",
+                {"clave": "kilo/poolside/laguna-s-2.1:free", "tier": "free",
                  "prioridad": 1, "puntaje": 0.5015, "calidad": 0.6,
                  "calidad_medida": False, "calidad_asumida": 0.6,
                  "ultima_sonda_calidad": None, "ultima_sonda": "2026-08-17T08:02:00Z",
                  "confiabilidad": 0.8, "ttft_p50_ms": 1500.0, "latencia_p50_ms": None,
                  "en_cooldown_hasta": 1755400930.0, "tools": False, "vision": False,
                  "contexto": 65536},
-                {"clave": "minimax/MiniMax-M3", "tier": "pago", "prioridad": 2,
+                {"clave": "minimax/MiniMax-M3", "tier": "paid", "prioridad": 2,
                  "puntaje": 0.95, "calidad": 0.9, "calidad_medida": True,
                  "calidad_asumida": None, "ultima_sonda_calidad": None,
                  "ultima_sonda": None, "confiabilidad": 0.8, "ttft_p50_ms": 1500.0,

@@ -2,19 +2,19 @@ from llm_libre.models import NEUTRAL_METRICS, Capabilities, Route, RouteRequest
 
 
 def test_a_routes_key_joins_provider_and_model():
-    r = Route("kilo", "poolside/laguna-s-2.1:free", "gratis",
+    r = Route("kilo", "poolside/laguna-s-2.1:free", "free",
               Capabilities(tools=True, vision=False, context=262144, max_output=32768))
     assert r.key == "kilo/poolside/laguna-s-2.1:free"
 
 
 def test_a_route_without_a_declared_priority_lands_last_by_default():
-    r = Route("kilo", "modelo:free", "gratis",
+    r = Route("kilo", "modelo:free", "free",
               Capabilities(tools=True, vision=False, context=1000, max_output=100))
     assert r.priority == 100
 
 
 def test_the_priority_can_be_declared_explicitly():
-    r = Route("chatgpt", "gpt-5-3-mini", "gratis",
+    r = Route("chatgpt", "gpt-5-3-mini", "free",
               Capabilities(tools=False, vision=False, context=128000, max_output=8192),
               priority=0)
     assert r.priority == 0

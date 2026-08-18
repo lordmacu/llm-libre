@@ -416,7 +416,7 @@ class Proxy:
             # this is a no-op: it changes no existing test.
             punish_at = now + latency_ms / 1000.0
 
-            if code == 200 and route.tier == "pago" and on_billable_attempt is not None:
+            if code == 200 and route.tier == "paid" and on_billable_attempt is not None:
                 on_billable_attempt(route)
 
             # A 200 with an unparseable body (e.g. an HTML maintenance page served
@@ -580,7 +580,7 @@ class Proxy:
                             route.key, False, 0, resp.status_code, now,
                             is_client_error=_is_client_error(resp.status_code))
                         continue
-                    if route.tier == "pago" and on_billable_attempt is not None:
+                    if route.tier == "paid" and on_billable_attempt is not None:
                         on_billable_attempt(route)
                     rec = CompositeStreamTrimmer(unwrap_canvas=provider.unwraps_canvas)
 
@@ -890,7 +890,7 @@ class Proxy:
         shortcut of its own)."""
         if is_probe:
             self._punish(route.key, punish_at)
-        elif route.tier == "pago":
+        elif route.tier == "paid":
             self._suspect_paid(route, punish_at)
         else:
             self._suspect(route, now)
@@ -1040,7 +1040,7 @@ class Proxy:
                 # the probe would be enough for `has_liveness_evidence` (round 9)
                 # to declare it dead -- a momentary capacity signal is not
                 # evidence of death.
-                self.store.record_probe(route.key, "salud", r.status == 200, ms, 0,
+                self.store.record_probe(route.key, "health", r.status == 200, ms, 0,
                                              r.upstream_code, 0, 0, resolved_at)
             if r.status == 200 and self._cooldown_generation.get(route.key, 0) == generation_before:
                 self._clear_punishment(route.key)

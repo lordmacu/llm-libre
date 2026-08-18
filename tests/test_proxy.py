@@ -19,11 +19,11 @@ YAML_REAL = str(Path(__file__).resolve().parents[1] / "proveedores.yaml")
 BODY = {"model": "auto", "messages": [{"role": "user", "content": "hola"}]}
 
 
-def _route(model, provider="kilo", tier="gratis"):
+def _route(model, provider="kilo", tier="free"):
     return Route(provider, model, tier, Capabilities(True, False, 100000, 4096))
 
 
-def _prov(pid="kilo", tier="gratis", unwraps_canvas=False):
+def _prov(pid="kilo", tier="free", unwraps_canvas=False):
     return Provider(pid, tier, "openai", f"https://{pid}.test", "", "/models", {}, [],
                      unwraps_canvas=unwraps_canvas)
 
@@ -100,7 +100,7 @@ async def test_a_429_without_retry_after_punishes_with_no_probe_at_all():
     p = _proxy(lambda req: httpx.Response(429))
     await p.complete([_route("a:free")], BODY, now=0.0)
     await p.wait_for_pending_probes()
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 async def test_a_success_clears_the_accumulated_punishment():
@@ -184,7 +184,7 @@ async def test_it_sends_the_models_real_id_not_the_alias():
 async def test_it_records_one_event_per_attempt():
     p = _proxy(lambda req: httpx.Response(200, json=_ok()))
     await p.complete([_route("a:free")], BODY, now=0.0)
-    rows = p.store._con.execute("SELECT clave, ok FROM eventos").fetchall()
+    rows = p.store._con.execute("SELECT key, ok FROM events").fetchall()
     assert rows == [("kilo/a:free", 1)]
 
 
@@ -256,7 +256,7 @@ async def test_a_200_without_content_is_recorded_as_a_failed_event():
     # returns empty RAISES its reliability every time it fails.
     p = _proxy(lambda req: httpx.Response(200, json=_empty()))
     await p.complete([_route("a:free")], BODY, now=0.0)
-    rows = p.store._con.execute("SELECT clave, ok FROM eventos").fetchall()
+    rows = p.store._con.execute("SELECT key, ok FROM events").fetchall()
     assert rows == [("kilo/a:free", 0)]
 
 
@@ -338,7 +338,7 @@ async def test_the_non_streaming_path_stores_latency_not_ttft():
     p = _proxy(lambda req: httpx.Response(200, json=_ok()))
     await p.complete([_route("a:free")], BODY, now=0.0)
     row = p.store._con.execute(
-        "SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
+        "SELECT ttft_ms, latency_ms FROM events").fetchone()
     assert row[0] == 0                # no ttft is invented
     assert row[1] is not None         # but the real latency is recorded
 
@@ -400,7 +400,7 @@ async def test_below_the_suspicion_threshold_no_probe_fires_and_nothing_is_punis
         await p.complete([_route("a:free")], BODY, now=float(i))
     await p.wait_for_pending_probes()
     assert "kilo/a:free" not in p.cooldowns
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 async def test_crossing_the_threshold_fires_a_probe_that_punishes_if_the_route_is_broken():
@@ -409,11 +409,11 @@ async def test_crossing_the_threshold_fires_a_probe_that_punishes_if_the_route_i
         await p.complete([_route("a:free")], BODY, now=float(i))
     await p.wait_for_pending_probes()
     assert p.cooldowns["kilo/a:free"] > 0.0
-    # The probe left its own record in `sondas` -- the same evidence
+    # The probe left its own record in `probes` -- the same evidence
     # Storage.has_liveness_evidence reads for /health.
     row = p.store._con.execute(
-        "SELECT tipo, ok FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
-    assert row == ("salud", 0)
+        "SELECT kind, ok FROM probes WHERE key = 'kilo/a:free'").fetchone()
+    assert row == ("health", 0)
 
 
 async def test_a_route_in_probe_cooldown_is_skipped_on_the_next_request():
@@ -447,7 +447,7 @@ async def test_a_success_clears_the_accumulated_suspicion():
     await p.complete([_route("a:free")], BODY, now=float(SUSPICION_THRESHOLD))
     await p.wait_for_pending_probes()
     assert "kilo/a:free" not in p.cooldowns
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
     # And SUSPICION_THRESHOLD NEW failures are needed to accumulate again --
     # one alone is not enough, which is precisely what would prove the suspicion
@@ -469,7 +469,7 @@ async def test_a_429_punishes_on_the_first_hit_without_going_through_suspicion()
     p = _proxy(lambda req: httpx.Response(429))
     await p.complete([_route("a:free")], BODY, now=0.0)
     assert "kilo/a:free" in p.cooldowns
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 async def test_it_uses_the_global_timeout_when_the_provider_declares_none():
@@ -493,7 +493,7 @@ async def test_it_uses_the_providers_own_timeout_when_declared():
 
     store = Storage(":memory:")
     store.create_schema()
-    lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
+    lento = Provider("lento", "free", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     await p.complete([_route("a:free", provider="lento")], BODY, now=0.0)
@@ -554,7 +554,7 @@ async def test_three_consecutive_400s_neither_trigger_suspicion_nor_punish():
     assert "kilo/a:free" not in p.cooldowns
     # Not even a confirming probe was fired -- a 400 never counts as suspicion;
     # it is not that the probe came back "healthy".
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 async def test_after_consecutive_400s_a_valid_request_from_another_key_is_still_served():
@@ -629,7 +629,7 @@ async def test_a_400_is_recorded_but_flagged_as_a_client_error():
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
     await p.complete([_route("a:free")], BODY, now=0.0)
     row = p.store._con.execute(
-        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+        "SELECT ok, is_client_error FROM events WHERE key = 'kilo/a:free'").fetchone()
     assert row == (0, 1)
 
 
@@ -637,7 +637,7 @@ async def test_a_500_is_recorded_without_the_client_error_flag():
     p = _proxy(lambda req: httpx.Response(500))
     await p.complete([_route("a:free")], BODY, now=0.0)
     row = p.store._con.execute(
-        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+        "SELECT ok, is_client_error FROM events WHERE key = 'kilo/a:free'").fetchone()
     assert row == (0, 0)
 
 
@@ -708,7 +708,7 @@ async def test_a_405_is_recorded_without_the_client_error_flag():
     p = _proxy(lambda req: httpx.Response(405))
     await p.complete([_route("a:free")], BODY, now=0.0)
     row = p.store._con.execute(
-        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+        "SELECT ok, is_client_error FROM events WHERE key = 'kilo/a:free'").fetchone()
     assert row == (0, 0)
 
 
@@ -836,13 +836,13 @@ async def test_an_identical_failure_in_a_multi_route_chain_punishes_no_healthy_r
 
 
 async def test_the_event_is_still_recorded_even_though_suspicion_does_not_punish():
-    # The fix is ONLY about cooldown. `eventos`/reliability (a measurement, not an
+    # The fix is ONLY about cooldown. `events`/reliability (a measurement, not an
     # exclusion) keep counting every attempt unchanged -- Part 1 is untouched.
     routes = _multi("m0:free", "m1:free")
     p = _proxy(lambda req: httpx.Response(403, json={"error": "contenido flageado"}))
     await p.complete(routes, BODY, now=0.0)
     rows = p.store._con.execute(
-        "SELECT clave, ok, es_error_cliente FROM eventos ORDER BY clave").fetchall()
+        "SELECT key, ok, is_client_error FROM events ORDER BY key").fetchall()
     assert rows == [("kilo/m0:free", 0, 0), ("kilo/m1:free", 0, 0)]
 
 
@@ -899,7 +899,7 @@ async def test_a_429_in_a_fully_failing_chain_still_punishes_immediately():
     assert "kilo/m0:free" in p.cooldowns
     assert "kilo/m1:free" in p.cooldowns
     assert "kilo/m2:free" in p.cooldowns
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 # --- The three remaining requirements the gate asked for explicitly: rate
@@ -987,13 +987,13 @@ async def test_a_success_resets_the_suspicion_counter_not_a_clock():
 
 async def test_paid_routes_punish_directly_with_no_probe_at_all():
     p = _proxy(lambda req: httpx.Response(500), providers=("minimax",))
-    paid_route = _route("m1", provider="minimax", tier="pago")
+    paid_route = _route("m1", provider="minimax", tier="paid")
     for i in range(SUSPICION_THRESHOLD):
         await p.complete([paid_route], BODY, now=float(i))
     await p.wait_for_pending_probes()
     assert p.cooldowns["minimax/m1"] > 0.0
     # Directly: no probe was ever fired (or spent) to get there.
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 # --- Round 10, MEDIUM from the gate: the direct paid punishment reused _punish's
@@ -1011,7 +1011,7 @@ async def test_the_direct_paid_punishment_is_flat_and_does_not_escalate():
     # (round 9's _punish), the second round would come out at 120s, well
     # outside a half-second tolerance.
     p = _proxy(lambda req: httpx.Response(500), providers=("minimax",))
-    paid_route = _route("m1", provider="minimax", tier="pago")
+    paid_route = _route("m1", provider="minimax", tier="paid")
     now = 0.0
     for i in range(SUSPICION_THRESHOLD):
         await p.complete([paid_route], BODY, now=now + i)
@@ -1027,7 +1027,7 @@ async def test_the_direct_paid_punishment_is_flat_and_does_not_escalate():
 
 async def test_below_the_threshold_a_paid_route_is_not_punished():
     p = _proxy(lambda req: httpx.Response(500), providers=("minimax",))
-    paid_route = _route("m1", provider="minimax", tier="pago")
+    paid_route = _route("m1", provider="minimax", tier="paid")
     for i in range(SUSPICION_THRESHOLD - 1):
         await p.complete([paid_route], BODY, now=float(i))
     await p.wait_for_pending_probes()
@@ -1044,7 +1044,7 @@ async def test_a_paid_success_clears_the_paid_failure_counter():
         return httpx.Response(200, json=_ok())
 
     p = _proxy(handler, providers=("minimax",))
-    paid_route = _route("m1", provider="minimax", tier="pago")
+    paid_route = _route("m1", provider="minimax", tier="paid")
     for i in range(SUSPICION_THRESHOLD - 1):
         await p.complete([paid_route], BODY, now=float(i))
     await p.complete([paid_route], BODY, now=float(SUSPICION_THRESHOLD))  # exito
@@ -1278,14 +1278,14 @@ async def test_a_429_against_the_probe_is_not_recorded_as_a_failed_health_probe(
     # as a failed health probe would confuse it with a genuinely downed route.
     p = _proxy(lambda req: httpx.Response(429))
     await p._probe_on_demand(_route("a:free"), now=100.0)
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
     # But it DID punish -- the 429 has its own path, bypassing probes entirely.
     assert "kilo/a:free" in p.cooldowns
 
 
 async def test_the_probe_row_is_stamped_at_resolution_not_at_scheduling():
     # The same class of bug as HIGH 2 (round 9), one level up: for a hung route,
-    # the `sondas` row was dated up to TIMEOUT_S=90s in the past, which could
+    # the `probes` row was dated up to TIMEOUT_S=90s in the past, which could
     # mis-order the `ORDER BY momento DESC` that has_liveness_evidence relies on.
     delay_s = 0.05
 
@@ -1297,5 +1297,5 @@ async def test_the_probe_row_is_stamped_at_resolution_not_at_scheduling():
     now = 1000.0
     await p._probe_on_demand(_route("a:free"), now=now)
     row = p.store._con.execute(
-        "SELECT momento FROM sondas WHERE clave = 'kilo/a:free'").fetchone()
+        "SELECT at FROM probes WHERE key = 'kilo/a:free'").fetchone()
     assert row[0] >= now + delay_s

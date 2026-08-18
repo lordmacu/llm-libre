@@ -3,34 +3,61 @@ import sqlite3
 from llm_libre.models import (NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS,
                                Capabilities, Metrics, Route)
 
-# The SQL below is FROZEN. The database lives on disk in production (the /datos
-# volume, which deliberately survives redeploys), so renaming a table or a column
-# needs a migration, not an edit. tests/test_wire_contract.py asserts the table
-# names. Python identifiers around it are free to change; the SQL text is not.
+# The schema below is the CURRENT shape. A live database (the /datos volume, which
+# deliberately survives redeploys) may still carry the previous Spanish-named
+# shape, so `_migrate` renames tables, columns and stored values in place -- see
+# `_SPANISH_TABLES`, `_SPANISH_COLUMNS` and `_SPANISH_VALUES` below.
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS rutas (
-    clave TEXT PRIMARY KEY, proveedor TEXT NOT NULL, modelo_id TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS routes (
+    key TEXT PRIMARY KEY, provider TEXT NOT NULL, model_id TEXT NOT NULL,
     tier TEXT NOT NULL, tools INTEGER NOT NULL, vision INTEGER NOT NULL,
-    contexto INTEGER NOT NULL, max_salida INTEGER NOT NULL,
-    visto_por_ultima_vez REAL NOT NULL, activa INTEGER NOT NULL DEFAULT 1,
-    prioridad INTEGER NOT NULL DEFAULT 100);
+    context INTEGER NOT NULL, max_output INTEGER NOT NULL,
+    last_seen REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+    priority INTEGER NOT NULL DEFAULT 100);
 
-CREATE TABLE IF NOT EXISTS sondas (
-    clave TEXT NOT NULL, tipo TEXT NOT NULL, momento REAL NOT NULL,
-    ok INTEGER NOT NULL, latencia_ms INTEGER, ttft_ms INTEGER, codigo_http INTEGER,
-    casos_pasados INTEGER, casos_totales INTEGER);
-CREATE INDEX IF NOT EXISTS ix_sondas ON sondas(clave, tipo, momento DESC);
+CREATE TABLE IF NOT EXISTS probes (
+    key TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL,
+    ok INTEGER NOT NULL, latency_ms INTEGER, ttft_ms INTEGER, http_code INTEGER,
+    cases_passed INTEGER, cases_total INTEGER);
+CREATE INDEX IF NOT EXISTS ix_probes ON probes(key, kind, at DESC);
 
-CREATE TABLE IF NOT EXISTS eventos (
-    clave TEXT NOT NULL, momento REAL NOT NULL, ok INTEGER NOT NULL,
-    ttft_ms INTEGER, codigo_http INTEGER, latencia_ms INTEGER,
-    es_error_cliente INTEGER NOT NULL DEFAULT 0);
-CREATE INDEX IF NOT EXISTS ix_eventos ON eventos(clave, momento DESC);
+CREATE TABLE IF NOT EXISTS events (
+    key TEXT NOT NULL, at REAL NOT NULL, ok INTEGER NOT NULL,
+    ttft_ms INTEGER, http_code INTEGER, latency_ms INTEGER,
+    is_client_error INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS ix_events ON events(key, at DESC);
 
-CREATE TABLE IF NOT EXISTS uso_pago (
-    llave TEXT NOT NULL, dia TEXT NOT NULL, peticiones INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (llave, dia));
+CREATE TABLE IF NOT EXISTS paid_usage (
+    api_key TEXT NOT NULL, day TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (api_key, day));
 """
+
+# The previous Spanish-named shape, kept only so `_migrate` can recognise it and
+# rename it in place. A production database carries real telemetry (thousands of
+# probe and event rows), so this is a RENAME, never a drop-and-recreate.
+_SPANISH_TABLES = [("rutas", "routes"), ("sondas", "probes"),
+                   ("eventos", "events"), ("uso_pago", "paid_usage")]
+
+_SPANISH_COLUMNS = {
+    "routes": [("clave", "key"), ("proveedor", "provider"), ("modelo_id", "model_id"),
+               ("contexto", "context"), ("max_salida", "max_output"),
+               ("visto_por_ultima_vez", "last_seen"), ("activa", "active"),
+               ("prioridad", "priority")],
+    "probes": [("clave", "key"), ("tipo", "kind"), ("momento", "at"),
+               ("latencia_ms", "latency_ms"), ("codigo_http", "http_code"),
+               ("casos_pasados", "cases_passed"), ("casos_totales", "cases_total")],
+    "events": [("clave", "key"), ("momento", "at"), ("codigo_http", "http_code"),
+               ("latencia_ms", "latency_ms"), ("es_error_cliente", "is_client_error")],
+    "paid_usage": [("llave", "api_key"), ("dia", "day"), ("peticiones", "requests")],
+}
+
+# Stored VALUES, not just names: `tier` and `kind` carry Spanish words in every
+# existing row. Renaming the columns without rewriting these would leave the
+# queries looking for "free" against rows that still say "gratis" -- a silent,
+# total loss of routing and of every quality measurement.
+_SPANISH_VALUES = [("routes", "tier", "gratis", "free"), ("routes", "tier", "pago", "paid"),
+                   ("probes", "kind", "salud", "health"),
+                   ("probes", "kind", "calidad", "quality")]
 
 WINDOW = 50  # how many recent observations weigh in reliability and latency
 
@@ -51,12 +78,12 @@ LIVENESS_WINDOW_S = 24 * 3600.0
 # streaming path writes there. Both paths used to: the non-streaming one put the
 # COMPLETE round-trip (7-27 s on a reasoning model, because nothing arrives until
 # it finishes generating) and the streaming one the real time to the first chunk
-# (~200 ms). Mixed into one p50, the number meant nothing and the `rapido` profile
+# (~200 ms). Mixed into one p50, the number meant nothing and the `fast` profile
 # was ordering by noise.
 #
-# `latencia_ms` is the complete round-trip, which is what a non-streaming path
+# `latency_ms` is the complete round-trip, which is what a non-streaming path
 # (and the health probe) actually measures. It is stored -- design section 5
-# already asked for it in `eventos` -- and exposed in /v1/ranking, but it does NOT
+# already asked for it in `events` -- and exposed in /v1/ranking, but it does NOT
 # feed the score's latency factor, which is calibrated on the ttft scale.
 #
 # Accepted consequence: in a deployment using only the non-streaming path, no ttft
@@ -72,31 +99,95 @@ class Storage:
         self._con.execute("PRAGMA journal_mode=WAL")
 
     def create_schema(self) -> None:
+        # ORDER MATTERS: the Spanish shape is renamed BEFORE `CREATE TABLE IF NOT
+        # EXISTS` runs. The other way round, the CREATE would find no `routes`,
+        # build an EMPTY one next to the populated `rutas`, and the rename would
+        # then fail against a name that is already taken -- leaving the gateway
+        # reading an empty catalogue while every real row sat in the old table.
+        self._rename_spanish_shape()
         self._con.executescript(SCHEMA)
         self._migrate()
+        self._con.commit()
+
+    def _table_exists(self, name: str) -> bool:
+        return self._con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,)).fetchone() is not None
+
+    def _columns(self, table: str) -> set[str]:
+        return {f[1] for f in self._con.execute(f"PRAGMA table_info({table})")}
+
+    def _rename_spanish_shape(self) -> None:
+        """Migrate a database written under the previous Spanish names to the
+        current English ones, IN PLACE and PRESERVING EVERY ROW.
+
+        This is not cosmetic bookkeeping: the production database lives on the
+        /datos volume (which deliberately survives redeploys) and carries the only
+        copy of the telemetry -- thousands of probe and event rows that are what
+        the router scores routes with. Recreating the schema instead of renaming
+        it would silently reset every quality measurement and every reliability
+        window to neutral, and the gateway would look perfectly healthy while
+        routing blind for days until the probing cycles measured it all again.
+
+        Three levels, in order, each guarded so the whole thing is idempotent and
+        safe on a database that is already migrated, half-migrated, or brand new:
+
+          1. TABLES. Renamed only when the old name exists and the new one does
+             not. Indexes follow their table automatically but KEEP THEIR OLD
+             NAMES, so the legacy ones are dropped -- SCHEMA recreates them under
+             the new names, and leaving both would mean two identical indexes on
+             the same table.
+          2. COLUMNS. Only those actually present are renamed: an old enough
+             database may predate `latencia_ms` or `es_error_cliente` (the
+             add-column migration below is what fills those in), so the map is a
+             superset of what any given database holds.
+          3. VALUES. `tier` and `kind` store Spanish WORDS, not just Spanish
+             column names. Renaming the columns without rewriting the contents
+             would leave every query asking for 'free' against rows that still say
+             'gratis' -- no error, no log line: zero routes match, and the gateway
+             answers 503 to everything.
+
+        `ALTER TABLE ... RENAME COLUMN` needs SQLite >= 3.25 (2018); production
+        runs 3.46."""
+        for old, new in _SPANISH_TABLES:
+            if self._table_exists(old) and not self._table_exists(new):
+                self._con.execute(f"ALTER TABLE {old} RENAME TO {new}")
+        for legacy_index in ("ix_sondas", "ix_eventos"):
+            self._con.execute(f"DROP INDEX IF EXISTS {legacy_index}")
+        for table, renames in _SPANISH_COLUMNS.items():
+            if not self._table_exists(table):
+                continue
+            present = self._columns(table)
+            for old, new in renames:
+                if old in present and new not in present:
+                    self._con.execute(
+                        f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+        for table, column, old, new in _SPANISH_VALUES:
+            if self._table_exists(table) and column in self._columns(table):
+                self._con.execute(
+                    f"UPDATE {table} SET {column} = ? WHERE {column} = ?", (new, old))
         self._con.commit()
 
     def _migrate(self) -> None:
         """`CREATE TABLE IF NOT EXISTS` does not add columns to a table that
         already exists: a live database (the /datos volume, which deliberately
-        survives redeploys) would be left without `eventos.latencia_ms` -- or,
-        since Task 13, without `rutas.priority` or `eventos.es_error_cliente`.
+        survives redeploys) would be left without `events.latency_ms` -- or,
+        since Task 13, without `routes.priority` or `events.is_client_error`.
         Same pattern for all three: detect the missing column and add it with a
-        default that does not break existing rows. OLD `eventos` rows (written
-        before the distinction existed) migrate to `es_error_cliente=0` -- they
+        default that does not break existing rows. OLD `events` rows (written
+        before the distinction existed) migrate to `is_client_error=0` -- they
         keep counting as route failures, as they did before: there is no way to
         retroactively reclassify something that was never distinguished when it
         was written."""
-        event_columns = {f[1] for f in self._con.execute("PRAGMA table_info(eventos)")}
-        if "latencia_ms" not in event_columns:
-            self._con.execute("ALTER TABLE eventos ADD COLUMN latencia_ms INTEGER")
-        if "es_error_cliente" not in event_columns:
+        event_columns = self._columns("events")
+        if "latency_ms" not in event_columns:
+            self._con.execute("ALTER TABLE events ADD COLUMN latency_ms INTEGER")
+        if "is_client_error" not in event_columns:
             self._con.execute(
-                "ALTER TABLE eventos ADD COLUMN es_error_cliente INTEGER NOT NULL DEFAULT 0")
-        route_columns = {f[1] for f in self._con.execute("PRAGMA table_info(rutas)")}
-        if "prioridad" not in route_columns:
+                "ALTER TABLE events ADD COLUMN is_client_error INTEGER NOT NULL DEFAULT 0")
+        if "priority" not in self._columns("routes"):
             self._con.execute(
-                "ALTER TABLE rutas ADD COLUMN prioridad INTEGER NOT NULL DEFAULT 100")
+                "ALTER TABLE routes ADD COLUMN priority INTEGER NOT NULL DEFAULT 100")
 
     def upsert_routes(self, routes: list[Route], timestamp: float,
                       deactivate_missing: bool = True,
@@ -104,14 +195,14 @@ class Storage:
         for r in routes:
             c = r.capabilities
             self._con.execute(
-                """INSERT INTO rutas (clave, proveedor, modelo_id, tier, tools, vision,
-                       contexto, max_salida, visto_por_ultima_vez, activa, prioridad)
+                """INSERT INTO routes (key, provider, model_id, tier, tools, vision,
+                       context, max_output, last_seen, active, priority)
                    VALUES (?,?,?,?,?,?,?,?,?,1,?)
-                   ON CONFLICT(clave) DO UPDATE SET
+                   ON CONFLICT(key) DO UPDATE SET
                        tools=excluded.tools, vision=excluded.vision,
-                       contexto=excluded.contexto, max_salida=excluded.max_salida,
-                       visto_por_ultima_vez=excluded.visto_por_ultima_vez, activa=1,
-                       prioridad=excluded.prioridad""",
+                       context=excluded.context, max_output=excluded.max_output,
+                       last_seen=excluded.last_seen, active=1,
+                       priority=excluded.priority""",
                 (r.key, r.provider, r.model_id, r.tier, int(c.tools), int(c.vision),
                  c.context, c.max_output, timestamp, r.priority))
         # What was not seen in this pass is deactivated, not deleted: the history
@@ -123,7 +214,7 @@ class Storage:
         # `provider`, when passed, SCOPES that deactivation to that provider's
         # routes: without it, an UPDATE not filtered by provider would also switch
         # off routes belonging to providers UNRELATED to this call (their
-        # visto_por_ultima_vez is always older than `timestamp`, so they would
+        # last_seen is always older than `timestamp`, so they would
         # fall too). It is what lets one provider's sync decide ITS removals
         # without waiting to learn what happened to the others in the same pass.
         # None (the default) preserves the historical behaviour: scoped to
@@ -131,16 +222,16 @@ class Storage:
         if deactivate_missing:
             if provider is not None:
                 self._con.execute(
-                    "UPDATE rutas SET activa = 0 WHERE visto_por_ultima_vez < ? AND proveedor = ?",
+                    "UPDATE routes SET active = 0 WHERE last_seen < ? AND provider = ?",
                     (timestamp, provider))
             else:
                 self._con.execute(
-                    "UPDATE rutas SET activa = 0 WHERE visto_por_ultima_vez < ?", (timestamp,))
+                    "UPDATE routes SET active = 0 WHERE last_seen < ?", (timestamp,))
         self._con.commit()
 
     def deactivate_unregistered_providers(self, known_providers: set[str]) -> int:
-        """Switch off (activa=0, NEVER delete -- the history is used to detect
-        model renames, see upsert_routes) every route whose `proveedor` is no
+        """Switch off (active=0, NEVER delete -- the history is used to detect
+        model renames, see upsert_routes) every route whose `provider` is no
         longer in `known_providers`.
 
         It exists because `upsert_routes` (and therefore the removal of routes
@@ -148,7 +239,7 @@ class Storage:
         (`sync_catalogue` invokes it once per provider, with its own
         `provider=p.id`): a provider REMOVED entirely from the registry
         (`proveedores.yaml`) is never synced again, so without this separate sweep
-        its routes would stay `activa=1` forever -- visible in `GET /v1/models`
+        its routes would stay `active=1` forever -- visible in `GET /v1/models`
         and `GET /v1/ranking`, and eligible as routing candidates that would
         always fail (a 401 from a key that no longer exists, for instance),
         with nothing to switch them off.
@@ -181,22 +272,22 @@ class Storage:
         if not known_providers:
             return 0
         rows = self._con.execute(
-            "SELECT DISTINCT proveedor FROM rutas WHERE activa = 1").fetchall()
+            "SELECT DISTINCT provider FROM routes WHERE active = 1").fetchall()
         orphans = [p for (p,) in rows if p not in known_providers]
         if not orphans:
             return 0
         placeholders = ",".join("?" * len(orphans))
         cur = self._con.execute(
-            f"UPDATE rutas SET activa = 0 WHERE activa = 1 AND proveedor IN ({placeholders})",
+            f"UPDATE routes SET active = 0 WHERE active = 1 AND provider IN ({placeholders})",
             orphans)
         self._con.commit()
         return cur.rowcount
 
     def active_routes(self) -> list[Route]:
         rows = self._con.execute(
-            """SELECT proveedor, modelo_id, tier, tools, vision, contexto, max_salida,
-                      prioridad
-               FROM rutas WHERE activa = 1 ORDER BY clave""").fetchall()
+            """SELECT provider, model_id, tier, tools, vision, context, max_output,
+                      priority
+               FROM routes WHERE active = 1 ORDER BY key""").fetchall()
         return [Route(p, m, t, Capabilities(bool(to), bool(vi), cx, ms), priority=pr)
                 for p, m, t, to, vi, cx, ms, pr in rows]
 
@@ -204,7 +295,7 @@ class Storage:
                      ttft_ms: int, http_code: int, cases_passed: int,
                      cases_total: int, timestamp: float) -> None:
         self._con.execute(
-            "INSERT INTO sondas VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO probes VALUES (?,?,?,?,?,?,?,?,?)",
             (key, kind, timestamp, int(ok), latency_ms, ttft_ms, http_code,
              cases_passed, cases_total))
         self._con.commit()
@@ -223,24 +314,24 @@ class Storage:
         being written as an ordinary failed event, and that feeds `_reliability`,
         which `/health` uses to declare a route dead. Reproduced: 26 consecutive
         malformed requests from ONE key were enough to sink the reliability of
-        EVERY route, with /health reporting "caido" while a DIFFERENT key kept
+        EVERY route, with /health reporting "down" while a DIFFERENT key kept
         receiving 200s the whole time -- worse than the 503 round 3 already fixed,
         because on the persistent /datos volume a process restart does NOT clear
-        the history: it keeps reporting "caido" against the same database. The row
-        is STORED anyway (it stays diagnosable: an operator looking at `eventos`
+        the history: it keeps reporting "down" against the same database. The row
+        is STORED anyway (it stays diagnosable: an operator looking at `events`
         can see the 4xx) but `_reliability` excludes it from the window entirely --
         it neither counts as a failure nor takes up a slot in the last WINDOW
         observations."""
         self._con.execute(
-            """INSERT INTO eventos (clave, momento, ok, ttft_ms, codigo_http, latencia_ms,
-                   es_error_cliente)
+            """INSERT INTO events (key, at, ok, ttft_ms, http_code, latency_ms,
+                   is_client_error)
                VALUES (?,?,?,?,?,?,?)""",
             (key, timestamp, int(ok), ttft_ms, http_code, latency_ms, int(is_client_error)))
         self._con.commit()
 
     def metrics(self) -> dict[str, Metrics]:
         out: dict[str, Metrics] = {}
-        for (key,) in self._con.execute("SELECT clave FROM rutas WHERE activa = 1"):
+        for (key,) in self._con.execute("SELECT key FROM routes WHERE active = 1"):
             quality, measured_at = self._quality(key)
             out[key] = Metrics(
                 quality=quality,
@@ -259,32 +350,32 @@ class Storage:
         -- and whoever consumes it has to be able to tell a measured 0.6 from an
         assumed one."""
         row = self._con.execute(
-            """SELECT casos_pasados, casos_totales, momento FROM sondas
-               WHERE clave = ? AND tipo = 'calidad' AND casos_totales > 0
-               ORDER BY momento DESC LIMIT 1""", (key,)).fetchone()
+            """SELECT cases_passed, cases_total, at FROM probes
+               WHERE key = ? AND kind = 'quality' AND cases_total > 0
+               ORDER BY at DESC LIMIT 1""", (key,)).fetchone()
         if not row:
             return NEUTRAL_QUALITY, None
         return row[0] / row[1], row[2]
 
     def _last_probe(self, key: str) -> float | None:
         row = self._con.execute(
-            "SELECT MAX(momento) FROM sondas WHERE clave = ?", (key,)).fetchone()
+            "SELECT MAX(at) FROM probes WHERE key = ?", (key,)).fetchone()
         return row[0] if row else None
 
     def _reliability(self, key: str) -> float:
-        # `eventos.es_error_cliente = 0` excludes the client's 4xx (see the
+        # `events.is_client_error = 0` excludes the client's 4xx (see the
         # docstring of record_event): they neither count as failures NOR take up a
         # slot in the window, as if that request had never reached this route.
-        # `sondas` has no such column -- probes are generated by the gateway
+        # `probes` has no such column -- probes are generated by the gateway
         # itself with a fixed payload, they are never "the client's fault" in this
         # sense -- so all of them are included, as before.
         rows = self._con.execute(
             """SELECT ok FROM (
-                   SELECT momento, ok FROM sondas WHERE clave = ?
+                   SELECT at, ok FROM probes WHERE key = ?
                    UNION ALL
-                   SELECT momento, ok FROM eventos
-                   WHERE clave = ? AND es_error_cliente = 0
-               ) ORDER BY momento DESC LIMIT ?""", (key, key, WINDOW)).fetchall()
+                   SELECT at, ok FROM events
+                   WHERE key = ? AND is_client_error = 0
+               ) ORDER BY at DESC LIMIT ?""", (key, key, WINDOW)).fetchall()
         if not rows:
             return NEUTRAL_RELIABILITY
         return sum(f[0] for f in rows) / len(rows)
@@ -304,9 +395,9 @@ class Storage:
 
         The right question is not "how many failures did it have" but "what is the
         MOST RECENT SIGNAL available about this route": within
-        `LIVENESS_WINDOW_S`, the last real SUCCESS (`eventos.ok=1`) is compared
-        with the last HEALTH PROBE (`sondas.tipo='salud'`, any result) and the one
-        with the newer `momento` wins.
+        `LIVENESS_WINDOW_S`, the last real SUCCESS (`events.ok=1`) is compared
+        with the last HEALTH PROBE (`probes.kind='health'`, any result) and the one
+        with the newer `at` wins.
 
           - If the newest signal is a real success, or a SUCCESSFUL probe: alive.
           - If the newest signal is a FAILED probe: dead. The probe is the most
@@ -326,11 +417,11 @@ class Storage:
             (below) -- a freshly seen route was not born dead, it simply has not
             had its first chance yet.
 
-        FAILED events (`eventos.ok=0`) never contribute evidence of death directly
+        FAILED events (`events.ok=0`) never contribute evidence of death directly
         here, only indirectly via the "no telemetry" check: they remain ambiguous
         (a 403 may be content moderation for one particular client) in a way that
         a probe -- a fixed request, controlled by the gateway itself -- never is.
-        Events with `es_error_cliente=1` (Part 1) do not count as "real" telemetry
+        Events with `is_client_error=1` (Part 1) do not count as "real" telemetry
         for the fallback check either: a route that ONLY received malformed
         requests (400/413/422) has not had its first real chance yet, same as one
         with no traffic at all.
@@ -364,13 +455,13 @@ class Storage:
         cutoff = now - LIVENESS_WINDOW_S
         signals = self._con.execute(
             """SELECT ok FROM (
-                   SELECT momento, 1 AS ok FROM eventos
-                       WHERE clave = ? AND ok = 1 AND momento >= ?
+                   SELECT at, 1 AS ok FROM events
+                       WHERE key = ? AND ok = 1 AND at >= ?
                    UNION ALL
-                   SELECT momento, ok FROM sondas
-                       WHERE clave = ? AND tipo = 'salud' AND momento >= ?
+                   SELECT at, ok FROM probes
+                       WHERE key = ? AND kind = 'health' AND at >= ?
                )
-               ORDER BY momento DESC
+               ORDER BY at DESC
                LIMIT 2""",
             (key, cutoff, key, cutoff)).fetchall()
         if signals:
@@ -387,14 +478,14 @@ class Storage:
         # authoritative: it is the same principle that motivates suspicion+probe
         # since round 8 (a client's traffic can only ask the gateway to go and
         # look, never exclude a route itself). Measured: ONE failed real request
-        # was enough to drop /health to "caido" without ANY probe having run --
+        # was enough to drop /health to "down" without ANY probe having run --
         # fewer than SUSPICION_THRESHOLD, so no on-demand probe ever fires to rescue
         # it. It directly contradicts the module's principle: "a thousand failures
         # from one client do not prove the route is broken". Now ONLY a PROBE
         # (periodic or on-demand, successful or not) counts as "there is history"
         # -- a real event, success or failure, is never enough on its own.
         any_probe = self._con.execute(
-            "SELECT 1 FROM sondas WHERE clave = ? LIMIT 1", (key,)).fetchone()
+            "SELECT 1 FROM probes WHERE key = ? LIMIT 1", (key,)).fetchone()
         return any_probe is None
 
     def _ttft_p50(self, key: str) -> float:
@@ -403,10 +494,10 @@ class Storage:
         `ttft_ms > 0`. With none, the neutral value is returned."""
         rows = self._con.execute(
             """SELECT ttft_ms FROM (
-                   SELECT momento, ttft_ms FROM sondas WHERE clave = ? AND ok = 1
+                   SELECT at, ttft_ms FROM probes WHERE key = ? AND ok = 1
                    UNION ALL
-                   SELECT momento, ttft_ms FROM eventos WHERE clave = ? AND ok = 1
-               ) WHERE ttft_ms > 0 ORDER BY momento DESC LIMIT ?""",
+                   SELECT at, ttft_ms FROM events WHERE key = ? AND ok = 1
+               ) WHERE ttft_ms > 0 ORDER BY at DESC LIMIT ?""",
             (key, key, WINDOW)).fetchall()
         if not rows:
             return NEUTRAL_TTFT_MS
@@ -419,11 +510,11 @@ class Storage:
         diagnostics, which is exactly what was missing when the two measurements
         shared a column. None = never observed."""
         rows = self._con.execute(
-            """SELECT latencia_ms FROM (
-                   SELECT momento, latencia_ms FROM sondas WHERE clave = ? AND ok = 1
+            """SELECT latency_ms FROM (
+                   SELECT at, latency_ms FROM probes WHERE key = ? AND ok = 1
                    UNION ALL
-                   SELECT momento, latencia_ms FROM eventos WHERE clave = ? AND ok = 1
-               ) WHERE latencia_ms > 0 ORDER BY momento DESC LIMIT ?""",
+                   SELECT at, latency_ms FROM events WHERE key = ? AND ok = 1
+               ) WHERE latency_ms > 0 ORDER BY at DESC LIMIT ?""",
             (key, key, WINDOW)).fetchall()
         if not rows:
             return None
@@ -432,19 +523,19 @@ class Storage:
 
     def add_paid_usage(self, api_key: str, day: str) -> int:
         self._con.execute(
-            """INSERT INTO uso_pago (llave, dia, peticiones) VALUES (?,?,1)
-               ON CONFLICT(llave, dia) DO UPDATE SET peticiones = peticiones + 1""",
+            """INSERT INTO paid_usage (api_key, day, requests) VALUES (?,?,1)
+               ON CONFLICT(api_key, day) DO UPDATE SET requests = requests + 1""",
             (api_key, day))
         self._con.commit()
         return self.paid_usage(api_key, day)
 
     def paid_usage(self, api_key: str, day: str) -> int:
         row = self._con.execute(
-            "SELECT peticiones FROM uso_pago WHERE llave = ? AND dia = ?",
+            "SELECT requests FROM paid_usage WHERE api_key = ? AND day = ?",
             (api_key, day)).fetchone()
         return row[0] if row else 0
 
     def prune(self, before: float) -> None:
-        self._con.execute("DELETE FROM sondas WHERE momento < ?", (before,))
-        self._con.execute("DELETE FROM eventos WHERE momento < ?", (before,))
+        self._con.execute("DELETE FROM probes WHERE at < ?", (before,))
+        self._con.execute("DELETE FROM events WHERE at < ?", (before,))
         self._con.commit()

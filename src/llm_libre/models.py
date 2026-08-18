@@ -32,7 +32,7 @@ class Capabilities:
 class Route:
     provider: str
     model_id: str
-    tier: str  # "gratis" | "pago"
+    tier: str  # "free" | "paid"
     capabilities: Capabilities
     # A DIFFERENT concept from tier and from profile (see RouteRequest.profile
     # below): the manual order in which the router tries routes before looking at

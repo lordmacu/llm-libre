@@ -2,7 +2,7 @@ from llm_libre.models import Capabilities, Metrics, Route, RouteRequest
 from llm_libre.router import order_routes
 
 
-def r(model, provider="kilo", tier="gratis", tools=True, vision=False, context=100000):
+def r(model, provider="kilo", tier="free", tools=True, vision=False, context=100000):
     return Route(provider, model, tier,
                  Capabilities(tools=tools, vision=vision, context=context, max_output=4096))
 
@@ -37,17 +37,17 @@ def test_it_orders_by_descending_score():
 
 
 def test_paid_routes_always_go_last_even_when_they_score_better():
-    routes = [r("MiniMax-M3", provider="minimax", tier="pago"), r("flojo:free")]
+    routes = [r("MiniMax-M3", provider="minimax", tier="paid"), r("flojo:free")]
     metrics = {"minimax/MiniMax-M3": m(quality=1.0, reliability=1.0, ttft=100),
                "kilo/flojo:free": m(quality=0.2, reliability=0.3, ttft=5000)}
     out = order_routes(routes, metrics, RouteRequest(), now=0.0)
-    assert [x.tier for x in out] == ["gratis", "pago"]
+    assert [x.tier for x in out] == ["free", "paid"]
 
 
 def test_allow_paid_false_removes_the_paid_routes():
-    routes = [r("MiniMax-M3", provider="minimax", tier="pago"), r("g:free")]
+    routes = [r("MiniMax-M3", provider="minimax", tier="paid"), r("g:free")]
     out = order_routes(routes, {}, RouteRequest(allow_paid=False), now=0.0)
-    assert [x.tier for x in out] == ["gratis"]
+    assert [x.tier for x in out] == ["free"]
 
 
 def test_it_excludes_routes_in_cooldown_but_not_expired_ones():
@@ -128,7 +128,7 @@ def test_between_two_never_probed_routes_the_score_still_decides():
 
 # --- Task 13: `priority`, a concept DISTINCT from `tier` and from `profile`. ---
 
-def _rp(model, priority, provider="kilo", tier="gratis", tools=True):
+def _rp(model, priority, provider="kilo", tier="free", tools=True):
     return Route(provider, model, tier,
                  Capabilities(tools=tools, vision=False, context=100000, max_output=4096),
                  priority=priority)
@@ -149,12 +149,12 @@ def test_priority_does_not_break_the_paid_routes_go_last_invariant():
     # THE CASE THAT MATTERS: a PAID route with priority 0 (the highest possible)
     # and a perfect score against a mediocre free route with the default priority.
     # Money is the reason: paid goes last ALWAYS, priority cannot buy that place.
-    routes = [_rp("MiniMax-M3", 0, provider="minimax", tier="pago"),
+    routes = [_rp("MiniMax-M3", 0, provider="minimax", tier="paid"),
               _rp("mediocre:free", 100)]
     metrics = {"minimax/MiniMax-M3": m(quality=1.0, reliability=1.0, ttft=50),
                "kilo/mediocre:free": m(quality=0.2, reliability=0.3, ttft=5000)}
     out = order_routes(routes, metrics, RouteRequest(), now=0.0)
-    assert [x.tier for x in out] == ["gratis", "pago"]
+    assert [x.tier for x in out] == ["free", "paid"]
     assert [x.model_id for x in out] == ["mediocre:free", "MiniMax-M3"]
 
 

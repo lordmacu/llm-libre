@@ -4,7 +4,7 @@ from llm_libre.models import Capabilities, Metrics, Route, RouteRequest
 from llm_libre.router import TIE_BAND, order_routes
 
 
-def r(model, provider="kilo", tier="gratis", priority=1):
+def r(model, provider="kilo", tier="free", priority=1):
     return Route(provider=provider, model_id=model, tier=tier, priority=priority,
                  capabilities=Capabilities(tools=True, vision=True, context=200000,
                                            max_output=4096))
@@ -46,12 +46,12 @@ def test_a_route_outside_the_band_never_wins():
 def test_the_draw_never_lifts_a_paid_route_above_the_free_ones():
     """The router's most important invariant."""
     routes = [r("gratis1"), r("gratis2"),
-              r("cara", provider="minimax", tier="pago", priority=0)]
+              r("cara", provider="minimax", tier="paid", priority=0)]
     met = {"kilo/gratis1": m(quality=0.5), "kilo/gratis2": m(quality=0.5),
            "minimax/cara": m(quality=1.0, ttft=50)}   # the paid one scores BETTER
     for s in range(60):
         out = order_routes(routes, met, RouteRequest(), 0.0, random.Random(s))
-        assert out[-1].tier == "pago", [x.key for x in out]
+        assert out[-1].tier == "paid", [x.key for x in out]
 
 
 def test_the_draw_respects_the_yamls_priority():

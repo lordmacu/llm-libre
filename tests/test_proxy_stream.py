@@ -17,7 +17,7 @@ BODY = {"model": "auto", "messages": [], "stream": True}
 
 
 def _route(model="a:free", provider="kilo"):
-    return Route(provider, model, "gratis", Capabilities(True, False, 100000, 4096))
+    return Route(provider, model, "free", Capabilities(True, False, 100000, 4096))
 
 
 def _sse(*chunks):
@@ -42,9 +42,9 @@ def _proxy(handler, canvas=frozenset()):
     store = Storage(":memory:")
     store.create_schema()
     prov = {
-        "kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
+        "kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [],
                           unwraps_canvas="kilo" in canvas),
-        "chatgpt": Provider("chatgpt", "gratis", "openai", "https://cg.test", "", "/models",
+        "chatgpt": Provider("chatgpt", "free", "openai", "https://cg.test", "", "/models",
                              {}, [], unwraps_canvas="chatgpt" in canvas),
     }
     return Proxy(prov, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -213,7 +213,7 @@ async def test_it_does_not_fail_over_when_the_connection_drops_after_emitting():
     assert lines[-1].strip() == "data: [DONE]"
     # And the failure after emitting must not add a second event on top of the
     # one already recorded when the first useful chunk went out.
-    rows = p.store._con.execute("SELECT ok FROM eventos WHERE clave = ?",
+    rows = p.store._con.execute("SELECT ok FROM events WHERE key = ?",
                                    ("kilo/a:free",)).fetchall()
     assert rows == [(1,)]
 
@@ -243,7 +243,7 @@ async def test_a_pure_reasoning_stream_records_a_failed_event():
         200, content=_sse("<think>solo razonamiento</think>")))
     text = await _collect(p.complete_stream([_route()], BODY, 0.0))
     assert text == ""
-    rows = p.store._con.execute("SELECT ok FROM eventos").fetchall()
+    rows = p.store._con.execute("SELECT ok FROM events").fetchall()
     assert rows == [(0,)]
 
 
@@ -280,7 +280,7 @@ async def test_a_stream_without_useful_content_records_a_failure_on_that_route()
     p = _proxy(handler)
     await _collect(p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0))
     rows = p.store._con.execute(
-        "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
+        "SELECT key, ok FROM events ORDER BY key").fetchall()
     assert rows == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
 
@@ -301,7 +301,7 @@ async def test_a_tool_calls_only_stream_still_counts_as_a_success():
                                                   BODY, 0.0)]
     assert len(calls) == 1          # no failover happened
     assert any("buscar" in l for l in lines)
-    rows = p.store._con.execute("SELECT ok FROM eventos").fetchall()
+    rows = p.store._con.execute("SELECT ok FROM events").fetchall()
     assert rows == [(1,)]
 
 
@@ -310,7 +310,7 @@ async def test_a_raw_pure_reasoning_stream_is_still_a_success():
     p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>")))
     text = await _collect(p.complete_stream([_route()], BODY, 0.0, raw=True))
     assert text == "<think>mmm</think>"
-    rows = p.store._con.execute("SELECT ok FROM eventos").fetchall()
+    rows = p.store._con.execute("SELECT ok FROM events").fetchall()
     assert rows == [(1,)]
 
 
@@ -326,7 +326,7 @@ async def test_failing_before_emitting_records_the_event_only_once():
     p = _proxy(handler)
     await _collect(p.complete_stream([_route("a:free"), _route("b:free")], BODY, 0.0))
     rows = p.store._con.execute(
-        "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
+        "SELECT key, ok FROM events ORDER BY key").fetchall()
     assert rows == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
 
@@ -344,7 +344,7 @@ async def test_ttft_measures_the_first_token_not_the_end_of_the_stream():
     assert any("hola" in l for l in lines)
     assert lines[-1].strip() == "data: [DONE]"
 
-    rows = p.store._con.execute("SELECT ok, ttft_ms FROM eventos").fetchall()
+    rows = p.store._con.execute("SELECT ok, ttft_ms FROM events").fetchall()
     assert rows == [(1, rows[0][1])]  # exactly one event
     ttft_ms = rows[0][1]
 
@@ -361,7 +361,7 @@ async def test_the_streaming_path_does_write_a_ttft():
     # that writes that column.
     p = _proxy(lambda req: httpx.Response(200, content=_sse("hola")))
     await _collect(p.complete_stream([_route()], BODY, 0.0))
-    row = p.store._con.execute("SELECT ttft_ms, latencia_ms FROM eventos").fetchone()
+    row = p.store._con.execute("SELECT ttft_ms, latency_ms FROM events").fetchone()
     assert row[0] >= 0 and row[1] is None
 
 
@@ -449,7 +449,7 @@ async def test_the_repeated_envelope_does_not_make_a_reasoning_chunk_useful():
     assert text == "bien"
     assert len(calls) == 2
     rows = p.store._con.execute(
-        "SELECT clave, ok FROM eventos ORDER BY clave").fetchall()
+        "SELECT key, ok FROM events ORDER BY key").fetchall()
     assert rows == [("kilo/a:free", 0), ("kilo/b:free", 1)]
 
 
@@ -560,7 +560,7 @@ async def test_a_400_when_streaming_is_recorded_flagged_as_a_client_error():
     p = _proxy(lambda req: httpx.Response(400, json={"error": "bad request"}))
     [l async for l in p.complete_stream([_route("a:free")], BODY, 0.0)]
     row = p.store._con.execute(
-        "SELECT ok, es_error_cliente FROM eventos WHERE clave = 'kilo/a:free'").fetchone()
+        "SELECT ok, is_client_error FROM events WHERE key = 'kilo/a:free'").fetchone()
     assert row == (0, 1)
 
 
@@ -579,7 +579,7 @@ async def test_it_uses_the_providers_own_timeout_when_streaming():
 
     store = Storage(":memory:")
     store.create_schema()
-    lento = Provider("lento", "gratis", "openai", "https://lento.test", "", "/models",
+    lento = Provider("lento", "free", "openai", "https://lento.test", "", "/models",
                       {}, [], timeout_s=20.0)
     p = Proxy({"lento": lento}, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     [l async for l in p.complete_stream([_route(provider="lento")], BODY, 0.0)]
@@ -712,12 +712,12 @@ async def test_a_flood_of_useless_chunks_does_not_punish_a_healthy_route():
             return httpx.Response(200, json=_ok())
         return httpx.Response(200, content=contentless_payload)
 
-    rutas = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
+    routes = _multi("m0:free", "m1:free", "m2:free", "m3:free", "m4:free")
     p = _proxy(handler)
     cuerpo_auto = {"model": "auto", "stream": True,
                   "messages": [{"role": "user", "content": "piensa mucho antes de responder"}]}
     for i in range(15):
-        [l async for l in p.complete_stream(rutas, cuerpo_auto, float(i))]
+        [l async for l in p.complete_stream(routes, cuerpo_auto, float(i))]
     await p.wait_for_pending_probes()
     assert p.cooldowns == {}
 

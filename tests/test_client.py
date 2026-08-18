@@ -3,7 +3,7 @@ from llm_libre.providers import Provider
 
 
 def _prov(api_key="", extra=None):
-    return Provider(id="kilo", tier="gratis", dialect="openai",
+    return Provider(id="kilo", tier="free", dialect="openai",
                      base_url="https://api.kilo.ai/api/gateway", api_key=api_key,
                      models_path="/models", extra_headers=extra or {}, fixed_models=[])
 
@@ -97,7 +97,7 @@ def test_it_lets_any_other_unknown_field_through():
 #     not on `p.base_url`. ---
 
 def test_a_query_string_in_base_url_does_not_splinter_the_final_url():
-    prov = Provider(id="chatgpt", tier="gratis", dialect="openai",
+    prov = Provider(id="chatgpt", tier="free", dialect="openai",
                      base_url="https://blog.test:8888?token=abc", api_key="",
                      models_path="/models", extra_headers={}, fixed_models=[])
     url, _, _ = build_request(prov, {"model": "x"})

@@ -18,7 +18,7 @@
 # `tier`, no `prioridad` (ver router.ordenar).
 proveedores:
   - id: chatgpt
-    tier: gratis          # no cuesta plata: NO consume el tope de pago
+    tier: free          # no cuesta plata: NO consume el tope de pago
     prioridad: 0           # antes que todo lo demas
     dialecto: openai
     base_url_env: CHATGPT_PROXY_URL   # la URL real se define en el entorno;
@@ -92,7 +92,7 @@ proveedores:
     # descubrimiento -- ver IDS_RESERVADOS y _es_alias en catalogo.py.
 
   - id: perplexity
-    tier: gratis
+    tier: free
     # Misma prioridad que kilo A PROPOSITO: no hay evidencia de que sea mejor ni
     # peor, asi que decide el ranking medido, que es para lo que existe. La
     # prioridad es preferencia manual, no una corazonada.
@@ -125,7 +125,7 @@ proveedores:
     timeout_s: 45
 
   - id: deepseek
-    tier: gratis
+    tier: free
     # Misma prioridad que kilo y perplexity: que decida el ranking medido.
     prioridad: 1
     dialecto: openai
@@ -161,7 +161,7 @@ proveedores:
     emula_tools: true
 
   - id: grok
-    tier: gratis          # el proxy corre sobre el tier gratuito de Grok
+    tier: free          # el proxy corre sobre el tier gratuito de Grok
     prioridad: 1
     dialecto: openai
     base_url_env: GROK_PROXY_URL
@@ -209,7 +209,7 @@ proveedores:
       imagine-agent-mode-grok-4-5: {tools: false, vision: false}
 
   - id: kilo
-    tier: gratis
+    tier: free
     prioridad: 1
     dialecto: openai
     base_url: https://api.kilo.ai/api/gateway
@@ -239,7 +239,7 @@ proveedores:
   # codigo.
 
   - id: minimax
-    tier: pago
+    tier: paid
     prioridad: 2
     dialecto: openai
     base_url: https://api.minimax.io/v1

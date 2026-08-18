@@ -21,7 +21,7 @@ def compatible_routes(routes: list[Route], request: RouteRequest) -> list[Route]
 
 def sort_key(r: Route, m: Metrics, profile: str,
              now: float) -> tuple[bool, bool, int, int, float]:
-    """The ordering key `(in-cooldown, tier == "pago", priority, unmeasured,
+    """The ordering key `(in-cooldown, tier == "paid", priority, unmeasured,
     -score)`, factored out so that ANY place wanting to show "the router's real
     order" (today, /v1/ranking) uses the SAME logic instead of inventing its own
     -- /v1/ranking used to sort by score alone, without `prioridad`, and could
@@ -39,7 +39,7 @@ def sort_key(r: Route, m: Metrics, profile: str,
     (say 0.0) would make any `en_cooldown_hasta > 0` -- including one that
     expired long ago -- read as "still punished" forever.
     """
-    return (m.cooldown_until > now, r.tier == "pago", r.priority,
+    return (m.cooldown_until > now, r.tier == "paid", r.priority,
             1 if m.quality_measured_at is None else 0,
             -score(m, profile))
 
@@ -48,10 +48,10 @@ def order_routes(routes: list[Route], metrics: dict[str, Metrics], request: Rout
                  now: float, rng=None) -> list[Route]:
     """Return the chain of attempts, best first.
 
-    Order: `(tier == "pago", priority, unmeasured, -score)` (see `sort_key`).
+    Order: `(tier == "paid", priority, unmeasured, -score)` (see `sort_key`).
 
     An INVARIANT nothing below may break: PAID routes always go last, regardless
-    of their `prioridad` or their score. That is why `tier == "pago"` is the
+    of their `priority` or their score. That is why `tier == "paid"` is the
     FIRST criterion of the tuple (False < True orders free before paid) and
     `prioridad` -- an entirely separate concept, see Ruta.priority -- only comes
     after: a paid route with `prioridad: 0` cannot buy a place ahead of free
@@ -61,7 +61,7 @@ def order_routes(routes: list[Route], metrics: dict[str, Metrics], request: Rout
     is the manual order declared in the YAML (e.g. an in-house provider before
     third-party ones). At equal priority, the criterion that predates this change
     stays intact: a route never probed by the quality battery
-    (calidad_medida_en is None) goes after one with a real measurement, and only
+    (quality_measured_at is None) goes after one with a real measurement, and only
     then does the score decide.
 
     The cooldown filter (below) runs BEFORE any of these criteria are consulted:
@@ -72,7 +72,7 @@ def order_routes(routes: list[Route], metrics: dict[str, Metrics], request: Rout
     """
     candidates = compatible_routes(routes, request)
     if not request.allow_paid:
-        candidates = [r for r in candidates if r.tier == "gratis"]
+        candidates = [r for r in candidates if r.tier == "free"]
     available = [r for r in candidates
                  if metrics.get(r.key, NEUTRAL_METRICS).cooldown_until <= now]
 

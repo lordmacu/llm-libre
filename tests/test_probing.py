@@ -24,12 +24,12 @@ def _store():
     return a
 
 
-def _route(model="x:free", tier="gratis", provider="kilo", tools=True):
+def _route(model="x:free", tier="free", provider="kilo", tools=True):
     return Route(provider, model, tier, Capabilities(tools, False, 1000, 100))
 
 
 def _proxy(handler):
-    prov = {"kilo": Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])}
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])}
     return Proxy(prov, _store(), httpx.AsyncClient(transport=httpx.MockTransport(handler)))
 
 
@@ -37,7 +37,7 @@ async def test_sync_stores_the_discovered_routes():
     store = _store()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     assert [r.key for r in store.active_routes()] == ["kilo/x:free"]
 
@@ -53,7 +53,7 @@ async def test_sync_does_not_splinter_a_query_string_in_base_url():
         return httpx.Response(200, json=CATALOGUE)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    prov = [Provider("chatgpt", "gratis", "openai", "https://blog.test:8888?token=abc",
+    prov = [Provider("chatgpt", "free", "openai", "https://blog.test:8888?token=abc",
                       "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     assert seen_urls == ["https://blog.test:8888/models?token=abc"]
@@ -63,20 +63,20 @@ async def test_sync_adds_the_paid_fixed_models():
     store = _store()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
-    prov = [Provider("minimax", "pago", "openai", "https://m.test", "k", "",
+    prov = [Provider("minimax", "paid", "openai", "https://m.test", "k", "",
                       {}, [{"id": "MiniMax-M3", "tools": True, "vision": False,
                             "contexto": 128000, "max_salida": 32768}])]
     await sync_catalogue(http, prov, store, now=100.0)
     routes = store.active_routes()
     assert [r.key for r in routes] == ["minimax/MiniMax-M3"]
-    assert routes[0].tier == "pago"
+    assert routes[0].tier == "paid"
 
 
 async def test_sync_propagates_the_providers_priority_to_discovered_routes():
     store = _store()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [],
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [],
                       priority=1)]
     await sync_catalogue(http, prov, store, now=100.0)
     routes = store.active_routes()
@@ -93,7 +93,7 @@ async def test_sync_propagates_the_providers_default_capabilities():
     ]}
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=bare_catalogue)))
-    prov = [Provider("chatgpt", "gratis", "openai", "https://cg.test", "", "/models", {}, [],
+    prov = [Provider("chatgpt", "free", "openai", "https://cg.test", "", "/models", {}, [],
                       priority=0,
                       default_capabilities=Capabilities(False, False, 128000, 8192))]
     await sync_catalogue(http, prov, store, now=100.0)
@@ -112,7 +112,7 @@ async def test_a_down_provider_does_not_erase_the_others_catalogue():
         return httpx.Response(500)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     # If /models fails nothing is deactivated: an old catalogue beats an empty one.
     assert len(store.active_routes()) == 1
@@ -133,12 +133,12 @@ async def test_a_partial_failure_does_not_corrupt_the_timestamp_of_what_was_disc
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("roto", "free", "openai", "https://roto.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     row = store._con.execute(
-        "SELECT visto_por_ultima_vez FROM rutas WHERE clave='kilo/x:free'").fetchone()
+        "SELECT last_seen FROM routes WHERE key='kilo/x:free'").fetchone()
     assert row[0] == 100.0
 
 
@@ -160,7 +160,7 @@ async def test_a_200_with_empty_data_does_not_erase_the_previous_routes():
     store.upsert_routes([_route("previa:free")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=EMPTY_CATALOGUE)))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     assert [r.key for r in store.active_routes()] == ["kilo/previa:free"]
 
@@ -170,7 +170,7 @@ async def test_a_200_whose_models_are_all_filtered_out_does_not_erase_previous_r
     store.upsert_routes([_route("previa:free")], timestamp=50.0)
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE_ALL_FILTERED)))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     assert [r.key for r in store.active_routes()] == ["kilo/previa:free"]
 
@@ -186,8 +186,8 @@ async def test_un_proveedor_vacio_no_frena_la_actualizacion_del_que_si_respondio
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("vacio", "free", "openai", "https://vacio.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
@@ -211,8 +211,8 @@ async def test_un_proveedor_sano_desactiva_su_propia_ruta_vieja_aunque_otro_este
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("vacio", "gratis", "openai", "https://vacio.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("vacio", "free", "openai", "https://vacio.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
@@ -233,8 +233,8 @@ async def test_a_healthy_provider_does_not_deactivate_another_providers_routes()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("otro", "gratis", "openai", "https://otro.test", "", "", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("otro", "free", "openai", "https://otro.test", "", "", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
@@ -262,8 +262,8 @@ async def test_the_same_model_in_two_providers_only_the_one_that_lost_it_is_swit
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("otro", "gratis", "openai", "https://o.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("otro", "free", "openai", "https://o.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
@@ -285,8 +285,8 @@ async def test_a_200_with_a_non_json_body_is_a_failure_and_does_not_stop_the_oth
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("roto", "free", "openai", "https://roto.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     assert [r.key for r in store.active_routes()] == ["kilo/x:free"]
@@ -305,8 +305,8 @@ async def test_a_200_with_an_unexpected_shape_is_a_failure_and_does_not_stop_the
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("roto", "gratis", "openai", "https://roto.test", "", "/models", {}, []),
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("roto", "free", "openai", "https://roto.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
     ]
     await sync_catalogue(http, prov, store, now=100.0)
     assert [r.key for r in store.active_routes()] == ["kilo/x:free"]
@@ -327,12 +327,12 @@ async def test_sync_deactivates_the_routes_of_a_provider_removed_from_the_regist
         lambda req: httpx.Response(200, json=CATALOGUE)))
     # openrouter is NO LONGER in the list providers.load() returns -- this
     # simulates having removed it from proveedores.yaml.
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     await sync_catalogue(http, prov, store, now=100.0)
     keys_ = {r.key for r in store.active_routes()}
     assert keys_ == {"kilo/x:free"}
     row = store._con.execute(
-        "SELECT activa FROM rutas WHERE clave = 'openrouter/previa:free'").fetchone()
+        "SELECT active FROM routes WHERE key = 'openrouter/previa:free'").fetchone()
     assert row == (0,)   # apagada, no borrada
 
 
@@ -348,8 +348,8 @@ async def test_sync_does_not_deactivate_routes_of_still_registered_providers():
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("minimax", "pago", "openai", "https://m.test", "k", "", {},
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("minimax", "paid", "openai", "https://m.test", "k", "", {},
                   [{"id": "MiniMax-M3", "tools": True, "vision": False,
                     "contexto": 128000, "max_salida": 32768}]),
     ]
@@ -391,9 +391,9 @@ async def test_sync_catalogue_does_not_let_a_broken_providers_exception_escape()
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("nojson", "gratis", "openai", "https://nojson.test", "", "/models", {}, []),
-        Provider("raro", "gratis", "openai", "https://raro.test", "", "/models", {}, []),
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("nojson", "free", "openai", "https://nojson.test", "", "/models", {}, []),
+        Provider("raro", "free", "openai", "https://raro.test", "", "/models", {}, []),
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
     ]
     total = await sync_catalogue(http, prov, store, now=100.0)
     assert total == 1
@@ -405,15 +405,15 @@ async def test_the_health_probe_records_success():
         "choices": [{"message": {"content": "ok"}}]}))
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT tipo, ok FROM sondas WHERE clave='kilo/x:free'").fetchone()
-    assert row == ("salud", 1)
+        "SELECT kind, ok FROM probes WHERE key='kilo/x:free'").fetchone()
+    assert row == ("health", 1)
 
 
 async def test_the_health_probe_records_the_failure_of_a_model_that_no_longer_exists():
     p = _proxy(lambda req: httpx.Response(404, json={"error": "model_not_found"}))
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT ok FROM sondas WHERE tipo='salud'").fetchone()
+        "SELECT ok FROM probes WHERE kind='health'").fetchone()
     assert row[0] == 0
 
 
@@ -422,7 +422,7 @@ async def test_the_health_probe_records_the_failure_of_a_model_that_no_longer_ex
 #     caller was never updated. A periodic probe runs ONCE every 5h per route;
 #     without is_probe=True a failure only accumulated suspicion (which needs 3
 #     consecutive ones), so 20 periodic probes against a dead route (100h) left 20
-#     `sondas ok=0` rows and ZERO cooldowns -- the probe had lost its authority to
+#     `probes ok=0` rows and ZERO cooldowns -- the probe had lost its authority to
 #     exclude. With is_probe=True, ONE failed probe already punishes. ---
 
 async def test_the_health_probe_punishes_immediately_on_a_single_failure():
@@ -432,7 +432,7 @@ async def test_the_health_probe_punishes_immediately_on_a_single_failure():
     # And without going through suspicion -- there is no accumulated mark waiting
     # for a second or third failure.
     assert p.store._con.execute(
-        "SELECT COUNT(*) FROM sondas WHERE tipo='salud' AND ok=0").fetchone()[0] == 1
+        "SELECT COUNT(*) FROM probes WHERE kind='health' AND ok=0").fetchone()[0] == 1
 
 
 async def test_the_quality_probe_stores_passed_over_total_cases():
@@ -440,7 +440,7 @@ async def test_the_quality_probe_stores_passed_over_total_cases():
         "choices": [{"message": {"content": "12"}}]}))
     await probe_quality(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT casos_pasados, casos_totales FROM sondas WHERE tipo='calidad'").fetchone()
+        "SELECT cases_passed, cases_total FROM probes WHERE kind='quality'").fetchone()
     assert row[1] == 5
     assert 1 <= row[0] < 5   # pasa aritmetica y formato, falla json y tools
 
@@ -458,15 +458,15 @@ async def test_the_quality_probe_punishes_directly_without_going_through_suspici
     # Directly -- never via suspicion (which would need SUSPICION_THRESHOLD
     # failures, and would additionally fire a separate 'salud' probe).
     assert p.store._con.execute(
-        "SELECT COUNT(*) FROM sondas WHERE tipo='salud'").fetchone()[0] == 0
+        "SELECT COUNT(*) FROM probes WHERE kind='health'").fetchone()[0] == 0
 
 
 async def test_quality_does_not_probe_paid_routes():
     p = _proxy(lambda req: httpx.Response(200, json={
         "choices": [{"message": {"content": "12"}}]}))
-    await probe_quality(p, p.store, [_route(tier="pago")], now=100.0)
+    await probe_quality(p, p.store, [_route(tier="paid")], now=100.0)
     assert p.store._con.execute(
-        "SELECT COUNT(*) FROM sondas WHERE tipo='calidad'").fetchone()[0] == 0
+        "SELECT COUNT(*) FROM probes WHERE kind='quality'").fetchone()[0] == 0
 
 
 async def test_quality_skips_the_tools_case_without_counting_it_as_a_failure():
@@ -482,7 +482,7 @@ async def test_quality_skips_the_tools_case_without_counting_it_as_a_failure():
     p = _proxy(handler)
     await probe_quality(p, p.store, [_route(tools=False)], now=100.0)
     row = p.store._con.execute(
-        "SELECT casos_pasados, casos_totales FROM sondas WHERE tipo='calidad'").fetchone()
+        "SELECT cases_passed, cases_total FROM probes WHERE kind='quality'").fetchone()
     assert row[1] == 4          # 5 cases minus the tools one, which was skipped
     assert len(calls) == 4    # y no se le gasto cuota pidiendoselo
 
@@ -491,27 +491,27 @@ async def test_cycle_syncs_probes_health_and_probes_quality_on_cycle_zero():
     store = _store()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, store, http)
     estado = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
                     providers=prov, http=http)
     await cycle(estado, counter=0)
     assert [r.key for r in store.active_routes()] == ["kilo/x:free"]
-    tipos = {t for (t,) in store._con.execute("SELECT tipo FROM sondas").fetchall()}
-    assert tipos == {"salud", "calidad"}
+    tipos = {t for (t,) in store._con.execute("SELECT kind FROM probes").fetchall()}
+    assert tipos == {"health", "quality"}
 
 
 async def test_cycle_does_not_probe_quality_outside_the_interval():
     store = _store()
     http = httpx.AsyncClient(transport=httpx.MockTransport(
         lambda req: httpx.Response(200, json=CATALOGUE)))
-    prov = [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, store, http)
     estado = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
                     providers=prov, http=http)
     await cycle(estado, counter=1)
-    tipos = {t for (t,) in store._con.execute("SELECT tipo FROM sondas").fetchall()}
-    assert tipos == {"salud"}
+    tipos = {t for (t,) in store._con.execute("SELECT kind FROM probes").fetchall()}
+    assert tipos == {"health"}
 
 
 # --- Fix round 3, B4 (Blocking): section 8 says "paid routes are NOT probed".
@@ -527,9 +527,9 @@ async def test_the_health_probe_does_not_spend_money_on_paid_routes():
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     p = _proxy(handler)
-    await probe_health(p, p.store, [_route(tier="pago")], now=100.0)
+    await probe_health(p, p.store, [_route(tier="paid")], now=100.0)
     assert calls == []
-    assert p.store._con.execute("SELECT COUNT(*) FROM sondas").fetchone()[0] == 0
+    assert p.store._con.execute("SELECT COUNT(*) FROM probes").fetchone()[0] == 0
 
 
 async def test_the_health_probe_still_probes_the_free_routes_of_the_same_list():
@@ -540,10 +540,10 @@ async def test_the_health_probe_still_probes_the_free_routes_of_the_same_list():
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     p = _proxy(handler)
-    await probe_health(p, p.store, [_route("g:free"), _route("P", tier="pago")],
+    await probe_health(p, p.store, [_route("g:free"), _route("P", tier="paid")],
                         now=100.0)
     assert len(calls) == 1
-    keys_ = [c for (c,) in p.store._con.execute("SELECT clave FROM sondas")]
+    keys_ = [c for (c,) in p.store._con.execute("SELECT key FROM probes")]
     assert keys_ == ["kilo/g:free"]
 
 
@@ -561,8 +561,8 @@ async def test_the_full_cycle_does_not_probe_the_paid_route():
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [
-        Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, []),
-        Provider("minimax", "pago", "openai", "https://m.test", "k", "", {},
+        Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+        Provider("minimax", "paid", "openai", "https://m.test", "k", "", {},
                   [{"id": "MiniMax-M3", "tools": True, "vision": False,
                     "contexto": 128000, "max_salida": 32768}]),
     ]
@@ -581,7 +581,7 @@ async def test_the_full_cycle_does_not_probe_the_paid_route():
 #     the layer that exists to prevent stale catalogues. ---
 
 def _prov_kilo():
-    return [Provider("kilo", "gratis", "openai", "https://k.test", "", "/models", {}, [])]
+    return [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
 
 
 async def _sincronizar_con(handler, caplog):
@@ -637,7 +637,7 @@ async def test_the_health_probe_does_not_write_a_ttft_it_never_measured():
         "choices": [{"message": {"content": "ok"}}]}))
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT latencia_ms, ttft_ms FROM sondas WHERE tipo='salud'").fetchone()
+        "SELECT latency_ms, ttft_ms FROM probes WHERE kind='health'").fetchone()
     assert row[0] >= 0
     assert row[1] == 0
 
@@ -670,7 +670,7 @@ async def test_the_health_probe_does_not_kill_a_model_by_denying_it_room_to_thin
     p = _proxy(_modelo_que_razona())
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT ok FROM sondas WHERE tipo='salud'").fetchone()
+        "SELECT ok FROM probes WHERE kind='health'").fetchone()
     assert row[0] == 1, ("el ping fabrico el fallo que dice medir: no le dio "
                           "presupuesto suficiente al modelo")
 
@@ -691,7 +691,7 @@ async def test_the_health_probe_stores_the_providers_code_not_the_gateways():
          "finish_reason": "length"}]}))
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT ok, codigo_http FROM sondas WHERE tipo='salud'").fetchone()
+        "SELECT ok, http_code FROM probes WHERE kind='health'").fetchone()
     assert row == (0, 200)
 
 
@@ -699,5 +699,5 @@ async def test_the_health_probe_stores_the_real_404_of_a_model_that_no_longer_ex
     p = _proxy(lambda req: httpx.Response(404, json={"error": "model_not_found"}))
     await probe_health(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
-        "SELECT ok, codigo_http FROM sondas WHERE tipo='salud'").fetchone()
+        "SELECT ok, http_code FROM probes WHERE kind='health'").fetchone()
     assert row == (0, 404)

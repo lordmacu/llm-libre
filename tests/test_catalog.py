@@ -69,7 +69,7 @@ def test_multimodal_input_is_accepted_as_long_as_output_is_text():
     assert routes[0].capabilities.tools is True
     assert routes[0].capabilities.context == 256000
     assert routes[0].capabilities.max_output == 8192
-    assert routes[0].tier == "gratis"
+    assert routes[0].tier == "free"
 
 
 def test_absence_of_tools_is_detected():
@@ -90,7 +90,7 @@ def test_an_unreadable_price_is_treated_as_paid():
 def test_against_the_real_kilo_catalogue():
     routes = normalize("kilo", _load("kilo_models.json"))
     assert len(routes) > 5
-    assert all(r.tier == "gratis" for r in routes)
+    assert all(r.tier == "free" for r in routes)
     assert all(r.provider == "kilo" for r in routes)
     assert not any("lyria" in r.model_id for r in routes)
     assert any(r.capabilities.tools for r in routes)
@@ -318,4 +318,4 @@ def test_against_the_real_chatgpt_proxy_catalogue():
                        default_capabilities=_CHATGPT_DEFAULTS)
     assert len(routes) == 5
     assert all(r.provider == "chatgpt" for r in routes)
-    assert all(r.tier == "gratis" for r in routes)
+    assert all(r.tier == "free" for r in routes)

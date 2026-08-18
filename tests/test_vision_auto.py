@@ -8,7 +8,7 @@ IMG = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBOR"}}
 
 
 def r(model, vision, provider="kilo"):
-    return Route(provider=provider, model_id=model, tier="gratis", priority=1,
+    return Route(provider=provider, model_id=model, tier="free", priority=1,
                  capabilities=Capabilities(tools=True, vision=vision, context=100000,
                                            max_output=4096))
 
