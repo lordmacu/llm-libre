@@ -494,7 +494,8 @@ class Proxy:
                     # armar_peticion lo saca solo de la copia que viaja al
                     # proveedor. Ese array es el allow-list que evita convertir
                     # una respuesta de texto legitima en un tool call inventado.
-                    datos = _emu.detect_and_convert(datos, cuerpo.get("tools"))
+                    datos = _emu.detect_and_convert(datos, cuerpo.get("tools"),
+                                                    cuerpo.get("tool_choice"))
                 return Respuesta(200, datos, ruta, intentos, razon, codigo)
 
             if codigo == 429:
@@ -557,6 +558,14 @@ class Proxy:
             emitido = False          # ya salio algun chunk hacia el cliente
             util = False             # ...y al menos uno traia contenido o tool_calls
             evento_registrado = False  # ya se conto la telemetria de este intento
+            # Solo lo usa el camino de emulacion (abajo): ahi la respuesta se
+            # BUFFEREA entera antes de poder decidir si es un tool call, asi que
+            # para cuando se llama a _registrar_exito_una_vez ya paso toda la
+            # generacion. Sin esto, esas rutas reportaban el tiempo TOTAL como
+            # ttft -- 7-27s para un modelo que razona -- y ranking.factor_latencia
+            # las hundia en el puntaje justo por usarlas. Se estampa cuando llega
+            # el PRIMER fragmento, que es lo que ttft significa.
+            ttft_medido_ms = None
 
             def _registrar_exito_una_vez() -> None:
                 # Exactamente un evento por intento, nunca cero ni dos: se
@@ -568,9 +577,9 @@ class Proxy:
                 # la confiabilidad a la ruta que acaba de fallar.
                 nonlocal evento_registrado
                 if not evento_registrado:
-                    self.almacen.registrar_evento(
-                        ruta.clave, True, int((time.monotonic() - t0) * 1000),
-                        200, ahora)
+                    ttft = (ttft_medido_ms if ttft_medido_ms is not None
+                            else int((time.monotonic() - t0) * 1000))
+                    self.almacen.registrar_evento(ruta.clave, True, ttft, 200, ahora)
                     evento_registrado = True
                     self._limpiar_castigo(ruta.clave)
                     self._sospechas.pop(ruta.clave, None)
@@ -607,9 +616,20 @@ class Proxy:
                     # `nombres_tools` es el allow-list del pedido del CLIENTE: sin
                     # el, un texto legitimo que traiga JSON se convertiria en una
                     # llamada inventada (ver el docstring de tool_emulator).
-                    nombres_tools = _emu.tool_names(cuerpo.get("tools"))
-                    if proveedor.emula_tools and nombres_tools:
+                    #
+                    # OJO con el orden: `emula_tools` se evalua ANTES de mirar
+                    # `tools`. Al reves, un `tools` malformado de un cliente
+                    # cualquiera reventaba el streaming de TODOS los proveedores,
+                    # incluidos los que no emulan nada -- y la excepcion salia
+                    # DENTRO del generador, con el 200 y las cabeceras SSE ya
+                    # mandadas: stream cortado y sin failover posible.
+                    if proveedor.emula_tools and _emu.tool_names(cuerpo.get("tools")):
+                        nombres_tools = _emu.tool_names(cuerpo.get("tools"))
                         acumulado = ""
+                        # id/created/model/usage del proveedor: son campos que el
+                        # esquema de chunk marca como obligatorios, y el chunk
+                        # sintetico era el unico del gateway que los perdia.
+                        sobre = {}
                         async for linea_buf in resp.aiter_lines():
                             if not linea_buf.startswith("data:"):
                                 continue
@@ -620,21 +640,34 @@ class Proxy:
                                 obj_buf = json.loads(carga_buf)
                             except json.JSONDecodeError:
                                 continue
+                            if not isinstance(obj_buf, dict):
+                                continue
+                            for campo in ("id", "created", "model", "system_fingerprint"):
+                                if campo not in sobre and obj_buf.get(campo) is not None:
+                                    sobre[campo] = obj_buf[campo]
+                            # `usage` llega en un chunk final propio (con
+                            # choices vacio) cuando el cliente pidio
+                            # stream_options.include_usage: se pisa siempre para
+                            # quedarse con el ultimo, que es el total.
+                            if obj_buf.get("usage") is not None:
+                                sobre["usage"] = obj_buf["usage"]
                             elec_buf = (obj_buf.get("choices") or [{}])[0]
                             if not isinstance(elec_buf, dict):
                                 continue
                             frag = (elec_buf.get("delta") or {}).get("content")
                             if not isinstance(frag, str):
                                 continue
+                            if ttft_medido_ms is None and frag:
+                                ttft_medido_ms = int((time.monotonic() - t0) * 1000)
                             acumulado += rec.alimentar(frag) if not crudo else frag
                         if not crudo:
                             acumulado += rec.cerrar()
 
                         llamadas = _emu.parse_tool_calls(acumulado, nombres_tools)
-                        if llamadas:
+                        if llamadas and cuerpo.get("tool_choice") != "none":
                             _registrar_exito_una_vez()
                             util = True
-                            chunk = _emu.build_stream_chunk(llamadas, cuerpo.get("model", ""))
+                            chunk = _emu.build_stream_chunk(llamadas, sobre)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -644,12 +677,8 @@ class Proxy:
                             # habria recibido sin emulacion.
                             _registrar_exito_una_vez()
                             util = True
-                            texto = {"object": "chat.completion.chunk",
-                                     "choices": [{"index": 0,
-                                                  "delta": {"role": "assistant",
-                                                            "content": acumulado},
-                                                  "finish_reason": "stop"}]}
-                            yield f"data: {json.dumps(texto)}\n\n"
+                            chunk = _emu.build_stream_chunk(None, sobre, acumulado)
+                            yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
                         # 200 que no entrego nada: mismo tratamiento que el

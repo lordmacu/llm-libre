@@ -31,7 +31,20 @@ import uuid
 # answer. It routinely contains braces -- draft JSON, dict literals, prose about
 # the schema -- so it has to come off before any brace scanning, or the scan
 # locks onto a brace that belongs to the thinking, not the answer.
-_THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+#
+# All three tag spellings that razonamiento.py knows about are stripped here, not
+# just <think>. On the normal path the trimmer has already removed them, but with
+# `x_crudo: true` it is skipped entirely and detection still runs -- and a model
+# that reasons "I could call {...}" then answers in prose had that discarded
+# reasoning converted into a real call, destroying the actual answer.
+_THINK_BLOCK = re.compile(
+    r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+
+# An embedded JSON object surrounded by much more prose is far more likely to be
+# the model TALKING ABOUT a call ("its schema is {...}, but which city?") than
+# making one. A call the model actually intends is the bulk of its reply, so a
+# span below this share of the message is treated as prose.
+_EMBEDDED_MIN_SHARE = 0.5
 
 # Some open-weights models wrap calls in an XML-ish tag instead of emitting bare
 # JSON. The payload inside is still JSON, so this only strips the envelope.
@@ -49,9 +62,20 @@ _CALL_WRAPPER_KEYS = ("function_call", "tool_call", "function")
 
 
 def _describe_params(params: dict) -> str:
-    """Render a JSON-Schema parameter block as prose for the injected prompt."""
-    props = params.get("properties") or {}
-    required = set(params.get("required") or [])
+    """Render a JSON-Schema parameter block as prose for the injected prompt.
+
+    Every field is type-checked before use. This runs on a body the client sent
+    verbatim -- ``api.py`` does no schema validation -- so a malformed ``tools``
+    entry must degrade to a thinner prompt, never raise: an exception here
+    escapes ``armar_peticion`` inside the route loop and aborts the whole chain
+    before a single upstream attempt.
+    """
+    if not isinstance(params, dict):
+        return "  (no parameters)"
+    props = params.get("properties")
+    props = props if isinstance(props, dict) else {}
+    raw_required = params.get("required")
+    required = set(raw_required) if isinstance(raw_required, (list, tuple, set)) else set()
     lines = []
     for name, schema in props.items():
         if not isinstance(schema, dict):
@@ -85,7 +109,8 @@ def _tool_choice_instruction(tool_choice) -> str:
         return ("\n\nIMPORTANT: Do NOT call any function on this turn. "
                 "Answer in plain text only.")
     if isinstance(tool_choice, dict):
-        name = (tool_choice.get("function") or {}).get("name")
+        fn = tool_choice.get("function")
+        name = fn.get("name") if isinstance(fn, dict) else None
         if isinstance(name, str) and name:
             return (f"\n\nIMPORTANT: You MUST call the function `{name}` specifically. "
                     "Do not call any other function, and do not answer in prose.")
@@ -100,10 +125,15 @@ def tool_names(tools) -> set[str]:
     -- including well-formed JSON with a ``name`` key -- stays text.
     """
     names = set()
-    for t in tools or []:
+    if not isinstance(tools, (list, tuple)):
+        return names
+    for t in tools:
         if not isinstance(t, dict) or t.get("type") != "function":
             continue
-        name = (t.get("function") or {}).get("name")
+        fn = t.get("function")
+        if not isinstance(fn, dict):
+            continue
+        name = fn.get("name")
         if isinstance(name, str) and name:
             names.add(name)
     return names
@@ -113,19 +143,20 @@ def _build_tools_block(tools: list, tool_choice=None) -> str:
     """Build the system-prompt section describing the callable functions."""
     described = []
     example_name = None
-    for t in tools:
+    for t in tools if isinstance(tools, (list, tuple)) else []:
         if not isinstance(t, dict) or t.get("type") != "function":
             continue
-        f = t.get("function") or {}
+        f = t.get("function")
+        if not isinstance(f, dict):
+            continue
         name = f.get("name")
         if not isinstance(name, str) or not name:
             continue
         if example_name is None:
             example_name = name
-        desc = f.get("description") or ""
-        params = f.get("parameters")
-        body = _describe_params(params if isinstance(params, dict) else {})
-        described.append(f"### {name}\n{desc}\nParameters:\n{body}")
+        desc = f.get("description")
+        desc = desc if isinstance(desc, str) else ""
+        described.append(f"### {name}\n{desc}\nParameters:\n{_describe_params(f.get('parameters'))}")
 
     if not described:
         return ""
@@ -223,15 +254,14 @@ def inject_into_body(body: dict) -> dict:
         return body
 
     block = _build_tools_block(tools, body.get("tool_choice"))
-    if not block:
-        # `tools` was present but held nothing callable (empty list, or only
-        # non-function entries). Still strip the fields -- a provider that
-        # rejects unknown keys would 400 on a request we could have served.
-        return {k: v for k, v in body.items() if k not in ("tools", "tool_choice")}
 
     messages = []
     for msg in body.get("messages") or []:
         if not isinstance(msg, dict):
+            # Not our call to reject: forwarding it lets the provider answer with
+            # its own 400, exactly as it would for any non-emulated route.
+            # Dropping it silently altered the conversation instead.
+            messages.append(msg)
             continue
         role = msg.get("role")
 
@@ -253,20 +283,27 @@ def inject_into_body(body: dict) -> dict:
 
         messages.append(msg)
 
-    if messages and messages[0].get("role") == "system":
-        head = messages[0]
-        existing = head.get("content")
-        existing = existing if isinstance(existing, str) else ""
-        messages[0] = {**head, "content": f"{existing}\n\n{block}" if existing else block}
-    else:
-        messages.insert(0, {"role": "system", "content": block})
+    # A falsy block means `tools` was present but held nothing callable (an empty
+    # list, or only non-function entries). The prompt gets nothing to say, but the
+    # history rewriting above still had to happen -- a `tool`-role message left
+    # unconverted goes to a provider that has no such role. Only the injection is
+    # skipped; the fields are stripped either way, since a provider that rejects
+    # unknown keys would 400 on a request we could otherwise have served.
+    if block:
+        if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
+            head = messages[0]
+            existing = head.get("content")
+            existing = existing if isinstance(existing, str) else ""
+            messages[0] = {**head, "content": f"{existing}\n\n{block}" if existing else block}
+        else:
+            messages.insert(0, {"role": "system", "content": block})
 
     result = {k: v for k, v in body.items() if k not in ("tools", "tool_choice")}
     result["messages"] = messages
     return result
 
 
-def detect_and_convert(data: dict, tools=None) -> dict:
+def detect_and_convert(data: dict, tools=None, tool_choice=None) -> dict:
     """Convert a text answer that is really a tool call into ``tool_calls`` shape.
 
     ``tools`` is the array from the ORIGINAL client request. Only functions named
@@ -275,8 +312,16 @@ def detect_and_convert(data: dict, tools=None) -> dict:
     without it there is no way to tell a tool call from a model that merely
     answered with JSON.
 
+    ``tool_choice="none"`` suppresses conversion outright. The injected prompt
+    already asks the model not to call anything, but a prompt is a request, not a
+    guarantee -- and OpenAI's contract promises the client that ``none`` yields
+    no tool calls. Enforcing it here makes that true regardless of what the model
+    decides to emit.
+
     Returns ``data`` unchanged (same object) when no call is detected.
     """
+    if tool_choice == "none":
+        return data
     valid = tool_names(tools)
     if not valid:
         return data
@@ -321,55 +366,79 @@ def _to_openai_tool_calls(parsed: list[dict]) -> list[dict]:
     } for call in parsed]
 
 
-def build_stream_chunk(parsed: list[dict], model: str = "") -> dict:
-    """Build the single SSE chunk that delivers emulated calls to a streaming client.
+def build_stream_chunk(parsed: list[dict] | None, envelope: dict | None = None,
+                       content: str | None = None) -> dict:
+    """Build the single SSE chunk that closes an emulated streaming response.
 
     Detection needs the whole answer, so the streaming path buffers the response
-    and emits one complete chunk rather than incremental argument deltas. Clients
+    and emits one complete chunk instead of incremental deltas. Clients
     accumulate ``tool_calls`` by ``index``, so a fully-formed entry is valid --
     just not progressive.
+
+    ``envelope`` carries ``id``/``created``/``model`` (and any ``usage``) captured
+    from the provider's own chunks. Without it these emulated chunks were the only
+    ones in the gateway missing fields the chunk schema marks required, and any
+    client billing from ``usage`` silently got nothing on exactly these routes.
+    ``model`` comes from the provider, not from the request, so it names the route
+    that really served the call rather than the alias ``auto``.
+
+    Pass ``parsed`` for a tool-call chunk, or ``content`` for a plain-text one.
     """
-    calls = _to_openai_tool_calls(parsed)
-    chunk = {
-        "object": "chat.completion.chunk",
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": None,
-                      "tool_calls": [{"index": i, **c} for i, c in enumerate(calls)]},
-            "finish_reason": "tool_calls",
-        }],
-    }
-    if model:
-        chunk["model"] = model
+    envelope = envelope or {}
+    if parsed:
+        delta = {"role": "assistant", "content": None,
+                 "tool_calls": [{"index": i, **c}
+                                for i, c in enumerate(_to_openai_tool_calls(parsed))]}
+        finish = "tool_calls"
+    else:
+        delta = {"role": "assistant", "content": content or ""}
+        finish = "stop"
+
+    chunk = {"object": "chat.completion.chunk",
+             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+    for key in ("id", "created", "model", "system_fingerprint"):
+        if envelope.get(key) is not None:
+            chunk[key] = envelope[key]
+    if envelope.get("usage") is not None:
+        chunk["usage"] = envelope["usage"]
     return chunk
 
 
-def _json_candidates(text: str):
-    """Yield substrings of ``text`` that might be a JSON call, best guess first.
+def _blank_out(text: str, pattern: re.Pattern) -> str:
+    """Replace every match of ``pattern`` with spaces, preserving offsets.
 
-    Ordered most-specific to least so an explicit signal (a fenced block, a
-    ``<tool_call>`` tag) is tried before a loose scan of the prose around it.
-
-    The final two use :func:`_balanced_span`, not a greedy ``\\{.*\\}``. A greedy
-    match runs from the first brace to the LAST one anywhere in the text, so a
-    call followed by any prose containing a brace produced an unparseable blob.
+    Lets the bare-JSON scan skip regions already claimed by an explicit marker
+    (a fence or a tag) without shifting the positions of what remains.
     """
-    stripped = text.strip()
-    yield stripped
+    return pattern.sub(lambda m: " " * len(m.group(0)), text)
 
-    for block in _CODE_FENCE.findall(text):
-        yield block.strip()
 
-    for tagged in _TOOL_CALL_TAG.findall(text):
-        yield tagged.strip()
+def _json_candidates(text: str) -> list[tuple[int, str, bool]]:
+    """Find every substring of ``text`` that might be a JSON call.
 
-    array = _balanced_span(text, "[", "]")
-    if array:
-        yield array
+    Returns ``(position, candidate, is_explicit)`` triples. ``is_explicit`` marks
+    candidates carrying a deliberate marker -- a ``<tool_call>`` tag or a code
+    fence -- which are trusted regardless of how much prose surrounds them; a
+    bare object found loose in a paragraph is not.
 
-    obj = _balanced_span(text, "{", "}")
-    if obj:
-        yield obj
+    Bare scanning uses :func:`_balanced_span`, not a greedy ``\\{.*\\}``: a greedy
+    match runs from the first brace to the LAST one anywhere in the text, so a
+    call followed by prose containing a brace became an unparseable blob. It also
+    runs over a copy with fences and tags blanked out, so an illustrative example
+    inside a fence is not re-discovered as if it were loose text.
+    """
+    found = []
+    for m in _TOOL_CALL_TAG.finditer(text):
+        found.append((m.start(), m.group(1).strip(), True))
+    for m in _CODE_FENCE.finditer(text):
+        found.append((m.start(), m.group(1).strip(), True))
+
+    residual = _blank_out(_blank_out(text, _TOOL_CALL_TAG), _CODE_FENCE)
+    for opener, closer in (("[", "]"), ("{", "}")):
+        span = _balanced_span(residual, opener, closer)
+        if span:
+            found.append((residual.find(span), span, False))
+    return found
 
 
 def _balanced_span(text: str, opener: str, closer: str) -> str | None:
@@ -439,13 +508,42 @@ def parse_tool_calls(text: str, valid_names) -> list[dict] | None:
         except (json.JSONDecodeError, ValueError):
             pass
 
-    for candidate in _json_candidates(cleaned):
+    # Among several parseable candidates, the LAST one wins. A model that
+    # illustrates the format before committing ("here is how I would call it:
+    # ```…``` -- now the real call: {…}") puts the demo first and the real call
+    # last, so taking the first match handed the client the example's arguments.
+    best = None
+    for position, candidate, is_explicit in _json_candidates(cleaned):
         if not candidate:
             continue
+        if not is_explicit and not _looks_like_an_invocation(candidate, cleaned, position):
+            continue
         calls = _parse_candidate(candidate, valid_names)
-        if calls:
-            return calls
-    return None
+        if calls and (best is None or position >= best[0]):
+            best = (position, calls)
+    return best[1] if best else None
+
+
+def _looks_like_an_invocation(span: str, whole: str, position: int) -> bool:
+    """Decide whether a bare JSON object in ``whole`` is a call or just prose.
+
+    A model that is actually calling opens with the JSON -- the injected prompt
+    asks for exactly that and nothing else -- or works up to it and ends there
+    ("...now the real call: {...}"). A model quoting the tool's own schema to ask
+    a clarifying question ("its schema is {...}, but which city?") leaves a small
+    object stranded mid-sentence with the question after it, and converting that
+    destroys the question and issues a call the model never intended.
+
+    So a bare span qualifies when it opens the message, closes it, or is most of
+    it. Explicitly marked candidates skip this check entirely.
+    """
+    if position <= 0:
+        return True
+    if not whole:
+        return False
+    if not whole[position + len(span):].strip():
+        return True
+    return len(span) / len(whole) >= _EMBEDDED_MIN_SHARE
 
 
 def _parse_candidate(text: str, valid_names) -> list[dict] | None:

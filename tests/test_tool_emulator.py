@@ -396,6 +396,132 @@ def test_inject_strips_tools_even_when_none_are_callable():
     assert "tool_choice" not in result
 
 
+# --- malformed client input must degrade, never raise ---
+# api.py does no schema validation, so these bodies reach the emulator verbatim.
+# An exception here escapes armar_peticion inside the route loop and aborts the
+# whole chain before a single upstream attempt is made.
+
+@pytest.mark.parametrize("tools", [
+    [{"type": "function", "function": "not_a_dict"}],
+    [{"type": "function", "function": {"name": "f", "parameters": {"properties": [1, 2]}}}],
+    [{"type": "function", "function": {"name": "f", "parameters": {"required": 5}}}],
+    [{"type": "function", "function": {"name": "f", "parameters": "nope"}}],
+    [{"type": "function", "function": {"name": 42}}],
+    ["a bare string", None, 7],
+    "not even a list",
+])
+def test_inject_survives_malformed_tools(tools):
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "tools": tools}
+    result = inject_into_body(body)
+    assert "tools" not in result
+
+
+@pytest.mark.parametrize("choice", [
+    {"type": "function", "function": "not_a_dict"},
+    {"type": "function"},
+    12345,
+])
+def test_inject_survives_malformed_tool_choice(choice):
+    body = {**BODY_WITH_TOOLS, "tool_choice": choice}
+    result = inject_into_body(body)
+    assert "tool_choice" not in result
+
+
+@pytest.mark.parametrize("tools", [
+    [{"type": "function", "function": "not_a_dict"}],
+    "not a list",
+    None,
+    [None, 7],
+])
+def test_tool_names_survives_malformed_tools(tools):
+    from llm_libre.tool_emulator import tool_names
+    assert tool_names(tools) == set()
+
+
+def test_inject_still_converts_tool_messages_when_no_callable_tools():
+    """A non-callable `tools` array must not skip history rewriting: a `tool`
+    role would reach a provider that has no such role."""
+    body = {
+        "model": "m",
+        "messages": [{"role": "tool", "tool_call_id": "c1", "content": "result"}],
+        "tools": [{"type": "custom", "name": "c"}],
+    }
+    result = inject_into_body(body)
+    assert all(m["role"] != "tool" for m in result["messages"])
+    assert "[Function result]" in result["messages"][-1]["content"]
+
+
+def test_inject_forwards_non_dict_messages_untouched():
+    """Rejecting a malformed message is the provider's call, not ours."""
+    body = {"model": "m", "messages": ["hola", {"role": "user", "content": "hi"}],
+            "tools": [WEATHER_TOOL]}
+    result = inject_into_body(body)
+    assert "hola" in result["messages"]
+
+
+# --- tool_choice: "none" is a guarantee, not a request ---
+
+def test_detect_respects_tool_choice_none():
+    data = _response_with_content(
+        '{"name": "get_weather", "arguments": {"city": "Bogotá"}}'
+    )
+    assert detect_and_convert(data, [WEATHER_TOOL], "none") is data
+    # ...and still converts under any other choice
+    assert detect_and_convert(data, [WEATHER_TOOL], "auto") is not data
+
+
+# --- candidate ordering and prose discrimination ---
+
+def test_parse_prefers_the_real_call_over_an_illustrative_example():
+    """A demo fence followed by the actual call must yield the actual call."""
+    text = ('Here is how I would call it:\n'
+            '```json\n{"name": "get_weather", "arguments": {"city": "EXAMPLE"}}\n```\n'
+            'Now the real call:\n{"name": "get_weather", "arguments": {"city": "Quito"}}')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Quito"
+
+
+def test_parse_ignores_a_schema_quoted_inside_a_clarifying_question():
+    """Prose that merely quotes the tool's own JSON is not an invocation."""
+    text = ('You asked about the weather tool. Its schema is '
+            '{"name": "get_weather", "arguments": {}} -- but I need to know which '
+            'city you mean before I can look anything up for you.')
+    assert parse_tool_calls(text, VALID) is None
+
+
+def test_parse_strips_reasoning_and_thinking_tags_too():
+    for tag in ("thinking", "reasoning"):
+        text = (f'<{tag}>I could call {{"name": "get_weather", "arguments": {{"city": "X"}}}} '
+                f'but the user only wants a definition.</{tag}>\n'
+                'Weather is the state of the atmosphere at a given time.')
+        assert parse_tool_calls(text, VALID) is None, f"<{tag}> leaked a false call"
+
+
+# --- stream chunk envelope ---
+
+def test_stream_chunk_preserves_provider_envelope():
+    from llm_libre.tool_emulator import build_stream_chunk
+    envelope = {"id": "chatcmpl-abc", "created": 123, "model": "deepseek-chat",
+                "usage": {"total_tokens": 42}}
+    chunk = build_stream_chunk([{"name": "get_weather", "arguments": {"city": "Lima"}}],
+                               envelope)
+    assert chunk["id"] == "chatcmpl-abc"
+    assert chunk["created"] == 123
+    assert chunk["model"] == "deepseek-chat"
+    assert chunk["usage"]["total_tokens"] == 42
+    assert chunk["choices"][0]["finish_reason"] == "tool_calls"
+    assert chunk["choices"][0]["delta"]["tool_calls"][0]["index"] == 0
+
+
+def test_stream_chunk_text_variant():
+    from llm_libre.tool_emulator import build_stream_chunk
+    chunk = build_stream_chunk(None, {"id": "x"}, "plain answer")
+    assert chunk["choices"][0]["delta"]["content"] == "plain answer"
+    assert chunk["choices"][0]["finish_reason"] == "stop"
+    assert chunk["id"] == "x"
+
+
 # --- live tests against the real DeepSeek proxy ---
 
 @pytest.mark.vivo
