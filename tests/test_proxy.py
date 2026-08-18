@@ -288,7 +288,7 @@ async def test_a_200_that_is_all_reasoning_does_not_count_as_a_success():
 
 
 async def test_in_raw_mode_a_pure_reasoning_200_is_still_a_success():
-    # With x_crudo the client asked for the content verbatim: there IS an answer there.
+    # With x_raw the client asked for the content verbatim: there IS an answer there.
     p = _proxy(lambda req: httpx.Response(200, json=_ok("<think>pienso</think>")))
     r = await p.complete([_route("a:free")], BODY, now=0.0, raw=True)
     assert r.status == 200
@@ -309,7 +309,7 @@ async def test_next_release_excludes_cooldowns_from_another_request():
 
     r = await p.complete([_route("a:free"), _route("b:free")], BODY, now=10.0)
     assert r.status == 503
-    assert r.json["error"]["proxima_liberacion"] is None
+    assert r.json["error"]["next_release"] is None
 
 
 async def test_next_release_reports_the_soonest_one_of_this_chain():
@@ -326,7 +326,7 @@ async def test_next_release_reports_the_soonest_one_of_this_chain():
     r = await p.complete([_route("a:free"), _route("b:free")], BODY, now=0.0)
     assert r.status == 503
     assert p.cooldowns["kilo/b:free"] < p.cooldowns["kilo/a:free"]
-    assert r.json["error"]["proxima_liberacion"] == p.cooldowns["kilo/b:free"]
+    assert r.json["error"]["next_release"] == p.cooldowns["kilo/b:free"]
 
 
 # --- Fix round 3, I5: the NON-streaming path cannot measure a
@@ -381,7 +381,7 @@ async def test_a_200_with_non_object_json_moves_to_the_next_route():
 #     (a list of codes, the inverted default, chain-level attribution) -- and each
 #     one fell to a new vector, the last two hidden inside the very exceptions
 #     round 7 had written (a single-route chain, forceable by the client with
-#     `model` or `x_min_contexto`; complete_stream's cut via `if emitido:`). When
+#     `model` or `x_min_context`; complete_stream's cut via `if emitido:`). When
 #     the leaks are in the exceptions you wrote yourself, the axis is wrong, not
 #     under-enumerated.
 #
@@ -619,7 +619,7 @@ async def test_a_mix_of_4xx_and_5xx_counts_only_the_5xx():
 #     cooldown COUNTER, but it was still being written as an ordinary failed event
 #     -- and that feeds reliability, which /health uses to declare a route dead. 26
 #     malformed requests from ONE key were enough
-#     to sink EVERY route's reliability, with /health at "caido" while a DIFFERENT
+#     to sink EVERY route's reliability, with /health at "down" while a DIFFERENT
 #     key kept receiving 200s. Worse than the previous round's 503: the persistent
 #     /datos volume means a container restart (which Coolify triggers ONLY because
 #     /health failed) clears nothing -- a restart loop against a healthy
@@ -759,7 +759,7 @@ def _ping(body: bytes) -> bool:
 #     1. A chain of a SINGLE route. The previous round left it committing
 #        immediately because "it has nothing to compare against" -- but the CLIENT
 #        can force that chain themselves, with an explicit `model` or with
-#        `x_min_contexto` (which /v1/ranking already publishes per route, with no
+#        `x_min_context` (which /v1/ranking already publishes per route, with no
 #        internal knowledge needed). 15 identical requests were enough to cool all
 #        five routes, one by one.
 #     2. complete_stream's `if emitido:` branch, which committed with no chain

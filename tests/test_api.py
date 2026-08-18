@@ -29,17 +29,17 @@ def _sse(*chunks: str) -> bytes:
 
 def test_auto_is_balanced():
     p = parse_request({"model": "auto"})
-    assert p.model is None and p.profile == "balanceado"
+    assert p.model is None and p.profile == "balanced"
 
 
 def test_the_profile_aliases():
-    assert parse_request({"model": "auto:rapido"}).profile == "rapido"
-    assert parse_request({"model": "auto:potente"}).profile == "potente"
+    assert parse_request({"model": "auto:fast"}).profile == "fast"
+    assert parse_request({"model": "auto:strong"}).profile == "strong"
 
 
 def test_the_capability_aliases_translate_into_requirements():
     p = parse_request({"model": "auto:tools"})
-    assert p.needs_tools is True and p.profile == "balanceado"
+    assert p.needs_tools is True and p.profile == "balanced"
     assert parse_request({"model": "auto:vision"}).needs_vision is True
 
 
@@ -54,8 +54,8 @@ def test_sending_tools_requires_tool_support_even_without_asking():
 
 
 def test_the_x_extensions_are_honoured():
-    p = parse_request({"model": "auto", "x_requiere": ["tools", "vision"],
-                            "x_min_contexto": 200000, "x_permitir_pago": False})
+    p = parse_request({"model": "auto", "x_requires": ["tools", "vision"],
+                            "x_min_context": 200000, "x_allow_paid": False})
     assert p.needs_tools and p.needs_vision
     assert p.min_context == 200000
     assert p.allow_paid is False
@@ -66,7 +66,7 @@ def test_a_whitespace_only_model_is_treated_as_absent():
     # "or auto" and came out empty after the strip -- a confusing 404 about the
     # model ''. It must be treated like "" / None / absent: it falls back to "auto".
     p = parse_request({"model": "   "})
-    assert p.model is None and p.profile == "balanceado"
+    assert p.model is None and p.profile == "balanced"
 
 
 # --- Post-Task-14 review (gate): three real defects the reviewer found by
@@ -89,64 +89,64 @@ def test_plain_auto_still_works_after_the_unknown_suffix_fix():
     # A direct regression of the fix above: suffix == "" (that is, "auto" with no
     # ":") must NOT enter the rejection branch.
     p = parse_request({"model": "auto"})
-    assert p.model is None and p.profile == "balanceado"
+    assert p.model is None and p.profile == "balanced"
 
 
 def test_auto_balanceado_is_still_a_valid_alias():
-    # "balanceado" IS in PROFILES -- "auto:balanceado" is redundant with plain
+    # "balanced" IS in PROFILES -- "auto:balanced" is redundant with plain
     # "auto", but valid, and must not fall into the rejection branch.
-    p = parse_request({"model": "auto:balanceado"})
-    assert p.profile == "balanceado"
+    p = parse_request({"model": "auto:balanced"})
+    assert p.profile == "balanced"
 
 
-def test_x_requiere_as_a_bare_string_is_accepted_as_a_single_value():
+def test_x_requires_as_a_bare_string_is_accepted_as_a_single_value():
     # `set("tools")` iterates CHARACTERS ({'t','o','l','s'}), so
     # "tools" in exigidas was False and the requirement was ignored entirely,
     # without an error. A bare string (instead of a one-element list) is accepted
     # just the same.
-    p = parse_request({"model": "auto", "x_requiere": "tools"})
+    p = parse_request({"model": "auto", "x_requires": "tools"})
     assert p.needs_tools is True
     assert p.needs_vision is False
 
 
-def test_x_requiere_as_a_list_still_works_as_before():
-    p = parse_request({"model": "auto", "x_requiere": ["vision"]})
+def test_x_requires_as_a_list_still_works_as_before():
+    p = parse_request({"model": "auto", "x_requires": ["vision"]})
     assert p.needs_vision is True
     assert p.needs_tools is False
 
 
-def test_a_non_numeric_x_min_contexto_returns_400_naming_the_field():
+def test_a_non_numeric_x_min_context_returns_400_naming_the_field():
     with pytest.raises(HTTPException) as exc:
-        parse_request({"model": "auto", "x_min_contexto": "cien mil"})
+        parse_request({"model": "auto", "x_min_context": "cien mil"})
     assert exc.value.status_code == 400
-    assert exc.value.detail["campo"] == "x_min_contexto"
-    assert exc.value.detail["valor_recibido"] == "cien mil"
+    assert exc.value.detail["field"] == "x_min_context"
+    assert exc.value.detail["received_value"] == "cien mil"
 
 
-def test_a_numeric_x_min_contexto_as_a_string_still_works():
+def test_a_numeric_x_min_context_as_a_string_still_works():
     # int("100000") is valid -- the fix must not become stricter than it already
     # was for the case that DID work.
-    p = parse_request({"model": "auto", "x_min_contexto": "100000"})
+    p = parse_request({"model": "auto", "x_min_context": "100000"})
     assert p.min_context == 100000
 
 
-# --- Post-Task-14 review (third gate): the SAME family of bug as x_min_contexto
+# --- Post-Task-14 review (third gate): the SAME family of bug as x_min_context
 #     (an uncaught cast over a client field blows up with
 #     TypeError/AttributeError and escapes as a 500) got through twice more --
-#     x_requiere with a value that is neither a string nor a list (set() over an
+#     x_requires with a value that is neither a string nor a list (set() over an
 #     int/bool/float/list-of-lists) and model with anything that is not a string
 #     (.strip() over a number, a list, a dict). The fix generalises with
 #     _read_field instead of patching the third site by hand -- these tests cover
 #     the two new ones and confirm the SAME error shape
-#     (message/campo/valor_recibido) x_min_contexto already established. ---
+#     (message/campo/valor_recibido) x_min_context already established. ---
 
 @pytest.mark.parametrize("valor", [5, True, 3.5, [["tools"]]])
-def test_x_requiere_that_is_neither_string_nor_list_returns_400_naming_the_field(valor):
+def test_x_requires_that_is_neither_string_nor_list_returns_400_naming_the_field(valor):
     with pytest.raises(HTTPException) as exc:
-        parse_request({"model": "auto", "x_requiere": valor})
+        parse_request({"model": "auto", "x_requires": valor})
     assert exc.value.status_code == 400
-    assert exc.value.detail["campo"] == "x_requiere"
-    assert exc.value.detail["valor_recibido"] == valor
+    assert exc.value.detail["field"] == "x_requires"
+    assert exc.value.detail["received_value"] == valor
 
 
 @pytest.mark.parametrize("valor", [5, True, 3.5, ["a"], {"a": 1}])
@@ -154,8 +154,8 @@ def test_a_non_string_model_returns_400_naming_the_field(valor):
     with pytest.raises(HTTPException) as exc:
         parse_request({"model": valor})
     assert exc.value.status_code == 400
-    assert exc.value.detail["campo"] == "model"
-    assert exc.value.detail["valor_recibido"] == valor
+    assert exc.value.detail["field"] == "model"
+    assert exc.value.detail["received_value"] == valor
 
 
 def test_an_absent_or_null_model_still_falls_back_to_auto_without_a_400():
@@ -213,7 +213,7 @@ def test_completions_answers_and_marks_the_route_used(client):
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
-    assert r.headers["X-Ruta-Usada"] == "kilo/a:free"
+    assert r.headers["X-Route-Used"] == "kilo/a:free"
     assert r.headers["X-Tier"] == "free"
     assert r.json()["choices"][0]["message"]["content"] == "hola"
 
@@ -230,44 +230,44 @@ def test_completions_with_an_unknown_alias_returns_400_not_500(client):
     assert "auto:turbo" in r.json()["detail"]["message"]
 
 
-def test_completions_with_a_non_numeric_x_min_contexto_returns_400_not_500(client):
+def test_completions_with_a_non_numeric_x_min_context_returns_400_not_500(client):
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                     json={"model": "auto", "x_min_contexto": "cien mil", "messages": []})
+                     json={"model": "auto", "x_min_context": "cien mil", "messages": []})
     assert r.status_code == 400
-    assert r.json()["detail"]["campo"] == "x_min_contexto"
+    assert r.json()["detail"]["field"] == "x_min_context"
 
 
-def test_completions_with_x_requiere_as_a_string_applies_the_requirement(client):
+def test_completions_with_x_requires_as_a_string_applies_the_requirement(client):
     # kilo/a:free (the only route in the `client` fixture) declares tools=True, so
-    # "x_requiere": "tools" (a bare string) has to keep working -- if the bug
+    # "x_requires": "tools" (a bare string) has to keep working -- if the bug
     # (set() over a string) came back, this would still return 200 because kilo
     # DOES have tools, so the real proof that the requirement was applied lives in
     # the unit test above
-    # (test_x_requiere_as_a_bare_string_is_accepted_as_a_single_value); this one
+    # (test_x_requires_as_a_bare_string_is_accepted_as_a_single_value); this one
     # only confirms the request reaches the proxy intact without blowing up on the
     # way.
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                     json={"model": "auto", "x_requiere": "tools", "messages": []})
+                     json={"model": "auto", "x_requires": "tools", "messages": []})
     assert r.status_code == 200
 
 
-# --- Post-Task-14 review (third gate): the same two defects as above (x_requiere
+# --- Post-Task-14 review (third gate): the same two defects as above (x_requires
 #     that is neither string nor list, a non-string model), through the full HTTP
 #     client -- it confirms parse_request is wired into the real path, not merely
 #     tested in isolation. ---
 
-def test_completions_with_an_invalid_x_requiere_type_returns_400_not_500(client):
+def test_completions_with_an_invalid_x_requires_type_returns_400_not_500(client):
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                     json={"model": "auto", "x_requiere": 5, "messages": []})
+                     json={"model": "auto", "x_requires": 5, "messages": []})
     assert r.status_code == 400
-    assert r.json()["detail"]["campo"] == "x_requiere"
+    assert r.json()["detail"]["field"] == "x_requires"
 
 
 def test_completions_with_an_invalid_model_type_returns_400_not_500(client):
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": 5, "messages": []})
     assert r.status_code == 400
-    assert r.json()["detail"]["campo"] == "model"
+    assert r.json()["detail"]["field"] == "model"
 
 
 # --- Task 14 (documentation): the governing rule is that ENRICHING
@@ -319,19 +319,19 @@ def test_an_unknown_field_reaches_the_provider_verbatim():
     # would not travel -- see
     # test_it_does_not_forward_the_gateway_extensions_to_the_provider in
     # test_client.py for that half of the contract.
-    assert "x_crudo" not in received
+    assert "x_raw" not in received
 
 
 def test_models_lists_the_catalogue_and_the_aliases(client):
     r = client.get("/v1/models", headers={"X-API-Key": "buena"})
     ids = [m["id"] for m in r.json()["data"]]
     assert "a:free" in ids
-    assert "auto" in ids and "auto:rapido" in ids
+    assert "auto" in ids and "auto:fast" in ids
 
 
 def test_asking_for_impossible_capabilities_returns_400(client):
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                     json={"model": "auto", "messages": [], "x_min_contexto": 99999999})
+                     json={"model": "auto", "messages": [], "x_min_context": 99999999})
     assert r.status_code == 400
 
 
@@ -342,11 +342,11 @@ def test_an_explicit_model_that_no_longer_exists_returns_404_with_suggestions(cl
     # that depends on difflib.get_close_matches (cutoff=0.3) considering "a:free"
     # similar enough to "poolside/laguna-m.1:free" -- a detail of the similarity
     # metric, not of the contract this test wants to protect. What is asserted is
-    # the real contract: that the response carries the "sugerencias" key.
+    # the real contract: that the response carries the "suggestions" key.
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "poolside/laguna-m.1:free", "messages": []})
     assert r.status_code == 404
-    assert "sugerencias" in str(r.json())
+    assert "suggestions" in str(r.json())
 
 
 # --- ALSO from the round 6 review: the case above covers an id that is NO LONGER
@@ -354,7 +354,7 @@ def test_an_explicit_model_that_no_longer_exists_returns_404_with_suggestions(cl
 #     reason to exist" -- an id that IS STILL in the catalogue but which the real
 #     provider no longer serves (a genuine 404, live). The route already takes the
 #     reliability hit (a 404 is route evidence by default, Part 1), but until this
-#     fix the client only saw a generic 503 ("detalle": "HTTP 404") --
+#     fix the client only saw a generic 503 ("detail": "HTTP 404") --
 #     indistinguishable from any other transient unavailability, throughout the
 #     window of up to 5h before the next catalogue sync (never for paid routes,
 #     which are not probed). ---
@@ -367,7 +367,7 @@ def test_an_explicit_model_gone_upstream_returns_404_not_503(state_client):
                      json={"model": "a:free", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 404
     assert "a:free" in str(r.json())
-    assert "sugerencias" in str(r.json())
+    assert "suggestions" in str(r.json())
 
 
 # --- Round 7, LOW from the gate: `_similar_ids` ran against `active_routes()`,
@@ -387,7 +387,7 @@ def test_the_live_404_suggestions_exclude_the_model_just_declared_dead(state_cli
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "a:free", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 404
-    suggestions = r.json()["detail"]["sugerencias"]
+    suggestions = r.json()["detail"]["suggestions"]
     assert "a:free" not in suggestions
     assert "a:freebie" in suggestions
 
@@ -405,7 +405,7 @@ def test_the_auto_model_with_an_upstream_404_is_still_503(state_client):
 
 
 def test_health_says_ok_when_a_live_route_exists(client):
-    assert client.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["status"] == "ok"
 
 
 # --- Fix round 1, hallazgo 1 (Critical): /health tambien debe fallar cuando
@@ -413,7 +413,7 @@ def test_health_says_ok_when_a_live_route_exists(client):
 #     it is in cooldown from a 429.
 #
 #     Rewritten in round 6, Part 2: the previous version seeded 8 failures + 2
-#     successes and expected "caido" -- under the "evidence of life" redesign that
+#     successes and expected "down" -- under the "evidence of life" redesign that
 #     case CORRECTLY becomes "ok" (there is a real recent success; see
 #     test_health_stays_ok_with_30_403s_but_one_recent_success below for the case
 #     this replaces). This test now checks what the coordinator asked for
@@ -439,7 +439,7 @@ def test_health_is_not_ok_when_the_free_route_genuinely_fails(state_client):
 
     r = client.get("/health")
     assert r.status_code != 200
-    assert r.json()["estado"] != "ok"
+    assert r.json()["status"] != "ok"
 
 
 def test_health_is_ok_when_the_free_route_has_no_telemetry_yet(state_client):
@@ -448,7 +448,7 @@ def test_health_is_ok_when_the_free_route_has_no_telemetry_yet(state_client):
     state, client = state_client
     rows = state.store._con.execute("SELECT COUNT(*) FROM events").fetchone()
     assert rows[0] == 0
-    assert client.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["status"] == "ok"
 
 
 def test_health_is_ok_when_the_free_route_is_healthy(state_client):
@@ -458,7 +458,7 @@ def test_health_is_ok_when_the_free_route_is_healthy(state_client):
         state.store.record_event("kilo/a:free", True, 200, 200, now)
     for _ in range(1):
         state.store.record_event("kilo/a:free", False, 0, 500, now)
-    assert client.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["status"] == "ok"
 
 
 def test_health_still_excludes_on_a_429_cooldown(state_client):
@@ -477,7 +477,7 @@ def test_health_still_excludes_on_a_429_cooldown(state_client):
 
     r = client.get("/health")
     assert r.status_code != 200
-    assert r.json()["estado"] != "ok"
+    assert r.json()["status"] != "ok"
 
 
 # --- Round 7, MEDIUM (test quality) from the gate: the test above does not pin
@@ -510,7 +510,7 @@ def test_health_excludes_on_cooldown_even_with_liveness_evidence(state_client):
 
     r = client.get("/health")
     assert r.status_code != 200
-    assert r.json()["estado"] != "ok"
+    assert r.json()["status"] != "ok"
 
 
 # --- Round 6 of Task 13, Part 2. `403` is GENUINELY ambiguous: a suspended
@@ -529,7 +529,7 @@ def test_health_stays_ok_with_30_403s_but_one_recent_success(state_client):
     state.store.record_event("kilo/a:free", True, 50, 200, now)
     for _ in range(30):
         state.store.record_event("kilo/a:free", False, 0, 403, now)
-    assert client.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["status"] == "ok"
 
 
 def test_health_after_a_process_restart_stays_ok_with_403s_and_one_success(tmp_path):
@@ -552,7 +552,7 @@ def test_health_after_a_process_restart_stays_ok_with_403s_and_one_success(tmp_p
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
     estado1 = State(store=store1, proxy=proxy1, api_keys={"buena"}, daily_paid_cap=200)
     cliente1 = TestClient(create_app(estado1))
-    assert cliente1.get("/health").json()["estado"] == "ok"
+    assert cliente1.get("/health").json()["status"] == "ok"
 
     store2 = Storage(db_path)
     store2.create_schema()
@@ -562,13 +562,13 @@ def test_health_after_a_process_restart_stays_ok_with_403s_and_one_success(tmp_p
             lambda req: httpx.Response(403, json={"error": "flagged"}))))
     estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
-    assert cliente2.get("/health").json()["estado"] == "ok"
+    assert cliente2.get("/health").json()["status"] == "ok"
 
 
 def test_health_after_a_process_restart_stays_down_with_no_successes_or_probe(tmp_path):
     # A restart of the "genuinely dead" case: zero successes and the health probe
     # failed too, persisted in /datos -- a fresh process has to keep reading
-    # "caido", not "ok for lack of evidence to the contrary".
+    # "down", not "ok for lack of evidence to the contrary".
     db_path = str(tmp_path / "salud_muerta.sqlite3")
     now = time.time()
 
@@ -589,9 +589,9 @@ def test_health_after_a_process_restart_stays_down_with_no_successes_or_probe(tm
     cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
-    assert r1.json()["estado"] != "ok"
+    assert r1.json()["status"] != "ok"
 
-    # A second process with a HEALTHY transport, to prove that "caido" comes from
+    # A second process with a HEALTHY transport, to prove that "down" comes from
     # the ALREADY PERSISTED telemetry, not from new traffic this process
     # genere.
     store2 = Storage(db_path)
@@ -605,7 +605,7 @@ def test_health_after_a_process_restart_stays_down_with_no_successes_or_probe(tm
     cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
-    assert r2.json()["estado"] != "ok"
+    assert r2.json()["status"] != "ok"
 
 
 def test_health_after_a_process_restart_stays_ok_with_no_telemetry(tmp_path):
@@ -621,14 +621,14 @@ def test_health_after_a_process_restart_stays_ok_with_no_telemetry(tmp_path):
     estado1 = State(store=store1, proxy=Proxy({}, store1, httpx.AsyncClient()),
                      api_keys={"buena"}, daily_paid_cap=200)
     cliente1 = TestClient(create_app(estado1))
-    assert cliente1.get("/health").json()["estado"] == "ok"
+    assert cliente1.get("/health").json()["status"] == "ok"
 
     store2 = Storage(db_path)
     store2.create_schema()
     estado2 = State(store=store2, proxy=Proxy({}, store2, httpx.AsyncClient()),
                      api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
-    assert cliente2.get("/health").json()["estado"] == "ok"
+    assert cliente2.get("/health").json()["status"] == "ok"
 
 
 # --- Round 4 of Task 13, a HIGH finding. Round 3's fix took the 4xx out of the
@@ -636,13 +636,13 @@ def test_health_after_a_process_restart_stays_ok_with_no_telemetry(tmp_path):
 #     -- and that feeds reliability, which _viva() uses for the floor of
 #     /health. Reproducido: 26 pedidos malformados SEGUIDOS de UNA llave
 #     (a client retrying the same error, something OpenAI's SDKs do on their own)
-#     are enough to sink EVERY route's reliability, with /health at "caido"/503
+#     are enough to sink EVERY route's reliability, with /health at "down"/503
 #     while a DIFFERENT key with a
 #     VALID request keeps receiving 200s the whole time. Worse than the previous
 #     round's 503: Coolify uses /health as its health check and RESTARTS the
 #     container when it fails -- but `events` lives on the
 #     persistent /datos volume, so a fresh process against the SAME database keeps
-#     seeing the same 26 failures and keeps reporting "caido". A restart loop that
+#     seeing the same 26 failures and keeps reporting "down". A restart loop that
 #     restarting cannot break, against a service that
 #     responde bien. ---
 
@@ -660,7 +660,7 @@ def test_health_stays_ok_after_30_consecutive_400s(state_client):
     asyncio.run(_mandar_400_treinta_veces())
     r = client.get("/health")
     assert r.status_code == 200
-    assert r.json()["estado"] == "ok"
+    assert r.json()["status"] == "ok"
 
 
 def test_health_falls_with_30_consecutive_500s_as_before(state_client):
@@ -679,7 +679,7 @@ def test_health_falls_with_30_consecutive_500s_as_before(state_client):
     asyncio.run(_mandar_500_treinta_veces())
     r = client.get("/health")
     assert r.status_code != 200
-    assert r.json()["estado"] != "ok"
+    assert r.json()["status"] != "ok"
 
 
 def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path):
@@ -707,7 +707,7 @@ def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path)
 
     asyncio.run(_mandar_400_treinta_veces())
     cliente1 = TestClient(create_app(estado1))
-    assert cliente1.get("/health").json()["estado"] == "ok"
+    assert cliente1.get("/health").json()["status"] == "ok"
 
     # "Container restart": a fresh process, a fresh Storage, the SAME database.
     store2 = Storage(db_path)
@@ -721,13 +721,13 @@ def test_health_after_a_process_restart_stays_ok_with_consecutive_400s(tmp_path)
     cliente2 = TestClient(create_app(estado2))
     r = cliente2.get("/health")
     assert r.status_code == 200
-    assert r.json()["estado"] == "ok"
+    assert r.json()["status"] == "ok"
 
 
 def test_the_ranking_does_not_move_on_consecutive_400s_but_does_on_500s(state_client):
     state, client = state_client
     now = time.time()
-    antes = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    antes = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
 
     async def _mandar(codigo, veces):
         routes = state.store.active_routes()
@@ -737,14 +737,14 @@ def test_the_ranking_does_not_move_on_consecutive_400s_but_does_on_500s(state_cl
             await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar(400, 30))
-    despues_400 = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert despues_400["confiabilidad"] == antes["confiabilidad"]
-    assert despues_400["puntaje"] == antes["puntaje"]
+    despues_400 = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    assert despues_400["reliability"] == antes["reliability"]
+    assert despues_400["score"] == antes["score"]
 
     asyncio.run(_mandar(500, 30))
-    despues_500 = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert despues_500["confiabilidad"] < antes["confiabilidad"]
-    assert despues_500["puntaje"] < antes["puntaje"]
+    despues_500 = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    assert despues_500["reliability"] < antes["reliability"]
+    assert despues_500["score"] < antes["score"]
 
 
 # --- Round 5 of Task 13, a HIGH finding. Round 4's classification
@@ -776,13 +776,13 @@ def test_health_falls_with_30_consecutive_route_evidence_codes(state_client, cod
     asyncio.run(_mandar_treinta_veces())
     r = client.get("/health")
     assert r.status_code != 200
-    assert r.json()["estado"] != "ok"
+    assert r.json()["status"] != "ok"
 
 
 def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_path):
     # The flip side of round 4's restart-loop test: a code that IS route evidence
     # (401, an expired key) has to keep
-    # reporting "caido" even in a FRESH process against the SAME database --
+    # reporting "down" even in a FRESH process against the SAME database --
     # this is the test that would have caught the original bug (a 401 wrongly
     # filed as a client error left /health saying "ok" with all 5 routes genuinely
     # down, even after a restart).
@@ -815,7 +815,7 @@ def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_pat
     cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
-    assert r1.json()["estado"] != "ok"
+    assert r1.json()["status"] != "ok"
 
     # "Container restart": a fresh process, a fresh Storage, the SAME database --
     # with a HEALTHY transport in the second process, to prove the outage comes
@@ -832,12 +832,12 @@ def test_health_after_a_process_restart_stays_down_with_consecutive_401s(tmp_pat
     cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
-    assert r2.json()["estado"] != "ok"
+    assert r2.json()["status"] != "ok"
 
 
 # --- Round 8. The gate found two vectors round 7 did not close, both escape
 #     hatches of its own design: a chain of a SINGLE route (forceable by the
-#     client with an explicit `model` or `x_min_contexto`, with no
+#     client with an explicit `model` or `x_min_context`, with no
 #     internal knowledge) and complete_stream's `if emitido:` branch
 #     (with no chain check). Round 8 removes the "how many routes are there"
 #     axis: real traffic NEVER excludes a route directly, it only accumulates
@@ -853,7 +853,7 @@ def _ping(body: bytes) -> bool:
 
 def test_health_stays_ok_under_a_single_route_chain_attack(state_client):
     # state_client already has a single free route -- exactly the gate's vector 1
-    # (an explicit `model`, or x_min_contexto, narrows down to this).
+    # (an explicit `model`, or x_min_context, narrows down to this).
     state, client = state_client
     now = time.time()
 
@@ -872,7 +872,7 @@ def test_health_stays_ok_under_a_single_route_chain_attack(state_client):
         await state.proxy.wait_for_pending_probes()
 
     asyncio.run(_quince_pedidos_identicos())
-    assert client.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["status"] == "ok"
 
 
 def test_health_stays_ok_under_a_flood_of_contentless_streaming_chunks(state_client):
@@ -901,7 +901,7 @@ def test_health_stays_ok_under_a_flood_of_contentless_streaming_chunks(state_cli
         await state.proxy.wait_for_pending_probes()
 
     asyncio.run(_quince_streams_identicos())
-    assert client.get("/health").json()["estado"] == "ok"
+    assert client.get("/health").json()["status"] == "ok"
 
 
 def test_health_falls_quickly_for_a_genuinely_broken_route_via_an_on_demand_probe(state_client):
@@ -923,7 +923,7 @@ def test_health_falls_quickly_for_a_genuinely_broken_route_via_an_on_demand_prob
     assert state.proxy.cooldowns  # la sonda confirmo y castigo
     r = client.get("/health")
     assert r.status_code != 200
-    assert r.json()["estado"] != "ok"
+    assert r.json()["status"] != "ok"
 
 
 def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(tmp_path):
@@ -953,7 +953,7 @@ def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(t
 
     asyncio.run(_quince_pedidos())
     cliente1 = TestClient(create_app(estado1))
-    assert cliente1.get("/health").json()["estado"] == "ok"
+    assert cliente1.get("/health").json()["status"] == "ok"
 
     # "Container restart": a fresh process, a fresh Storage, the SAME database --
     # without the original proxy1 (with its already-resolved probe) intervening.
@@ -964,7 +964,7 @@ def test_health_after_a_restart_stays_ok_following_a_single_route_chain_attack(t
         store2, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
     estado2 = State(store=store2, proxy=proxy2, api_keys={"buena"}, daily_paid_cap=200)
     cliente2 = TestClient(create_app(estado2))
-    assert cliente2.get("/health").json()["estado"] == "ok"
+    assert cliente2.get("/health").json()["status"] == "ok"
 
 
 def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tmp_path):
@@ -1001,14 +1001,14 @@ def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tm
     cliente1 = TestClient(create_app(estado1))
     r1 = cliente1.get("/health")
     assert r1.status_code != 200
-    assert r1.json()["estado"] != "ok"
+    assert r1.json()["status"] != "ok"
 
     rows = store1._con.execute(
         "SELECT kind, ok FROM probes WHERE key = 'kilo/a:free'").fetchall()
     assert len(rows) == 2
     assert all(f == ("health", 0) for f in rows)
 
-    # A second process, with a HEALTHY transport -- to prove that "caido" comes
+    # A second process, with a HEALTHY transport -- to prove that "down" comes
     # from the ALREADY PERSISTED probe, not from new traffic this process
     # genere.
     store2 = Storage(db_path)
@@ -1022,13 +1022,13 @@ def test_health_after_a_restart_stays_down_following_a_failed_on_demand_probe(tm
     cliente2 = TestClient(create_app(estado2))
     r2 = cliente2.get("/health")
     assert r2.status_code != 200
-    assert r2.json()["estado"] != "ok"
+    assert r2.json()["status"] != "ok"
 
 
 def test_the_ranking_falls_on_consecutive_401s_just_as_on_500s(state_client):
     state, client = state_client
     now = time.time()
-    antes = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
+    antes = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
 
     async def _mandar_401_treinta_veces():
         routes = state.store.active_routes()
@@ -1038,21 +1038,21 @@ def test_the_ranking_falls_on_consecutive_401s_just_as_on_500s(state_client):
             await state.proxy.complete(routes, {"model": "a:free", "messages": []}, now)
 
     asyncio.run(_mandar_401_treinta_veces())
-    despues = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert despues["confiabilidad"] < antes["confiabilidad"]
-    assert despues["puntaje"] < antes["puntaje"]
+    despues = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    assert despues["reliability"] < antes["reliability"]
+    assert despues["score"] < antes["score"]
 
 
 def test_the_ranking_breaks_down_the_components(client):
-    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    for campo in ("clave", "puntaje", "calidad", "confiabilidad", "ttft_p50_ms", "tier",
-                 "prioridad"):
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    for campo in ("key", "score", "quality", "reliability", "ttft_p50_ms", "tier",
+                 "priority"):
         assert campo in row
 
 
 # --- Finding 3 of the Task 13 review: /v1/ranking ordered ONLY by score and did
 #     not carry `prioridad`, so it could show kilo/k:free
-#     arriba de todo mientras X-Ruta-Usada decia chatgpt/gpt-5-0 -- el
+#     arriba de todo mientras X-Route-Used decia chatgpt/gpt-5-0 -- el
 #     endpoint the README describes as the place to audit WHY the router chose
 #     what it chose stopped explaining it. It now orders with the SAME key as
 #     router.order_routes (via router.sort_key). ---
@@ -1070,14 +1070,14 @@ def test_the_ranking_orders_by_priority_not_only_by_score(state_client):
     state.store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 5, 5, 10.0)
     state.store.record_event("kilo/a:free", True, 50, 200, 20.0)
 
-    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
-    claves = [f["clave"] for f in rows]
-    puntajes = {f["clave"]: f["puntaje"] for f in rows}
+    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"]
+    claves = [f["key"] for f in rows]
+    puntajes = {f["key"]: f["score"] for f in rows}
     # Confirms it genuinely scores worse -- otherwise the test proves nothing.
     assert puntajes["chatgpt/gpt-5:free"] < puntajes["kilo/a:free"]
     # And it still goes first: priority rules, as in the real router.
     assert claves[0] == "chatgpt/gpt-5:free"
-    assert {f["clave"]: f["prioridad"] for f in rows} == {
+    assert {f["key"]: f["priority"] for f in rows} == {
         "chatgpt/gpt-5:free": 0, "kilo/a:free": 100}
 
 
@@ -1098,8 +1098,8 @@ def test_the_ranking_sends_a_route_in_cooldown_last_even_if_it_scores_better(sta
     state.store.record_event("chatgpt/gpt-5:free", True, 50, 200, 20.0)
     state.proxy.cooldowns["chatgpt/gpt-5:free"] = time.time() + 500
 
-    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"]
-    claves = [f["clave"] for f in rows]
+    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"]
+    claves = [f["key"] for f in rows]
     assert claves[-1] == "chatgpt/gpt-5:free"
     assert claves[0] == "kilo/a:free"
 
@@ -1328,12 +1328,12 @@ def test_the_per_minute_limit_counts_the_same_whichever_header_is_used():
 #     -- exactly the datum that was missing to diagnose B2. ---
 
 def test_the_ranking_marks_a_route_without_a_quality_probe_as_unmeasured(client):
-    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert row["calidad_medida"] is False
-    assert row["calidad"] is None            # no se muestra el neutro como medicion
-    assert row["calidad_asumida"] == 0.6     # pero se dice cual se uso para puntuar
-    assert row["ultima_sonda_calidad"] is None
-    assert row["ultima_sonda"] is None
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    assert row["quality_measured"] is False
+    assert row["quality"] is None            # no se muestra el neutro como medicion
+    assert row["quality_assumed"] == 0.6     # pero se dice cual se uso para puntuar
+    assert row["last_quality_probe"] is None
+    assert row["last_probe"] is None
 
 
 def test_the_ranking_carries_the_date_of_the_last_probe(state_client):
@@ -1343,12 +1343,12 @@ def test_the_ranking_carries_the_date_of_the_last_probe(state_client):
                                    1786968000.0)
     state.store.record_probe("kilo/a:free", "health", True, 120, 0, 200, 0, 0,
                                    1786989600.0)
-    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert row["calidad_medida"] is True
-    assert row["calidad"] == 0.6             # 3/5, esta vez SI medido
-    assert row["calidad_asumida"] is None
-    assert row["ultima_sonda_calidad"] == "2026-08-17T12:00:00Z"
-    assert row["ultima_sonda"] == "2026-08-17T18:00:00Z"
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    assert row["quality_measured"] is True
+    assert row["quality"] == 0.6             # 3/5, esta vez SI medido
+    assert row["quality_assumed"] is None
+    assert row["last_quality_probe"] == "2026-08-17T12:00:00Z"
+    assert row["last_probe"] == "2026-08-17T18:00:00Z"
 
 
 def test_a_route_in_cooldown_does_not_lose_its_measured_quality_mark(state_client):
@@ -1359,9 +1359,9 @@ def test_a_route_in_cooldown_does_not_lose_its_measured_quality_mark(state_clien
     state.store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 5, 5,
                                    1786968000.0)
     state.proxy.cooldowns["kilo/a:free"] = time.time() + 600
-    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["rutas"][0]
-    assert row["calidad_medida"] is True
-    assert row["en_cooldown_hasta"] > time.time()
+    row = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"][0]
+    assert row["quality_measured"] is True
+    assert row["cooldown_until"] > time.time()
 
 
 # --- Fix round 3, B3 (Blocking): section 9's 503 was delivered as a 400 on every
@@ -1378,7 +1378,7 @@ def test_every_candidate_in_cooldown_returns_503_not_400(state_client):
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 503
-    assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(hasta)
+    assert r.json()["detail"]["next_release"] == pytest.approx(hasta)
 
 
 def test_every_candidate_in_cooldown_returns_503_when_streaming_too(state_client):
@@ -1394,9 +1394,9 @@ def test_capabilities_nobody_satisfies_is_still_a_400(state_client):
     # 400, with what it asked for and how many routes exist.
     state, client = state_client
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                     json={"model": "auto", "messages": [], "x_min_contexto": 99999999})
+                     json={"model": "auto", "messages": [], "x_min_context": 99999999})
     assert r.status_code == 400
-    assert r.json()["detail"]["rutas_activas"] == 1
+    assert r.json()["detail"]["active_routes"] == 1
 
 
 def test_the_daily_paid_cap_returns_503_not_400():
@@ -1416,7 +1416,7 @@ def test_the_daily_paid_cap_returns_503_not_400():
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 503
-    assert r.json()["detail"]["tope_pago_alcanzado"] is True
+    assert r.json()["detail"]["paid_cap_reached"] is True
 
 
 def test_the_unavailability_503_reports_no_release_when_there_is_no_cooldown():
@@ -1429,16 +1429,16 @@ def test_the_unavailability_503_reports_no_release_when_there_is_no_cooldown():
     state.store.upsert_routes([], 1.0, deactivate_missing=False)
     state.proxy.cooldowns["free_prov/f:free"] = time.time() + 300
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                     json={"model": "auto", "messages": [], "x_permitir_pago": False})
+                     json={"model": "auto", "messages": [], "x_allow_paid": False})
     assert r.status_code == 503
-    assert r.json()["detail"]["proxima_liberacion"] == pytest.approx(
+    assert r.json()["detail"]["next_release"] == pytest.approx(
         state.proxy.cooldowns["free_prov/f:free"])
 
 
 # --- Fix round 3, I2: section 6.1 promises to return the trimmed reasoning in a
-#     separate field, `x_razonamiento`. It was trimmed out of `content` and thrown
+#     separate field, `x_reasoning`. It was trimmed out of `content` and thrown
 #     away: a
-#     client with the default `x_crudo: false` had no way to recover it. ---
+#     client with the default `x_raw: false` had no way to recover it. ---
 
 def _client_that_thinks(contenido):
     store = Storage(":memory:")
@@ -1455,34 +1455,34 @@ def _client_that_thinks(contenido):
     return TestClient(create_app(state))
 
 
-def test_it_returns_the_trimmed_reasoning_in_x_razonamiento():
+def test_it_returns_the_trimmed_reasoning_in_x_reasoning():
     client = _client_that_thinks("<think>2+2 son 4</think>La response es 4.")
     r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
                      json={"model": "auto", "messages": []})
     assert r.status_code == 200
     assert r.json()["choices"][0]["message"]["content"] == "La response es 4."
-    assert r.json()["x_razonamiento"] == "2+2 son 4"
+    assert r.json()["x_reasoning"] == "2+2 son 4"
 
 
 def test_without_reasoning_it_does_not_add_the_field():
     client = _client_that_thinks("La response es 4.")
-    assert "x_razonamiento" not in client.post(
+    assert "x_reasoning" not in client.post(
         "/v1/chat/completions", headers={"X-API-Key": "buena"},
         json={"model": "auto", "messages": []}).json()
 
 
-def test_in_raw_mode_there_is_no_x_razonamiento_because_it_stays_in_the_content():
+def test_in_raw_mode_there_is_no_x_reasoning_because_it_stays_in_the_content():
     client = _client_that_thinks("<think>mmm</think>hola")
     body = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
-                          json={"model": "auto", "messages": [], "x_crudo": True}).json()
+                          json={"model": "auto", "messages": [], "x_raw": True}).json()
     assert body["choices"][0]["message"]["content"] == "<think>mmm</think>hola"
-    assert "x_razonamiento" not in body
+    assert "x_reasoning" not in body
 
 
 # --- Fix round 3, ALSO: the coupling between the neutral reliability value and
 #     /health's floor was load-bearing and lived in two different files, with
 #     nothing testing it. If it ever inverted, a FRESH install -- with not one
-#     event yet -- reported "caido" and Coolify never marked the container
+#     event yet -- reported "down" and Coolify never marked the container
 #     healthy: the service never started, because of a constant.
 #
 #     Round 6, Part 2: the mechanism this test protected (comparing

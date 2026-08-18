@@ -22,7 +22,7 @@ def test_the_priority_can_be_declared_explicitly():
 
 def test_a_default_request_is_balanced_and_allows_paid():
     p = RouteRequest()
-    assert p.profile == "balanceado"
+    assert p.profile == "balanced"
     assert p.allow_paid is True
     assert p.model is None
 
@@ -36,8 +36,8 @@ def test_as_wire_emits_the_spanish_keys_the_error_bodies_use():
     """The 400/503 bodies serialise this, so these keys are the HTTP contract --
     see tests/test_wire_contract.py, which asserts them end to end."""
     wire = RouteRequest(model="x", needs_tools=True, min_context=1000).as_wire()
-    assert set(wire) == {"modelo", "requiere_tools", "requiere_vision",
-                         "min_contexto", "perfil", "permitir_pago"}
-    assert wire["modelo"] == "x"
-    assert wire["requiere_tools"] is True
-    assert wire["min_contexto"] == 1000
+    assert set(wire) == {"model", "needs_tools", "needs_vision",
+                         "min_context", "profile", "allow_paid"}
+    assert wire["model"] == "x"
+    assert wire["needs_tools"] is True
+    assert wire["min_context"] == 1000

@@ -1,5 +1,5 @@
 """That an image in the body is enough to require a vision-capable route, with
-no need for the client to announce it via x_requiere or the auto:vision alias."""
+no need for the client to announce it via x_requires or the auto:vision alias."""
 from llm_libre.api import _has_image, parse_request
 from llm_libre.models import Capabilities, Route
 from llm_libre.router import order_routes

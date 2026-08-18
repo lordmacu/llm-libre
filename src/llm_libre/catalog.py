@@ -60,7 +60,7 @@ _DISCARD = re.compile("|".join(_SPECIALITY + _META_ROUTER), re.IGNORECASE)
 #
 # INFO from the round 6 review: the literal "auto" is not enough. `ALIAS` in
 # api.py (and `parse_request`) also treats as a reserved alias ANY id of the
-# form "auto:<suffix>" -- "auto:rapido", "auto:potente", "auto:tools",
+# form "auto:<suffix>" -- "auto:fast", "auto:strong", "auto:tools",
 # "auto:vision" -- resolving it ALWAYS before comparing against `pedido.model`.
 # A provider publishing a real model under one of those ids (or any other
 # "auto:*" api.py adds tomorrow) created a permanently unreachable route, by

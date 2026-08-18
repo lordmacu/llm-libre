@@ -488,9 +488,9 @@ class Proxy:
         request_cooldowns = {c: v for c, v in self.cooldowns.items()
                                 if c in request_keys}
         return ProxyResponse(503, {"error": {
-            "message": "sin routes disponibles",
-            "detalle": last_error,
-            "proxima_liberacion": (min(request_cooldowns.values())
+            "message": "no routes available",
+            "detail": last_error,
+            "next_release": (min(request_cooldowns.values())
                                    if request_cooldowns else None),
         }}, None, attempts, "", last_code)
 
@@ -808,7 +808,7 @@ class Proxy:
                     return
                 continue
 
-        yield 'data: {"error":{"message":"sin routes disponibles"}}\n\n'
+        yield 'data: {"error":{"message":"no routes available"}}\n\n'
         yield "data: [DONE]\n\n"
 
     def _punish(self, key: str, now: float) -> None:

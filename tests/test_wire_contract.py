@@ -1,24 +1,29 @@
 """Frozen public contract: everything a client can observe.
 
-This file exists to make the Spanish-to-English refactor safe. The internals are
-being renamed module by module, but the names below are the PUBLIC surface --
-endpoint paths, JSON keys, response headers, request extensions, YAML keys and
-profile values -- and renaming any of them breaks every deployed client with no
-compiler, type checker or existing test to catch it.
+Endpoint paths, JSON keys, response headers, request extensions, YAML keys,
+profile and tier values, and the persisted schema. Nothing here can change
+without breaking a deployed client, and none of it has a compiler or a type
+checker watching it -- which is why the assertions below are deliberately
+literal, spelling out every string rather than deriving it from the code they
+are meant to constrain.
 
-Two of these couplings are invisible at the call site and caused this file to be
-written before a single rename:
+This file was written BEFORE the Spanish-to-English refactor began, to freeze
+what the refactor must not touch. Two of the couplings it pins down are
+invisible at the call site:
 
-- `api.py` serialises `pedido.__dict__` straight into the 400 and 503 error
-  bodies, so the `Pedido` dataclass FIELD NAMES are wire format. Renaming a
-  field silently changes the HTTP contract.
+- `api.py` used to serialise `request.__dict__` straight into the 400 and 503
+  error bodies, so the dataclass FIELD NAMES were wire format and renaming a
+  field silently changed the HTTP contract. `RouteRequest.as_wire()` now makes
+  that mapping explicit; this file asserts what it produces.
 - `providers.load` reads YAML keys as string literals, so the `Provider`
   dataclass fields may be renamed freely but the keys in `proveedores.yaml` may
   not.
 
-So: these assertions are deliberately literal. If one fails during a refactor,
-the rename went too far -- fix the code, never this file. Changing anything here
-is a versioned API change, not a refactor.
+The surface has since been translated ON PURPOSE -- a deliberate, breaking
+change made while no client had integrated yet, not a refactor that leaked. What
+the file is for has not changed: if an assertion here fails during a rename, the
+rename went too far. Fix the code, never this file. Changing anything here is a
+versioned API change.
 """
 import httpx
 import pytest
@@ -54,7 +59,7 @@ AUTH = {"Authorization": "Bearer buena"}
 # --- endpoint paths ---
 
 def test_endpoint_paths(cliente):
-    for path in ("/health", "/v1/models", "/v1/ranking", "/v1/uso"):
+    for path in ("/health", "/v1/models", "/v1/ranking", "/v1/usage"):
         assert cliente.get(path, headers=AUTH).status_code == 200, path
 
 
@@ -62,23 +67,23 @@ def test_endpoint_paths(cliente):
 
 def test_health_body_keys(cliente):
     body = cliente.get("/health").json()
-    assert set(body) == {"estado", "rutas_activas", "rutas_libres", "gratis_libres"}
-    assert body["estado"] in {"ok", "degradado", "caido"}
+    assert set(body) == {"status", "active_routes", "available_routes", "free_available"}
+    assert body["status"] in {"ok", "degraded", "down"}
 
 
 def test_ranking_row_keys(cliente):
     body = cliente.get("/v1/ranking", headers=AUTH).json()
-    assert set(body) == {"rutas"}
-    assert set(body["rutas"][0]) == {
-        "clave", "tier", "prioridad", "puntaje", "calidad", "calidad_medida",
-        "calidad_asumida", "ultima_sonda_calidad", "ultima_sonda", "confiabilidad",
-        "ttft_p50_ms", "latencia_p50_ms", "en_cooldown_hasta", "tools", "vision",
-        "contexto",
+    assert set(body) == {"routes"}
+    assert set(body["routes"][0]) == {
+        "key", "tier", "priority", "score", "quality", "quality_measured",
+        "quality_assumed", "last_quality_probe", "last_probe", "reliability",
+        "ttft_p50_ms", "latency_p50_ms", "cooldown_until", "tools", "vision",
+        "context",
     }
 
 
-def test_uso_body_keys(cliente):
-    assert set(cliente.get("/v1/uso", headers=AUTH).json()) == {"dia", "pago_hoy", "tope"}
+def test_usage_body_keys(cliente):
+    assert set(cliente.get("/v1/usage", headers=AUTH).json()) == {"day", "paid_today", "cap"}
 
 
 def test_models_body_keys(cliente):
@@ -93,51 +98,51 @@ def test_response_headers(cliente):
     r = cliente.post("/v1/chat/completions", headers=AUTH,
                      json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
-    for header in ("X-Ruta-Usada", "X-Intentos", "X-Tier"):
+    for header in ("X-Route-Used", "X-Attempts", "X-Tier"):
         assert header in r.headers, header
 
 
-# --- error bodies: `pedido` mirrors the Pedido dataclass field names ---
+# --- error bodies: `request` mirrors what RouteRequest.as_wire() produces ---
 
-def test_error_body_exposes_pedido_fields(cliente):
-    """400 and 503 bodies serialise pedido.__dict__ -- these keys are wire."""
+def test_error_body_exposes_the_request_fields(cliente):
+    """400 and 503 bodies echo the normalised request -- these keys are wire."""
     r = cliente.post("/v1/chat/completions", headers=AUTH,
-                     json={"model": "auto", "x_min_contexto": 99_000_000,
+                     json={"model": "auto", "x_min_context": 99_000_000,
                            "messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code in (400, 503)
     detail = r.json()["detail"]
     assert "message" in detail
-    assert set(detail["pedido"]) == {
-        "modelo", "requiere_tools", "requiere_vision", "min_contexto", "perfil",
-        "permitir_pago",
+    assert set(detail["request"]) == {
+        "model", "needs_tools", "needs_vision", "min_context", "profile",
+        "allow_paid",
     }
 
 
 def test_error_body_diagnostic_keys(cliente):
     r = cliente.post("/v1/chat/completions", headers=AUTH,
-                     json={"model": "auto", "x_min_contexto": 99_000_000,
+                     json={"model": "auto", "x_min_context": 99_000_000,
                            "messages": [{"role": "user", "content": "hi"}]})
     detail = r.json()["detail"]
-    assert "rutas_activas" in detail or "rutas_compatibles" in detail
+    assert "active_routes" in detail or "compatible_routes" in detail
 
 
 # --- request-side vocabulary ---
 
 def test_gateway_extension_names():
     assert GATEWAY_EXTENSIONS == frozenset(
-        {"x_requiere", "x_min_contexto", "x_permitir_pago", "x_crudo"})
+        {"x_requires", "x_min_context", "x_allow_paid", "x_raw"})
 
 
 def test_model_aliases_and_profiles():
-    assert parse_request({"model": "auto"}).profile == "balanceado"
-    assert parse_request({"model": "auto:rapido"}).profile == "rapido"
-    assert parse_request({"model": "auto:potente"}).profile == "potente"
+    assert parse_request({"model": "auto"}).profile == "balanced"
+    assert parse_request({"model": "auto:fast"}).profile == "fast"
+    assert parse_request({"model": "auto:strong"}).profile == "strong"
     assert parse_request({"model": "auto:tools"}).needs_tools is True
     assert parse_request({"model": "auto:vision"}).needs_vision is True
 
 
-def test_requiere_values_are_capability_names():
-    p = parse_request({"model": "auto", "x_requiere": ["tools", "vision"]})
+def test_x_requires_values_are_capability_names():
+    p = parse_request({"model": "auto", "x_requires": ["tools", "vision"]})
     assert p.needs_tools and p.needs_vision
 
 
@@ -207,7 +212,7 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         INSERT INTO rutas VALUES ('kilo/a:free','kilo','a:free','gratis',1,0,128000,4096,10.0,1,1);
         INSERT INTO rutas VALUES ('minimax/M3','minimax','M3','pago',1,1,200000,8192,10.0,1,2);
         INSERT INTO sondas VALUES ('kilo/a:free','salud',11.0,1,300,0,200,NULL,NULL);
-        INSERT INTO sondas VALUES ('kilo/a:free','calidad',12.0,1,0,0,200,4,5);
+        INSERT INTO sondas VALUES ('kilo/a:free','quality',12.0,1,0,0,200,4,5);
         INSERT INTO eventos VALUES ('kilo/a:free',13.0,1,250,200,900,0);
         INSERT INTO uso_pago VALUES ('secreta','2026-08-18',7);
     """)

@@ -59,21 +59,21 @@ def test_the_body_is_a_shallow_copy_and_does_not_mutate_the_original():
 
 # --- Fix round 3, I6: the gateway's extensions do not travel to the provider.
 #     Kilo tolerates them; a stricter server has no reason to, and the ugliest
-#     case is `x_permitir_pago: false` -- the field whose whole job is to AVOID
+#     case is `x_allow_paid: false` -- the field whose whole job is to AVOID
 #     spending -- being the very one that makes the paid fallback reject the
 #     request. ---
 
 def test_it_does_not_forward_the_gateway_extensions_to_the_provider():
-    original = {"model": "auto", "messages": [], "x_requiere": ["tools"],
-                "x_min_contexto": 100000, "x_permitir_pago": False, "x_crudo": True}
+    original = {"model": "auto", "messages": [], "x_requires": ["tools"],
+                "x_min_context": 100000, "x_allow_paid": False, "x_raw": True}
     _, _, body = build_request(_prov(), original, real_model="real")
-    assert "x_requiere" not in body
-    assert "x_min_contexto" not in body
-    assert "x_permitir_pago" not in body
-    assert "x_crudo" not in body
+    assert "x_requires" not in body
+    assert "x_min_context" not in body
+    assert "x_allow_paid" not in body
+    assert "x_raw" not in body
     assert body["model"] == "real" and "messages" in body
     # And the original is untouched: the failover chain uses it again.
-    assert "x_permitir_pago" in original
+    assert "x_allow_paid" in original
 
 
 def test_it_lets_any_other_unknown_field_through():

@@ -306,7 +306,7 @@ async def test_a_tool_calls_only_stream_still_counts_as_a_success():
 
 
 async def test_a_raw_pure_reasoning_stream_is_still_a_success():
-    # With x_crudo the client asked for the text verbatim: the <think> IS the answer.
+    # With x_raw the client asked for the text verbatim: the <think> IS the answer.
     p = _proxy(lambda req: httpx.Response(200, content=_sse("<think>mmm</think>")))
     text = await _collect(p.complete_stream([_route()], BODY, 0.0, raw=True))
     assert text == "<think>mmm</think>"
@@ -630,7 +630,7 @@ def _multi(*modelos):
 #     hatches of that round's own design:
 #
 #     1. A chain of a SINGLE route -- the client forces it with an explicit
-#        `model` or with `x_min_contexto` (published per route in /v1/ranking),
+#        `model` or with `x_min_context` (published per route in /v1/ranking),
 #        with no internal knowledge required.
 #     2. The `if emitido:` branch below (PENDING_CAP's force-flush): it committed
 #        immediately WITHOUT checking whether a sibling had succeeded and WITHOUT

@@ -237,18 +237,18 @@ def test_chatgpt_discards_auto_because_it_is_a_reserved_id():
 
 # --- INFO from the round 6 review: RESERVED_IDS only excluded the LITERAL id
 #     "auto", not the compound aliases api.py ALSO treats as reserved
-#     ("auto:rapido", "auto:potente", "auto:tools", "auto:vision" -- see ALIAS
+#     ("auto:fast", "auto:strong", "auto:tools", "auto:vision" -- see ALIAS
 #     in api.py and parse_request, which resolves ANY id starting with
 #     "auto:" as an alias, never as a literal id). A provider publishing a real
-#     model called, say, "auto:rapido" created a PERMANENTLY unreachable route:
-#     no request with `model: "auto:rapido"` ever reaches
-#     `pedido.model == "auto:rapido"`, because parse_request resolves it
-#     first as profile "rapido" with modelo=None. ---
+#     model called, say, "auto:fast" created a PERMANENTLY unreachable route:
+#     no request with `model: "auto:fast"` ever reaches
+#     `pedido.model == "auto:fast"`, because parse_request resolves it
+#     first as profile "fast" with modelo=None. ---
 
 def test_the_compound_auto_aliases_are_discarded_too():
     routes = normalize("prov", [
-        {"id": "auto:rapido", "name": "Collides with the compound alias"},
-        {"id": "auto:potente", "name": "Collides with the compound alias"},
+        {"id": "auto:fast", "name": "Collides with the compound alias"},
+        {"id": "auto:strong", "name": "Collides with the compound alias"},
         {"id": "auto:tools", "name": "Collides with the compound alias"},
         {"id": "auto:vision", "name": "Collides with the compound alias"},
         {"id": "un-modelo-real", "name": "Real model"},

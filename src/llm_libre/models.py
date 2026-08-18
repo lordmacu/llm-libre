@@ -10,13 +10,13 @@ NEUTRAL_TTFT_MS = 1500.0
 # This gateway's own extensions (design section 6). They are interpreted here and
 # NOT forwarded to the provider: they are internal vocabulary, and a strict server
 # may reject a body carrying fields it does not know. The ugliest case is
-# `x_permitir_pago: false`, the field whose whole job is to avoid spending, being
+# `x_allow_paid: false`, the field whose whole job is to avoid spending, being
 # the very one that makes the paid tier reject the request.
 #
 # The VALUES are wire format -- clients send them -- and are frozen by
 # tests/test_wire_contract.py. Only the constant's name is internal.
 GATEWAY_EXTENSIONS = frozenset({
-    "x_requiere", "x_min_contexto", "x_permitir_pago", "x_crudo",
+    "x_requires", "x_min_context", "x_allow_paid", "x_raw",
 })
 
 
@@ -66,23 +66,26 @@ class RouteRequest:
     needs_tools: bool = False
     needs_vision: bool = False
     min_context: int = 0
-    profile: str = "balanceado"     # "rapido" | "balanceado" | "potente"
+    profile: str = "balanced"       # "fast" | "balanced" | "strong"
     allow_paid: bool = True
 
     def as_wire(self) -> dict:
-        """The Spanish-keyed view that goes into the 400/503 error bodies.
+        """The view that goes into the 400/503 error bodies.
 
-        Explicit on purpose: this used to be `pedido.__dict__`, which meant every
-        field rename was an undeclared API change. Now the wire keys live in one
-        place, and the fields above are free to be named in English.
+        Explicit on purpose: this used to be `request.__dict__`, which meant every
+        field rename was an undeclared API change. The wire keys live HERE, in one
+        place, and they now happen to match the field names -- which is convenient
+        and NOT a licence to go back to `__dict__`: the point of the method is that
+        the two can be renamed independently, and that test_wire_contract.py has a
+        single place to assert.
         """
         return {
-            "modelo": self.model,
-            "requiere_tools": self.needs_tools,
-            "requiere_vision": self.needs_vision,
-            "min_contexto": self.min_context,
-            "perfil": self.profile,
-            "permitir_pago": self.allow_paid,
+            "model": self.model,
+            "needs_tools": self.needs_tools,
+            "needs_vision": self.needs_vision,
+            "min_context": self.min_context,
+            "profile": self.profile,
+            "allow_paid": self.allow_paid,
         }
 
 

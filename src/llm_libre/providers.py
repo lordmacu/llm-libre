@@ -28,7 +28,7 @@ class Provider:
     extra_headers: dict = field(default_factory=dict)
     fixed_models: list = field(default_factory=list)
     # A DIFFERENT concept from tier (free|paid) and from profile
-    # (rapido|balanceado|potente): the manual order in which the router tries
+    # (fast|balanced|strong): the manual order in which the router tries
     # providers before looking at score. Default 100 so a provider that does not
     # declare it lands last among its peers. See the long comment in modelos.Ruta.
     priority: int = 100

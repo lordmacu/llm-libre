@@ -517,7 +517,7 @@ async def test_cycle_does_not_probe_quality_outside_the_interval():
 # --- Fix round 3, B4 (Blocking): section 8 says "paid routes are NOT probed".
 #     probe_quality already filtered by tier; probe_health did not, and it receives
 #     active_routes(), which includes minimax/MiniMax-M3. That was ~5 billable
-#     calls a day, invisible to add_paid_usage, /v1/uso and TOPE_PAGO_DIARIO. ---
+#     calls a day, invisible to add_paid_usage, /v1/usage and TOPE_PAGO_DIARIO. ---
 
 async def test_the_health_probe_does_not_spend_money_on_paid_routes():
     calls = []

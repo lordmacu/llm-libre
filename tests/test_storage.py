@@ -158,7 +158,7 @@ def test_reliability_mixes_probes_and_events(store):
 #     (round 3), but it was STILL being written as a failed event, and that feeds
 #     reliability -- which /health uses to declare a route dead. Reproduced: 26
 #     consecutive malformed requests from ONE key are enough to sink EVERY route's
-#     reliability, with /health at "caido" while a DIFFERENT key keeps receiving
+#     reliability, with /health at "down" while a DIFFERENT key keeps receiving
 #     200s. `record_event` gains `is_client_error`, and _reliability excludes those
 #     event rows ENTIRELY -- they neither count as failures nor take up a slot in
 #     the window -- so a 4xx is evidence about the REQUEST, not about the route.
@@ -447,7 +447,7 @@ def test_liveness_evidence_from_a_recent_successful_health_probe(store):
 #     window") looked at ANY real event -- success OR FAILURE -- to decide "there
 #     is history, declare it dead". Measured: a single failed real request (fewer
 #     than SUSPICION_THRESHOLD, so no on-demand probe ever fires) was enough to
-#     drop /health to "caido" -- contradicting the module's principle, "a thousand
+#     drop /health to "down" -- contradicting the module's principle, "a thousand
 #     failures from one client do not prove the route is broken". Now ONLY a PROBE
 #     (never a real event, success or failure) counts as "there is history". ---
 

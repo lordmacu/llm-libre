@@ -124,7 +124,7 @@ def _category(r: Route, m: Metrics, now: float) -> tuple[bool, bool, int, int]:
     The only thing being drawn is the score tiebreak, which is precisely the
     criterion that does not discriminate today.
     """
-    return sort_key(r, m, "balanceado", now)[:4]
+    return sort_key(r, m, "balanced", now)[:4]
 
 
 def shuffle_ties(ordered: list[Route], metrics: dict[str, Metrics],
