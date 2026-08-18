@@ -12,7 +12,7 @@ from llm_libre import tool_emulator as _emu
 from llm_libre.bateria import TOPE_CORTO
 from llm_libre.cliente import armar_peticion
 from llm_libre.modelos import Ruta
-from llm_libre.razonamiento import RecortadorStreamCompuesto, recortar
+from llm_libre.reasoning import CompositeStreamTrimmer, trim
 
 log = logging.getLogger(__name__)
 
@@ -603,7 +603,7 @@ class Proxy:
                         continue
                     if ruta.tier == "pago" and en_intento_facturable is not None:
                         en_intento_facturable(ruta)
-                    rec = RecortadorStreamCompuesto(desenvolver_canvas=proveedor.desenvuelve_canvas)
+                    rec = CompositeStreamTrimmer(unwrap_canvas=proveedor.desenvuelve_canvas)
 
                     # Emulacion de tools en streaming. Detectar un tool call exige
                     # el TEXTO COMPLETO (el JSON llega partido en deltas), asi que
@@ -659,9 +659,9 @@ class Proxy:
                                 continue
                             if ttft_medido_ms is None and frag:
                                 ttft_medido_ms = int((time.monotonic() - t0) * 1000)
-                            acumulado += rec.alimentar(frag) if not crudo else frag
+                            acumulado += rec.feed(frag) if not crudo else frag
                         if not crudo:
-                            acumulado += rec.cerrar()
+                            acumulado += rec.close()
 
                         llamadas = _emu.parse_tool_calls(acumulado, nombres_tools)
                         if llamadas and cuerpo.get("tool_choice") != "none":
@@ -727,7 +727,7 @@ class Proxy:
                                  | {k for k in obj
                                     if k != "choices" and k not in _SOBRE_CHUNK})
                         if not crudo and isinstance(delta.get("content"), str):
-                            delta["content"] = rec.alimentar(delta["content"])
+                            delta["content"] = rec.feed(delta["content"])
                         contenido = delta.get("content")
                         # Dos preguntas distintas sobre el mismo chunk:
                         #  - hay_texto: trae RESPUESTA (algo que no sea espacio
@@ -771,7 +771,7 @@ class Proxy:
                         pendientes.clear()
                         emitido = True
                         yield trozo
-                    resto = rec.cerrar()
+                    resto = rec.close()
                     if resto.strip():
                         _registrar_exito_una_vez()
                         util = True
@@ -1103,7 +1103,7 @@ class Proxy:
             msg = eleccion.get("message") or {}
             contenido = msg.get("content")
             if isinstance(contenido, str):
-                limpio, razon = recortar(contenido, desenvolver_canvas)
+                limpio, razon = trim(contenido, desenvolver_canvas)
                 msg["content"] = limpio
                 razon_total += razon
         return razon_total

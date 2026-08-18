@@ -32,7 +32,7 @@ import uuid
 # the schema -- so it has to come off before any brace scanning, or the scan
 # locks onto a brace that belongs to the thinking, not the answer.
 #
-# All three tag spellings that razonamiento.py knows about are stripped here, not
+# All three tag spellings that reasoning.py knows about are stripped here, not
 # just <think>. On the normal path the trimmer has already removed them, but with
 # `x_crudo: true` it is skipped entirely and detection still runs -- and a model
 # that reasons "I could call {...}" then answers in prose had that discarded
