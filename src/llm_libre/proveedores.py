@@ -34,6 +34,9 @@ class Proveedor:
     # /models, nunca de aca: sigue siendo descubrimiento, no una lista
     # cableada con otro nombre.
     capacidades_por_defecto: Capacidades | None = None
+    # Excepciones por id de modelo sobre `capacidades_por_defecto`: solo los
+    # campos que difieren. Ver `_excepciones` para el porque.
+    excepciones: dict = field(default_factory=dict)
     # Revision de Task 13, hallazgo 1: el desenvuelto de cercas de canvas
     # (':::palabra{...}' ... ':::') era GLOBAL, pero ':::nota{...}' es
     # tambien sintaxis Docusaurus/MDX estandar -- aplicarlo a ciegas le
@@ -128,6 +131,22 @@ def _capacidades_por_defecto(p: dict) -> Capacidades | None:
                        contexto=int(datos["contexto"]), max_salida=int(datos["max_salida"]))
 
 
+def _excepciones(p: dict) -> dict:
+    """Overrides por id de modelo sobre `capacidades_por_defecto`.
+
+    `capacidades_por_defecto` declara UNA capacidad para todos los ids que se
+    descubren de /models, y eso alcanza cuando el catalogo es homogeneo. El de
+    grok no lo es: de sus 31 modelos, 25 devuelven un tool_call real y 6 no
+    (medido el 2026-08-18 contra el proxy, no supuesto). Sin excepciones habria
+    que elegir entre mentir sobre 6 rutas o renunciar al descubrimiento
+    dinamico y declararlas todas a mano.
+
+    Solo se declaran los campos que difieren; el resto se hereda del default.
+    Un id que no aparece aca usa el default entero, que es el caso normal.
+    """
+    return {str(k): dict(v or {}) for k, v in (p.get("excepciones") or {}).items()}
+
+
 def cargar(ruta_yaml: str, entorno: dict) -> list[Proveedor]:
     with open(ruta_yaml, encoding="utf-8") as f:
         datos = yaml.safe_load(f)
@@ -140,6 +159,7 @@ def cargar(ruta_yaml: str, entorno: dict) -> list[Proveedor]:
         modelos_fijos=p.get("modelos_fijos", []) or [],
         prioridad=int(p.get("prioridad", 100)),
         capacidades_por_defecto=_capacidades_por_defecto(p),
+        excepciones=_excepciones(p),
         desenvuelve_canvas=bool(p.get("desenvuelve_canvas", False)),
         timeout_s=(float(p["timeout_s"]) if p.get("timeout_s") is not None else None),
     ) for p in datos["proveedores"]]

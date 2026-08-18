@@ -158,19 +158,32 @@ proveedores:
     # alias "auto" de llm-libre. No hace falta hacer nada: catalogo.es_id_reservado
     # ya lo descarta, que es exactamente para lo que existe.
     capacidades_por_defecto:
-      # tools Y vision VERIFICADOS en vivo el 2026-08-18 contra el proxy
-      # desplegado, no supuestos: la sonda de tools devolvio un tool_call real
-      # (get_weather con city=Bogota), y ante un PNG de 1x1 en blanco respondio
-      # "No veo nada" -- que es la respuesta correcta, o sea que la imagen
-      # llego de verdad. Es la unica ruta gratis con las DOS: chatgpt no tiene
-      # tools y perplexity no tiene ninguna.
+      # tools: true VERIFICADO -- 25 de los 31 modelos devuelven un tool_call
+      # real (get_weather con city=Bogota). Los 6 que no, abajo en excepciones.
       tools: true
-      vision: true
+      # vision: FALSE, y esta correccion vale la pena contarla. Primero declare
+      # true porque probe grok-4.5 con un PNG de 1x1 en BLANCO y respondio "No
+      # veo nada": lo lei como "describe bien una imagen vacia". Significaba
+      # literalmente que no le habia llegado ninguna imagen. El barrido del
+      # 2026-08-18 con un PNG ROJO lo zanjo: las 31 rutas fallan en nombrar el
+      # color. Moraleja: una sonda de vision necesita una imagen con contenido
+      # RECONOCIBLE, o mide su propia ambiguedad.
+      vision: false
       # Piso conservador, mismo criterio que perplexity/turbo: /models no
       # declara context_length, y es preferible que el router descarte a grok
       # de un pedido de contexto enorme a que se lo mande y falle a mitad.
       contexto: 128000
       max_salida: 8192
+    # Medidos uno por uno el 2026-08-18: estos 6 NO devuelven tool_call, a
+    # diferencia de los otros 25. Sin esta lista habria que mentir sobre ellos
+    # o renunciar al descubrimiento dinamico.
+    excepciones:
+      claude-3-opus:              {tools: false}
+      gpt-4o:                     {tools: false}
+      grok-4-1-thinking-1129:     {tools: false}
+      imagine-agent-mode:         {tools: false}
+      imagine-agent-mode-dev:     {tools: false}
+      imagine-agent-mode-grok-4-5: {tools: false}
 
   - id: kilo
     tier: gratis
@@ -211,9 +224,13 @@ proveedores:
     modelos_fijos:
       # Verificado 2026-08-16 contra la API real: chat, tools y streaming OK.
       # contexto es un PISO conservador usado solo para filtrar por x_min_contexto;
-      # subirlo si se confirma uno mayor. vision en false porque no se verifico.
+      # subirlo si se confirma uno mayor.
       - id: MiniMax-M3
         tools: true
-        vision: false
+        # vision paso de false a TRUE el 2026-08-18: estaba en false solo
+        # porque nadie lo habia probado, y el barrido mostro que nombra el
+        # rojo correctamente. Era una capacidad que teniamos y no usabamos:
+        # con vision:false, un pedido con imagen ni siquiera la consideraba.
+        vision: true
         contexto: 128000
         max_salida: 32768

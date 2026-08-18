@@ -76,7 +76,11 @@ def test_los_modelos_fijos_se_vuelven_rutas_de_pago():
     assert rutas[0].clave == "minimax/MiniMax-M3"
     assert rutas[0].tier == "pago"
     assert rutas[0].capacidades.tools is True
-    assert rutas[0].capacidades.vision is False
+    # vision paso a True el 2026-08-18: estaba en False solo porque nadie lo
+    # habia medido. El barrido de capacidades mostro que nombra correctamente
+    # el color de un PNG rojo, asi que era una capacidad real que el router
+    # descartaba por una declaracion conservadora.
+    assert rutas[0].capacidades.vision is True
     assert rutas[0].capacidades.contexto == 128000
     assert rutas[0].capacidades.max_salida == 32768
     assert rutas[0].prioridad == 2   # la de minimax en el YAML, no una constante

@@ -1,6 +1,8 @@
 import logging
 import re
 
+from dataclasses import replace
+
 from llm_libre.modelos import Capacidades, Ruta
 
 log = logging.getLogger(__name__)
@@ -94,7 +96,8 @@ def _es_alias(m: dict) -> bool:
 
 
 def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100,
-              capacidades_por_defecto: Capacidades | None = None) -> list[Ruta]:
+              capacidades_por_defecto: Capacidades | None = None,
+              excepciones: dict | None = None) -> list[Ruta]:
     """Convierte la respuesta de /models en rutas gratis utilizables para chat.
 
     `prioridad` es la del PROVEEDOR (ver Proveedor.prioridad), no algo que
@@ -139,6 +142,14 @@ def normalizar(proveedor: str, datos: dict | list, prioridad: int = 100,
             continue
         if capacidades_por_defecto is not None:
             capacidades = capacidades_por_defecto
+            # Un catalogo descubierto NO tiene por que ser homogeneo: grok
+            # publica 31 ids de los que 25 hacen tool calls y 6 no. La
+            # excepcion pisa SOLO los campos declarados; lo que no se nombra
+            # se hereda, asi que corregir una capacidad de un modelo no
+            # obliga a repetir las otras tres.
+            faltante = (excepciones or {}).get(m["id"])
+            if faltante:
+                capacidades = replace(capacidades, **faltante)
         else:
             if not _es_gratis(m):
                 continue
