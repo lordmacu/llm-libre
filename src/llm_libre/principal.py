@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import random
 from contextlib import asynccontextmanager
 
 import httpx
@@ -15,6 +16,12 @@ from llm_libre.sondeo import ciclo
 YAML = os.getenv("PROVEEDORES_YAML", "proveedores.yaml")
 RUTA_DB = os.getenv("RUTA_DB", "/datos/llm-libre.sqlite3")
 HORAS_SALUD = float(os.getenv("SONDEO_SALUD_HORAS", "5"))
+# Sorteo entre rutas empatadas. Encendido por defecto: con la bateria de
+# calidad dandole 1.00 a todo el catalogo (ver bateria.py), el orden estricto
+# manda SIEMPRE la misma ruta y quema la cuota de un solo proveedor mientras
+# los demas miran. Apagarlo (ROTAR_EMPATES=false) devuelve el orden
+# determinista de antes, util para depurar una respuesta rara.
+ROTAR = os.getenv("ROTAR_EMPATES", "true").strip().lower() not in ("false", "0", "no")
 
 
 def crear_estado() -> Estado:
@@ -53,6 +60,7 @@ def crear_estado() -> Estado:
                     limitador=LimitadorPorLlave(int(os.getenv("LIMITE_POR_MINUTO", "60"))))
     estado.proveedores = proveedores
     estado.http = http
+    estado.aleatorio = random.Random() if ROTAR else None
     return estado
 
 

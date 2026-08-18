@@ -133,6 +133,11 @@ class Estado:
     limitador: LimitadorPorLlave = field(default_factory=lambda: LimitadorPorLlave(60))
     proveedores: list = field(default_factory=list)   # lo usa el planificador
     http: object = None                                # cliente httpx compartido
+    # Generador para el sorteo entre rutas empatadas (ver router.rotar_empates).
+    # None = sin sorteo, orden estrictamente determinista. Se inyecta desde
+    # principal.crear_estado() segun ROTAR_EMPATES para que los tests puedan
+    # armar un Estado determinista sin pasar por variables de entorno.
+    aleatorio: object = None
 
 
 def _resolver_llave(x_api_key: str | None, authorization: str | None) -> str | None:
@@ -191,7 +196,7 @@ def crear_app(estado: Estado) -> FastAPI:
                 tope_alcanzado = True
         ahora = time.time()
         metricas = _metricas(estado, ahora)
-        rutas = ordenar(activas, metricas, pedido, ahora)
+        rutas = ordenar(activas, metricas, pedido, ahora, estado.aleatorio)
         if not rutas:
             _sin_rutas(activas, pedido, metricas, ahora, tope_alcanzado)   # siempre levanta
         return rutas, pedido

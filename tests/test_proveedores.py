@@ -16,8 +16,13 @@ def test_carga_los_proveedores_registrados():
     # perplexity entro el 2026-08-17 con UNA ruta declarada (`turbo`): su
     # /v1/models publica 124 modelos pero en el flujo anonimo todos caen a
     # turbo, asi que declarar el catalogo seria medir 124 clones.
+    # grok entro el 2026-08-18: proxy OpenAI-compatible propio, ids
+    # descubiertos de /models y capacidades declaradas (su catalogo no las
+    # trae). Es la unica ruta gratis con tools Y vision, las dos verificadas
+    # en vivo contra el proxy desplegado.
     ps = cargar(YAML, {"MINIMAX_API_KEY": "mm"})
-    assert [p.id for p in ps] == ["chatgpt", "perplexity", "deepseek", "kilo", "minimax"]
+    assert [p.id for p in ps] == ["chatgpt", "perplexity", "deepseek", "grok",
+                                  "kilo", "minimax"]
 
 
 def test_perplexity_declara_una_sola_ruta_sin_tools():

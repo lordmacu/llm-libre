@@ -47,7 +47,7 @@ def clave_de_orden(r: Ruta, m: Metricas, perfil: str,
 
 
 def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
-            ahora: float) -> list[Ruta]:
+            ahora: float, aleatorio=None) -> list[Ruta]:
     """Devuelve la cadena de intentos, mejor primero.
 
     Orden: `(tier == "pago", prioridad, no-medida, -puntaje)` (ver
@@ -83,7 +83,10 @@ def ordenar(rutas: list[Ruta], metricas: dict[str, Metricas], pedido: Pedido,
     def orden(r: Ruta) -> tuple[bool, bool, int, int, float]:
         return clave_de_orden(r, metricas.get(r.clave, METRICAS_NEUTRAS), pedido.perfil, ahora)
 
-    return sorted(disponibles, key=orden)
+    ordenadas = sorted(disponibles, key=orden)
+    if aleatorio is None:
+        return ordenadas
+    return rotar_empates(ordenadas, metricas, pedido.perfil, ahora, aleatorio)
 
 
 def _cumple(r: Ruta, p: Pedido) -> bool:
@@ -95,3 +98,79 @@ def _cumple(r: Ruta, p: Pedido) -> bool:
     if p.min_contexto and c.contexto < p.min_contexto:
         return False
     return True
+
+
+# Ancho de la banda de empate, como fraccion del mejor puntaje del grupo. Una
+# ruta que puntua >= mejor * (1 - BANDA_EMPATE) se considera empatada con la
+# mejor y entra al sorteo.
+#
+# 0.05 (5%) no es un numero magico sino una lectura del ranking real
+# (2026-08-17): las 21 rutas activas puntuaban entre 0.48 y 0.50 -- un rango
+# de 4% -- porque la bateria de calidad le da 1.00 a TODAS (un modelo de 2.6B
+# pasa sus 5 casos igual que uno de 550B, verificado en vivo). Con esa
+# realidad, 5% agrupa a practicamente todo el catalogo, que es exactamente lo
+# que se quiere: si ninguna es mediblemente mejor, elegir siempre la misma
+# solo quema la cuota de un proveedor mientras los otros miran.
+#
+# Es deliberadamente una BANDA y no un sorteo global: el dia que la bateria
+# separe de verdad (o que las latencias reales se separen), las rutas peores
+# se caen del grupo solas y el sorteo se angosta sin tocar este numero.
+BANDA_EMPATE = 0.05
+
+
+def _categoria(r: Ruta, m: Metricas, ahora: float) -> tuple[bool, bool, int, int]:
+    """La parte CATEGORICA de la clave de orden -- todo menos el puntaje.
+
+    Dos rutas solo pueden sortearse entre si dentro de la misma categoria, y
+    eso es lo que protege los invariantes: una ruta de pago nunca comparte
+    categoria con una gratis, ni una prioridad 0 con una prioridad 1, asi que
+    el sorteo JAMAS puede subir una de pago por encima de lo gratis ni pasar
+    por encima del orden manual del YAML. Lo unico que se sortea es el
+    desempate por puntaje, que es justamente el criterio que hoy no
+    discrimina.
+    """
+    return clave_de_orden(r, m, "balanceado", ahora)[:4]
+
+
+def rotar_empates(ordenadas: list[Ruta], metricas: dict[str, Metricas],
+                  perfil: str, ahora: float, aleatorio) -> list[Ruta]:
+    """Baraja las rutas que estan empatadas con la mejor de su categoria.
+
+    `ordenadas` ya viene ordenada por `ordenar`. Se recorre por categorias
+    consecutivas; dentro de cada una, las que puntuan >= mejor * (1 -
+    BANDA_EMPATE) se barajan entre si y el resto conserva su orden detras.
+
+    `aleatorio` es cualquier objeto con `.shuffle` (p.ej. `random.Random`).
+    Se inyecta en vez de usar el `random` global para que los tests puedan
+    sembrarlo y para que `ordenar(...)` sin este argumento siga siendo
+    completamente determinista -- que es lo que esperan los tests que ya
+    existian antes de esta funcion.
+    """
+    salida: list[Ruta] = []
+    i = 0
+    while i < len(ordenadas):
+        cat = _categoria(ordenadas[i], metricas.get(ordenadas[i].clave, METRICAS_NEUTRAS), ahora)
+        j = i
+        while j < len(ordenadas) and _categoria(
+                ordenadas[j], metricas.get(ordenadas[j].clave, METRICAS_NEUTRAS), ahora) == cat:
+            j += 1
+        grupo = ordenadas[i:j]
+        puntajes = [puntuar(metricas.get(r.clave, METRICAS_NEUTRAS), perfil) for r in grupo]
+        mejor = puntajes[0]
+        # `mejor <= 0` (todas las rutas del grupo puntuando cero) haria que el
+        # piso fuera 0 y entrara TODO al sorteo, incluida una ruta que puntua
+        # peor que otra: con puntajes no positivos la banda relativa no
+        # significa nada, asi que no se sortea y manda el orden determinista.
+        if mejor > 0:
+            piso = mejor * (1 - BANDA_EMPATE)
+            k = 0
+            while k < len(grupo) and puntajes[k] >= piso:
+                k += 1
+            empatadas = grupo[:k]
+            aleatorio.shuffle(empatadas)
+            salida.extend(empatadas)
+            salida.extend(grupo[k:])
+        else:
+            salida.extend(grupo)
+        i = j
+    return salida

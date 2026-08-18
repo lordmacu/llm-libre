@@ -141,6 +141,37 @@ proveedores:
     # tiempo variable antes de que DeepSeek siquiera empiece a responder.
     timeout_s: 60
 
+  - id: grok
+    tier: gratis          # el proxy corre sobre el tier gratuito de Grok
+    prioridad: 1
+    dialecto: openai
+    base_url_env: GROK_PROXY_URL
+    base_url: http://127.0.0.1:8893/v1
+    clave_env: GROK_API_KEY   # el proxy exige Authorization: Bearer <API_KEY>
+    modelos_path: /models
+    # Mismo patron que chatgpt: los ids se DESCUBREN de /models (33 el
+    # 2026-08-18, con un pool de alta tasa por detras), pero ese catalogo solo
+    # trae id/object/created/owned_by/notes -- ni capacidades ni contexto --
+    # asi que las capacidades se declaran una vez para todos.
+    #
+    # OJO: /models expone un id "auto" propio de Grok que COLISIONA con el
+    # alias "auto" de llm-libre. No hace falta hacer nada: catalogo.es_id_reservado
+    # ya lo descarta, que es exactamente para lo que existe.
+    capacidades_por_defecto:
+      # tools Y vision VERIFICADOS en vivo el 2026-08-18 contra el proxy
+      # desplegado, no supuestos: la sonda de tools devolvio un tool_call real
+      # (get_weather con city=Bogota), y ante un PNG de 1x1 en blanco respondio
+      # "No veo nada" -- que es la respuesta correcta, o sea que la imagen
+      # llego de verdad. Es la unica ruta gratis con las DOS: chatgpt no tiene
+      # tools y perplexity no tiene ninguna.
+      tools: true
+      vision: true
+      # Piso conservador, mismo criterio que perplexity/turbo: /models no
+      # declara context_length, y es preferible que el router descarte a grok
+      # de un pedido de contexto enorme a que se lo mande y falle a mitad.
+      contexto: 128000
+      max_salida: 8192
+
   - id: kilo
     tier: gratis
     prioridad: 1
