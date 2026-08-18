@@ -56,7 +56,7 @@ PING = {"messages": [{"role": "user", "content": "ping"}],
 # attribution) each fell to a new vector -- and the last two (round 8) were
 # ESCAPE HATCHES OF ROUND 7'S OWN DESIGN: a single-route chain (the client forces
 # it with an explicit `model` or with `x_min_contexto`; `/v1/ranking` publishes
-# `contexto` per route, so no internal knowledge is needed) and the `if emitido:`
+# `contexto` per route, so no internal knowledge is needed) and the `if emitted:`
 # branch of complete_stream (with no sibling to compare against, and no
 # chain-length check). When the leaks are in the EXCEPTIONS you wrote on purpose,
 # the axis is wrong, not under-enumerated.
@@ -240,8 +240,8 @@ _REQUEST_EVIDENCE_CODES = frozenset({
 })
 
 
-def _is_client_error(codigo: int) -> bool:
-    """True ONLY if `codigo` is in `_REQUEST_EVIDENCE_CODES` -- GENUINE evidence
+def _is_client_error(code: int) -> bool:
+    """True ONLY if `code` is in `_REQUEST_EVIDENCE_CODES` -- GENUINE evidence
     about the request, never about the route. Any other code (401, 403, 404, 405,
     409, or whatever a provider invents tomorrow) is evidence about the route by
     DEFAULT and counts the same as a 500 toward reliability (see
@@ -255,18 +255,18 @@ def _is_client_error(codigo: int) -> bool:
     EVERYONE. Verified against the real 5-route registry: three consecutive
     malformed requests (400) were enough to drag all five routes' reliability down
     before this exclusion existed."""
-    return codigo in _REQUEST_EVIDENCE_CODES
+    return code in _REQUEST_EVIDENCE_CODES
 
 
-def _timeout_for(proveedor) -> float:
+def _timeout_for(provider) -> float:
     """`Provider.timeout_s` (default None) bounds the worst case of ONE
     particular provider -- e.g. one that can hang -- without lowering the timeout
     for everyone. None (the default, and the long-standing behaviour for anyone
     who does not declare it) uses the global TIMEOUT_S."""
-    return proveedor.timeout_s if proveedor.timeout_s is not None else TIMEOUT_S
+    return provider.timeout_s if provider.timeout_s is not None else TIMEOUT_S
 
 
-def has_answer(datos: dict) -> bool:
+def has_answer(data: dict) -> bool:
     """True if a 200 carries something the client can use as an answer.
 
     Most free models are reasoning models: they burn the completion budget
@@ -282,16 +282,16 @@ def has_answer(datos: dict) -> bool:
     tool" -- the opposite of streaming deltas, where the key's presence is
     already a signal.
     """
-    if not isinstance(datos, dict):
+    if not isinstance(data, dict):
         return False
-    for eleccion in datos.get("choices") or []:
-        if not isinstance(eleccion, dict):
+    for choice in data.get("choices") or []:
+        if not isinstance(choice, dict):
             continue
-        msg = eleccion.get("message") or {}
+        msg = choice.get("message") or {}
         if not isinstance(msg, dict):
             continue
-        contenido = msg.get("content")
-        if isinstance(contenido, str) and contenido.strip():
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
             return True
         if msg.get("tool_calls"):
             return True
@@ -360,7 +360,7 @@ class Proxy:
         # the minute's quota ran out.
         self._awaiting_probe: dict[str, Route] = {}
 
-    async def complete(self, rutas: list[Route], cuerpo: dict, ahora: float,
+    async def complete(self, routes: list[Route], body: dict, now: float,
                         raw: bool = False, is_probe: bool = False,
                         on_billable_attempt: Callable[[Route], None] | None = None
                         ) -> ProxyResponse:
@@ -381,64 +381,64 @@ class Proxy:
         the attempt that genuinely served the client; this callback marks EVERY
         billable attempt, so whoever does the billing (api.py) does not miss the
         "200 with empty content" case -- billable and silent until this round."""
-        intentos = 0
-        ultimo_error = None
-        ultimo_codigo = 0
-        claves_del_pedido = {ruta.key for ruta in rutas}
-        for ruta in rutas:
-            proveedor = self.providers[ruta.provider]
-            url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.model_id)
-            intentos += 1
+        attempts = 0
+        last_error = None
+        last_code = 0
+        request_keys = {route.key for route in routes}
+        for route in routes:
+            provider = self.providers[route.provider]
+            url, headers, payload = build_request(provider, body, route.model_id)
+            attempts += 1
             t0 = time.monotonic()
             try:
-                resp = await self.http.post(url, headers=cabeceras, json=payload,
-                                            timeout=_timeout_for(proveedor))
-                codigo = resp.status_code
+                resp = await self.http.post(url, headers=headers, json=payload,
+                                            timeout=_timeout_for(provider))
+                code = resp.status_code
             except httpx.HTTPError as e:
-                codigo, resp, ultimo_error = 0, None, str(e)
-            ultimo_codigo = codigo
+                code, resp, last_error = 0, None, str(e)
+            last_code = code
             # A COMPLETE round-trip, NOT a time-to-first-token: on this path the
             # response arrives all at once, so this number includes the whole
             # generation (7-27 s on a reasoning model). It goes to `latencia_ms`;
             # `ttft_ms` stays 0 so as not to contaminate a p50 that means
             # something else. See the header comment of storage.py.
-            latencia = int((time.monotonic() - t0) * 1000)
+            latency_ms = int((time.monotonic() - t0) * 1000)
             # HIGH 2 (round 9): the cooldown a failure of THIS attempt triggers is
             # stamped with NOW + how long THIS attempt took, not with the raw
-            # `ahora`. If the attempt took up to TIMEOUT_S=90s (a hung route --
+            # `now`. If the attempt took up to TIMEOUT_S=90s (a hung route --
             # the case this whole mechanism exists to catch) and it is stamped
-            # with the `ahora` from when the attempt STARTED, the cooldown is born
+            # with the `now` from when the attempt STARTED, the cooldown is born
             # with up to 90s already "eaten": with COOLDOWN_BASE_S=60, the first
             # punishment (60s nominal) is born ALREADY EXPIRED. Measured:
             # effective exclusion max(0, 60*2^(n-1) - 90) = 0s, 30s, 150s, 390s
             # over the first four punishments -- the hung route stayed at the head
-            # of the chain. With MockTransport (no real delay) `latencia` is ~0 and
+            # of the chain. With MockTransport (no real delay) `latency_ms` is ~0 and
             # this is a no-op: it changes no existing test.
-            ahora_del_castigo = ahora + latencia / 1000.0
+            punish_at = now + latency_ms / 1000.0
 
-            if codigo == 200 and ruta.tier == "pago" and on_billable_attempt is not None:
-                on_billable_attempt(ruta)
+            if code == 200 and route.tier == "pago" and on_billable_attempt is not None:
+                on_billable_attempt(route)
 
             # A 200 with an unparseable body (e.g. an HTML maintenance page served
             # with status 200) is not a success: it is treated as a failed
             # attempt, with no exception escaping and no punishment (it is not
             # rate-limiting, it is broken).
-            datos = None
-            if codigo == 200:
+            data = None
+            if code == 200:
                 try:
-                    datos = resp.json()
+                    data = resp.json()
                 except ValueError:
-                    datos = None
-                    ultimo_error = "200 con cuerpo no-JSON"
+                    data = None
+                    last_error = "200 con body no-JSON"
                 else:
                     # Valid JSON that is not an object (e.g. a list): `_clean`
-                    # below does datos.get(...) and would blow up with an
+                    # below does data.get(...) and would blow up with an
                     # uncaught AttributeError -- i.e. a 500 from the gateway
                     # because the provider sent something odd. Same treatment as
-                    # a non-JSON body, and BEFORE touching `datos`.
-                    if not isinstance(datos, dict):
-                        datos = None
-                        ultimo_error = "200 con cuerpo JSON que no es un objeto"
+                    # a non-JSON body, and BEFORE touching `data`.
+                    if not isinstance(data, dict):
+                        data = None
+                        last_error = "200 con body JSON que no es un objeto"
 
             # Same place and same treatment as the guard above: a 200 that carries
             # no answer inside is not a success either. Trimming the reasoning
@@ -446,55 +446,55 @@ class Proxy:
             # see: if nothing is left after removing the <think>, that route did
             # not answer (except in raw mode, where the raw text IS the requested
             # answer).
-            razon = ""
-            if datos is not None:
-                razon = "" if raw else self._clean(datos, proveedor.unwraps_canvas)
-                if not has_answer(datos):
-                    datos = None
-                    ultimo_error = "200 sin contenido ni tool_calls"
+            reasoning_text = ""
+            if data is not None:
+                reasoning_text = "" if raw else self._clean(data, provider.unwraps_canvas)
+                if not has_answer(data):
+                    data = None
+                    last_error = "200 sin content ni tool_calls"
 
-            exito = codigo == 200 and datos is not None
-            self.store.record_event(ruta.key, exito, 0, codigo, ahora,
-                                          latency_ms=latencia,
-                                          is_client_error=_is_client_error(codigo))
+            success = code == 200 and data is not None
+            self.store.record_event(route.key, success, 0, code, now,
+                                          latency_ms=latency_ms,
+                                          is_client_error=_is_client_error(code))
 
-            if exito:
-                self._suspicions.pop(ruta.key, None)
-                self._paid_failures.pop(ruta.key, None)
+            if success:
+                self._suspicions.pop(route.key, None)
+                self._paid_failures.pop(route.key, None)
                 # MEDIUM 5 (round 9): with is_probe=True, the cleanup is
                 # deferred to _probe_on_demand (which checks whether a 429
                 # punished the route WHILE this probe was in flight before
                 # clearing it) -- complete() cannot know that from here.
                 if not is_probe:
-                    self._clear_punishment(ruta.key)
-                if proveedor.emulates_tools:
-                    # `cuerpo` is the CLIENT's request, with its `tools` intact:
+                    self._clear_punishment(route.key)
+                if provider.emulates_tools:
+                    # `body` is the CLIENT's request, with its `tools` intact:
                     # build_request strips it only from the copy that travels to
                     # the provider. That array is the allow-list that prevents
                     # converting a legitimate text answer into an invented tool call.
-                    datos = _emu.detect_and_convert(datos, cuerpo.get("tools"),
-                                                    cuerpo.get("tool_choice"))
-                return ProxyResponse(200, datos, ruta, intentos, razon, codigo)
+                    data = _emu.detect_and_convert(data, body.get("tools"),
+                                                    body.get("tool_choice"))
+                return ProxyResponse(200, data, route, attempts, reasoning_text, code)
 
-            if codigo == 429:
-                self._punish_429(ruta.key, ahora_del_castigo, resp)
-            elif not _is_client_error(codigo):
-                self._react_to_non_429_failure(ruta, ahora, ahora_del_castigo, is_probe)
-            ultimo_error = ultimo_error or f"HTTP {codigo}"
+            if code == 429:
+                self._punish_429(route.key, punish_at, resp)
+            elif not _is_client_error(code):
+                self._react_to_non_429_failure(route, now, punish_at, is_probe)
+            last_error = last_error or f"HTTP {code}"
 
         # Only the cooldowns of THIS request's routes count: the proxy outlives
         # a single call and may have punished routes unrelated to this chain,
         # whose expiry is of no use to whoever is asking now.
-        cooldowns_del_pedido = {c: v for c, v in self.cooldowns.items()
-                                if c in claves_del_pedido}
+        request_cooldowns = {c: v for c, v in self.cooldowns.items()
+                                if c in request_keys}
         return ProxyResponse(503, {"error": {
-            "message": "sin rutas disponibles",
-            "detalle": ultimo_error,
-            "proxima_liberacion": (min(cooldowns_del_pedido.values())
-                                   if cooldowns_del_pedido else None),
-        }}, None, intentos, "", ultimo_codigo)
+            "message": "sin routes disponibles",
+            "detalle": last_error,
+            "proxima_liberacion": (min(request_cooldowns.values())
+                                   if request_cooldowns else None),
+        }}, None, attempts, "", last_code)
 
-    async def complete_stream(self, rutas: list[Route], cuerpo: dict, ahora: float,
+    async def complete_stream(self, routes: list[Route], body: dict, now: float,
                                raw: bool = False,
                                on_route_committed: Callable[[Route], None] | None = None,
                                on_billable_attempt: Callable[[Route], None] | None = None):
@@ -509,7 +509,7 @@ class Proxy:
         this generator: exactly when (and if) a route is confirmed as the one that
         genuinely served the request. It fires from the same place that already
         decides "this was a real success" for telemetry
-        (`_registrar_exito_una_vez`, below) -- not from the raw 200 status,
+        (`_record_success_once`, below) -- not from the raw 200 status,
         because a 200 that dies without emitting anything before the first useful
         byte STILL fails over to the next route (see above), and no real service
         happened there.
@@ -524,29 +524,29 @@ class Proxy:
         It is never called with `is_probe` (round 8: probing.py never streams) --
         every failure here is REAL TRAFFIC, and EVERY failure branch (status !=
         200, a stream with no useful content, a network error, and the cut by
-        `if emitido:` that cannot continue the chain) goes through
+        `if emitted:` that cannot continue the chain) goes through
         `_react_to_non_429_failure` alike -- the same single decision point
         complete() uses, so the two branches cannot drift apart again (that was
         precisely round 8's vector)."""
-        for ruta in rutas:
-            proveedor = self.providers[ruta.provider]
-            url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.model_id)
+        for route in routes:
+            provider = self.providers[route.provider]
+            url, headers, payload = build_request(provider, body, route.model_id)
             payload["stream"] = True
             t0 = time.monotonic()
-            emitido = False          # some chunk already went out to the client
-            util = False             # ...and at least one carried content or tool_calls
-            evento_registrado = False  # this attempt's telemetry was already counted
+            emitted = False          # some chunk already went out to the client
+            useful = False             # ...and at least one carried content or tool_calls
+            event_recorded = False  # this attempt's telemetry was already counted
             # Only the emulation path (below) uses it: there the response is
             # BUFFERED whole before it can be decided whether it is a tool call, so
-            # by the time _registrar_exito_una_vez is called the entire generation
+            # by the time _record_success_once is called the entire generation
             # has already happened. Without this, those routes reported the TOTAL
             # time as ttft -- 7-27s for a reasoning model -- and
             # ranking.latency_factor sank their score precisely for being used. It
             # is stamped when the FIRST fragment arrives, which is what ttft
             # means.
-            ttft_medido_ms = None
+            measured_ttft_ms = None
 
-            def _registrar_exito_una_vez() -> None:
+            def _record_success_once() -> None:
                 # Exactly one event per attempt, never zero and never two: it
                 # fires the first time there is something USEFUL to send (so ttft
                 # measures the first real token, not the stream's close). If there
@@ -554,35 +554,35 @@ class Proxy:
                 # event, not this one: a 200 delivering neither content nor
                 # tool_calls served nobody, and counting it as a success raises the
                 # reliability of the route that just failed.
-                nonlocal evento_registrado
-                if not evento_registrado:
-                    ttft = (ttft_medido_ms if ttft_medido_ms is not None
+                nonlocal event_recorded
+                if not event_recorded:
+                    ttft = (measured_ttft_ms if measured_ttft_ms is not None
                             else int((time.monotonic() - t0) * 1000))
-                    self.store.record_event(ruta.key, True, ttft, 200, ahora)
-                    evento_registrado = True
-                    self._clear_punishment(ruta.key)
-                    self._suspicions.pop(ruta.key, None)
-                    self._paid_failures.pop(ruta.key, None)
+                    self.store.record_event(route.key, True, ttft, 200, now)
+                    event_recorded = True
+                    self._clear_punishment(route.key)
+                    self._suspicions.pop(route.key, None)
+                    self._paid_failures.pop(route.key, None)
                     if on_route_committed is not None:
-                        on_route_committed(ruta)
+                        on_route_committed(route)
 
             try:
-                async with self.http.stream("POST", url, headers=cabeceras, json=payload,
-                                            timeout=_timeout_for(proveedor)) as resp:
-                    ahora_del_castigo = ahora + (time.monotonic() - t0)
+                async with self.http.stream("POST", url, headers=headers, json=payload,
+                                            timeout=_timeout_for(provider)) as resp:
+                    punish_at = now + (time.monotonic() - t0)
                     if resp.status_code != 200:
                         if resp.status_code == 429:
-                            self._punish_429(ruta.key, ahora_del_castigo, resp)
+                            self._punish_429(route.key, punish_at, resp)
                         elif not _is_client_error(resp.status_code):
                             self._react_to_non_429_failure(
-                                ruta, ahora, ahora_del_castigo, is_probe=False)
+                                route, now, punish_at, is_probe=False)
                         self.store.record_event(
-                            ruta.key, False, 0, resp.status_code, ahora,
+                            route.key, False, 0, resp.status_code, now,
                             is_client_error=_is_client_error(resp.status_code))
                         continue
-                    if ruta.tier == "pago" and on_billable_attempt is not None:
-                        on_billable_attempt(ruta)
-                    rec = CompositeStreamTrimmer(unwrap_canvas=proveedor.unwraps_canvas)
+                    if route.tier == "pago" and on_billable_attempt is not None:
+                        on_billable_attempt(route)
+                    rec = CompositeStreamTrimmer(unwrap_canvas=provider.unwraps_canvas)
 
                     # Tool emulation over streaming. Detecting a tool call needs
                     # the COMPLETE TEXT (the JSON arrives split across deltas), so
@@ -592,7 +592,7 @@ class Proxy:
                     # routes -- unavoidable, and only when the client asked for
                     # tools against a provider that does not support them natively.
                     #
-                    # `nombres_tools` is the CLIENT request's allow-list: without
+                    # `tool_name_allowlist` is the CLIENT request's allow-list: without
                     # it, legitimate text carrying JSON would be turned into an
                     # invented call (see tool_emulator's docstring).
                     #
@@ -602,93 +602,93 @@ class Proxy:
                     # that emulate nothing -- and the exception was raised INSIDE
                     # the generator, with the 200 and the SSE headers already sent:
                     # a cut stream with no possible failover.
-                    if proveedor.emulates_tools and _emu.tool_names(cuerpo.get("tools")):
-                        nombres_tools = _emu.tool_names(cuerpo.get("tools"))
-                        acumulado = ""
+                    if provider.emulates_tools and _emu.tool_names(body.get("tools")):
+                        tool_name_allowlist = _emu.tool_names(body.get("tools"))
+                        buffered = ""
                         # id/created/model/usage from the provider: fields the
                         # chunk schema marks as required, and the synthetic chunk
                         # was the only one in the gateway that lost them.
-                        sobre = {}
-                        async for linea_buf in resp.aiter_lines():
-                            if not linea_buf.startswith("data:"):
+                        envelope = {}
+                        async for buf_line in resp.aiter_lines():
+                            if not buf_line.startswith("data:"):
                                 continue
-                            carga_buf = linea_buf[5:].strip()
-                            if carga_buf == "[DONE]":
+                            buf_payload = buf_line[5:].strip()
+                            if buf_payload == "[DONE]":
                                 break
                             try:
-                                obj_buf = json.loads(carga_buf)
+                                buf_obj = json.loads(buf_payload)
                             except json.JSONDecodeError:
                                 continue
-                            if not isinstance(obj_buf, dict):
+                            if not isinstance(buf_obj, dict):
                                 continue
                             for campo in ("id", "created", "model", "system_fingerprint"):
-                                if campo not in sobre and obj_buf.get(campo) is not None:
-                                    sobre[campo] = obj_buf[campo]
+                                if campo not in envelope and buf_obj.get(campo) is not None:
+                                    envelope[campo] = buf_obj[campo]
                             # `usage` arrives in a final chunk of its own (with
                             # empty choices) when the client asked for
                             # stream_options.include_usage: it is always
                             # overwritten so the last one -- the total -- wins.
-                            if obj_buf.get("usage") is not None:
-                                sobre["usage"] = obj_buf["usage"]
-                            elec_buf = (obj_buf.get("choices") or [{}])[0]
-                            if not isinstance(elec_buf, dict):
+                            if buf_obj.get("usage") is not None:
+                                envelope["usage"] = buf_obj["usage"]
+                            buf_choice = (buf_obj.get("choices") or [{}])[0]
+                            if not isinstance(buf_choice, dict):
                                 continue
-                            frag = (elec_buf.get("delta") or {}).get("content")
+                            frag = (buf_choice.get("delta") or {}).get("content")
                             if not isinstance(frag, str):
                                 continue
-                            if ttft_medido_ms is None and frag:
-                                ttft_medido_ms = int((time.monotonic() - t0) * 1000)
-                            acumulado += rec.feed(frag) if not raw else frag
+                            if measured_ttft_ms is None and frag:
+                                measured_ttft_ms = int((time.monotonic() - t0) * 1000)
+                            buffered += rec.feed(frag) if not raw else frag
                         if not raw:
-                            acumulado += rec.close()
+                            buffered += rec.close()
 
-                        llamadas = _emu.parse_tool_calls(acumulado, nombres_tools)
-                        if llamadas and cuerpo.get("tool_choice") != "none":
-                            _registrar_exito_una_vez()
-                            util = True
-                            chunk = _emu.build_stream_chunk(llamadas, sobre)
+                        calls = _emu.parse_tool_calls(buffered, tool_name_allowlist)
+                        if calls and body.get("tool_choice") != "none":
+                            _record_success_once()
+                            useful = True
+                            chunk = _emu.build_stream_chunk(calls, envelope)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
-                        if acumulado.strip():
+                        if buffered.strip():
                             # It was not a tool call: it is delivered as an
                             # ordinary text response, which is exactly what the
                             # client would have received without emulation.
-                            _registrar_exito_una_vez()
-                            util = True
-                            chunk = _emu.build_stream_chunk(None, sobre, acumulado)
+                            _record_success_once()
+                            useful = True
+                            chunk = _emu.build_stream_chunk(None, envelope, buffered)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
                         # A 200 that delivered nothing: same treatment as the
                         # normal path -- a FAILED attempt and failover to the next
                         # route. Nothing was emitted, so it stays clean.
-                        if not evento_registrado:
-                            self.store.record_event(ruta.key, False, 0, 200, ahora)
-                            evento_registrado = True
+                        if not event_recorded:
+                            self.store.record_event(route.key, False, 0, 200, now)
+                            event_recorded = True
                             self._react_to_non_429_failure(
-                                ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
+                                route, now, now + (time.monotonic() - t0), is_probe=False)
                         continue
 
                     # Chunks received that do not carry anything useful yet.
                     # They are held back (not emitted) until the first one that
                     # DOES arrive: while nothing has gone out, failover stays
                     # clean. See PENDING_CAP.
-                    pendientes: list[str] = []
-                    async for linea in resp.aiter_lines():
-                        if not linea.startswith("data:"):
+                    pending: list[str] = []
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
                             continue
-                        carga = linea[5:].strip()
-                        if carga == "[DONE]":
+                        payload = line[5:].strip()
+                        if payload == "[DONE]":
                             break
                         try:
-                            obj = json.loads(carga)
+                            obj = json.loads(payload)
                         except json.JSONDecodeError:
                             continue
-                        eleccion = (obj.get("choices") or [{}])[0]
-                        if not isinstance(eleccion, dict):
-                            eleccion = {}
-                        delta = eleccion.get("delta") or {}
+                        choice = (obj.get("choices") or [{}])[0]
+                        if not isinstance(choice, dict):
+                            choice = {}
+                        delta = choice.get("delta") or {}
                         # A tool_calls chunk (or the initial role one) usually
                         # travels with content="": we look at the PRESENCE of
                         # other keys, not their value, because something like
@@ -700,37 +700,37 @@ class Proxy:
                         # _CHUNK_ENVELOPE/_CHOICE_ENVELOPE): `finish_reason` lives
                         # next to `delta` and `usage` at the top level, and
                         # looking only at `delta` lost both.
-                        otras = ({k for k in delta if k != "content"}
-                                 | {k for k in eleccion
+                        other_keys = ({k for k in delta if k != "content"}
+                                 | {k for k in choice
                                     if k != "delta" and k not in _CHOICE_ENVELOPE}
                                  | {k for k in obj
                                     if k != "choices" and k not in _CHUNK_ENVELOPE})
                         if not raw and isinstance(delta.get("content"), str):
                             delta["content"] = rec.feed(delta["content"])
-                        contenido = delta.get("content")
+                        content = delta.get("content")
                         # Two different questions about the same chunk:
-                        #  - hay_texto: does it carry an ANSWER (something that is
+                        #  - has_text: does it carry an ANSWER (something that is
                         #    not whitespace)? That is what decides whether the
                         #    attempt was a success -- a response of pure
                         #    whitespace is not a response, same as on the
                         #    non-streaming path.
-                        #  - tiene_contenido: does it carry client-facing text,
+                        #  - has_content: does it carry client-facing text,
                         #    even a lone " "? Deltas arrive heavily split and
                         #    those spaces are part of the sentence: they cannot be
                         #    thrown away.
-                        hay_texto = isinstance(contenido, str) and bool(contenido.strip())
-                        tiene_contenido = isinstance(contenido, str) and contenido != ""
-                        trozo = f"data: {json.dumps(obj)}\n\n"
-                        if not hay_texto and "tool_calls" not in delta:
+                        has_text = isinstance(content, str) and bool(content.strip())
+                        has_content = isinstance(content, str) and content != ""
+                        piece = f"data: {json.dumps(obj)}\n\n"
+                        if not has_text and "tool_calls" not in delta:
                             # Nothing useful YET. The structural bits (role,
                             # finish_reason, the provider's reasoning) and the
                             # lone spaces are kept so they can be released IN
                             # ORDER alongside the first useful chunk; a chunk with
                             # nothing left inside is discarded.
-                            if not (tiene_contenido or otras):
+                            if not (has_content or other_keys):
                                 continue
-                            pendientes.append(trozo)
-                            if len(pendientes) > PENDING_CAP:
+                            pending.append(piece)
+                            if len(pending) > PENDING_CAP:
                                 # Holding back a stream that emits nothing but
                                 # reasoning, without a limit, would be a memory
                                 # leak: they are released (clean failover is lost)
@@ -739,41 +739,41 @@ class Proxy:
                                 log.info(
                                     "stream of %s: more than %d contentless chunks "
                                     "held back; releasing them, and this attempt can no "
-                                    "hacer failover limpio", ruta.key, PENDING_CAP)
-                                for p in pendientes:
+                                    "hacer failover clean_text", route.key, PENDING_CAP)
+                                for p in pending:
                                     yield p
-                                pendientes.clear()
-                                emitido = True
+                                pending.clear()
+                                emitted = True
                             continue
-                        _registrar_exito_una_vez()
-                        util = True
-                        for p in pendientes:
+                        _record_success_once()
+                        useful = True
+                        for p in pending:
                             yield p
-                        pendientes.clear()
-                        emitido = True
-                        yield trozo
-                    resto = rec.close()
-                    if resto.strip():
-                        _registrar_exito_una_vez()
-                        util = True
-                        for p in pendientes:
+                        pending.clear()
+                        emitted = True
+                        yield piece
+                    rest = rec.close()
+                    if rest.strip():
+                        _record_success_once()
+                        useful = True
+                        for p in pending:
                             yield p
-                        pendientes.clear()
-                        emitido = True
+                        pending.clear()
+                        emitted = True
                         yield ('data: {"choices":[{"delta":{"content":%s}}]}\n\n'
-                               % json.dumps(resto))
-                    if not util:
+                               % json.dumps(rest))
+                    if not useful:
                         # A 200 that never delivered content or tool_calls: the
                         # same hole as above, on the streaming side. The
                         # connection worked at the HTTP level, but the client is
                         # left with no answer -- it is recorded as a FAILED
                         # attempt and falls through to the next route.
-                        if not evento_registrado:
-                            self.store.record_event(ruta.key, False, 0, 200, ahora)
-                            evento_registrado = True
+                        if not event_recorded:
+                            self.store.record_event(route.key, False, 0, 200, now)
+                            event_recorded = True
                             self._react_to_non_429_failure(
-                                ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
-                        if pendientes:
+                                route, now, now + (time.monotonic() - t0), is_probe=False)
+                        if pending:
                             # What was held back is discarded along with the
                             # attempt. That is correct (none of it reached the
                             # client, so failover stays clean) but it cannot be
@@ -781,8 +781,8 @@ class Proxy:
                             log.info(
                                 "stream of %s: discarding %d held-back chunk(s); the "
                                 "attempt closed with neither content nor tool_calls",
-                                ruta.key, len(pendientes))
-                        if emitido:
+                                route.key, len(pending))
+                        if emitted:
                             # What was held back has already been released (see
                             # PENDING_CAP): another route cannot be spliced on top
                             # without mixing two responses. Round 8: this WAS the
@@ -794,33 +794,33 @@ class Proxy:
                             yield "data: [DONE]\n\n"
                             return
                         continue
-                    for p in pendientes:     # p.ej. el chunk final de finish_reason
+                    for p in pending:     # p.ej. el chunk final de finish_reason
                         yield p
                     yield "data: [DONE]\n\n"
                     return
             except httpx.HTTPError:
-                if not evento_registrado:
-                    self.store.record_event(ruta.key, False, 0, 0, ahora)
+                if not event_recorded:
+                    self.store.record_event(route.key, False, 0, 0, now)
                     self._react_to_non_429_failure(
-                        ruta, ahora, ahora + (time.monotonic() - t0), is_probe=False)
-                if emitido:
+                        route, now, now + (time.monotonic() - t0), is_probe=False)
+                if emitted:
                     yield "data: [DONE]\n\n"
                     return
                 continue
 
-        yield 'data: {"error":{"message":"sin rutas disponibles"}}\n\n'
+        yield 'data: {"error":{"message":"sin routes disponibles"}}\n\n'
         yield "data: [DONE]\n\n"
 
-    def _punish(self, clave: str, ahora: float) -> None:
+    def _punish(self, key: str, now: float) -> None:
         """Punishment with exponential backoff -- a confirmed PROBE (periodic or
         on demand) or direct paid failures (`_suspect_paid`). Round 9: a 429 NO
         longer goes through here, see `_punish_429`."""
-        n = self._punishments.get(clave, 0) + 1
-        self._punishments[clave] = n
-        self.cooldowns[clave] = ahora + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_CAP_S)
-        self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
+        n = self._punishments.get(key, 0) + 1
+        self._punishments[key] = n
+        self.cooldowns[key] = now + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_CAP_S)
+        self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
-    def _punish_429(self, clave: str, ahora: float, resp: httpx.Response | None) -> None:
+    def _punish_429(self, key: str, now: float, resp: httpx.Response | None) -> None:
         """Round 9, MEDIUM 7: a 429 still punishes immediately (an unambiguous
         signal about the route, no probe needed) but NO longer reuses `_punish`'s
         exponential backoff (which could escalate to COOLDOWN_CAP_S=3600s). The
@@ -828,12 +828,12 @@ class Proxy:
         default is used (COOLDOWN_429_DEFAULT_S); either way it is capped at
         COOLDOWN_429_MAX_S. See the constants' header comment for the measurement
         that motivated the change."""
-        duracion = self._retry_after_seconds(resp)
-        if duracion is None:
-            duracion = COOLDOWN_429_DEFAULT_S
-        duracion = min(duracion, COOLDOWN_429_MAX_S)
-        self.cooldowns[clave] = ahora + duracion
-        self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
+        duration = self._retry_after_seconds(resp)
+        if duration is None:
+            duration = COOLDOWN_429_DEFAULT_S
+        duration = min(duration, COOLDOWN_429_MAX_S)
+        self.cooldowns[key] = now + duration
+        self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
     @staticmethod
     def _retry_after_seconds(resp: httpx.Response | None) -> float | None:
@@ -872,30 +872,30 @@ class Proxy:
         except Exception:
             return None
 
-    def _clear_punishment(self, clave: str) -> None:
+    def _clear_punishment(self, key: str) -> None:
         """A success erases EVERY trace of previous punishment -- 429s and failed
         probes alike. Factored out so complete() and complete_stream() (with its
-        _registrar_exito_una_vez) cannot drift apart on which dictionaries they
+        _record_success_once) cannot drift apart on which dictionaries they
         clear."""
-        self._punishments.pop(clave, None)
-        self.cooldowns.pop(clave, None)
-        self._cooldown_generation[clave] = self._cooldown_generation.get(clave, 0) + 1
+        self._punishments.pop(key, None)
+        self.cooldowns.pop(key, None)
+        self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
-    def _react_to_non_429_failure(self, ruta: Route, ahora: float, ahora_del_castigo: float,
+    def _react_to_non_429_failure(self, route: Route, now: float, punish_at: float,
                                     is_probe: bool) -> None:
         """The SINGLE decision point for a NON-429 failure (see
         _is_client_error) -- shared by complete() and complete_stream() so the two
         branches cannot drift apart in how they treat the same situation: that was
-        exactly round 8's vector (complete_stream's `if emitido:` branch had a
+        exactly round 8's vector (complete_stream's `if emitted:` branch had a
         shortcut of its own)."""
         if is_probe:
-            self._punish(ruta.key, ahora_del_castigo)
-        elif ruta.tier == "pago":
-            self._suspect_paid(ruta, ahora_del_castigo)
+            self._punish(route.key, punish_at)
+        elif route.tier == "pago":
+            self._suspect_paid(route, punish_at)
         else:
-            self._suspect(ruta, ahora)
+            self._suspect(route, now)
 
-    def _suspect(self, ruta: Route, ahora: float) -> None:
+    def _suspect(self, route: Route, now: float) -> None:
         """Round 8/9: a REAL-TRAFFIC failure never excludes a route by itself --
         it only accumulates suspicion. On crossing SUSPICION_THRESHOLD CONSECUTIVE
         failures (round 9, HIGH 3: no longer "within a time window" -- see
@@ -910,21 +910,21 @@ class Proxy:
         `_react_to_non_429_failure`), which punishes DIRECTLY without a probe: an
         on-demand probe would spend REAL MONEY against a paid provider with no
         natural owner for that charge (the daily cap is PER KEY, not per route)."""
-        self._suspicions[ruta.key] = min(self._suspicions.get(ruta.key, 0) + 1, SUSPICION_THRESHOLD)
-        if self._suspicions[ruta.key] < SUSPICION_THRESHOLD:
+        self._suspicions[route.key] = min(self._suspicions.get(route.key, 0) + 1, SUSPICION_THRESHOLD)
+        if self._suspicions[route.key] < SUSPICION_THRESHOLD:
             return
-        if ruta.key in self._probes_in_flight:
+        if route.key in self._probes_in_flight:
             return  # a probe is already in flight for this route -- do not duplicate
-        ultimo = self._last_on_demand_probe.get(ruta.key, float("-inf"))
-        if ahora - ultimo < ON_DEMAND_PROBE_LIMIT_S:
+        last_probe = self._last_on_demand_probe.get(route.key, float("-inf"))
+        if now - last_probe < ON_DEMAND_PROBE_LIMIT_S:
             return  # rate-limited per route -- the suspicion waits for the next chance
         # Whether there is quota is NOT decided HERE -- the route is recorded as a
         # candidate and `_admit_pending_probes` is asked to share the available
         # quota FAIRLY among ALL current candidates, not just this one.
-        self._awaiting_probe[ruta.key] = ruta
-        self._admit_pending_probes(ahora)
+        self._awaiting_probe[route.key] = route
+        self._admit_pending_probes(now)
 
-    def _admit_pending_probes(self, ahora: float) -> None:
+    def _admit_pending_probes(self, now: float) -> None:
         """Round 10, HIGH from the gate: share the global quota (round 9,
         MEDIUM 6) by FAIRNESS, not by arrival order. `complete()` walks the chain
         in the SAME order on every request (priority, then reliability) -- so with
@@ -944,26 +944,26 @@ class Proxy:
         order in which they asked within a single chain. The global CAP is
         unchanged (round 9): this changes WHO is admitted, not HOW MANY probes per
         minute."""
-        corte_global = ahora - GLOBAL_PROBE_WINDOW_S
-        self._recent_probes[:] = [m for m in self._recent_probes if m >= corte_global]
-        candidatas = sorted(
+        global_cutoff = now - GLOBAL_PROBE_WINDOW_S
+        self._recent_probes[:] = [m for m in self._recent_probes if m >= global_cutoff]
+        candidates = sorted(
             self._awaiting_probe.values(),
             key=lambda r: self._last_on_demand_probe.get(r.key, float("-inf")))
-        for ruta in candidatas:
+        for route in candidates:
             if len(self._recent_probes) >= GLOBAL_PROBE_LIMIT_PER_MINUTE:
                 break  # quota exhausted -- the rest wait for the next chance
-            if ruta.key in self._probes_in_flight:
-                self._awaiting_probe.pop(ruta.key, None)
+            if route.key in self._probes_in_flight:
+                self._awaiting_probe.pop(route.key, None)
                 continue
-            self._awaiting_probe.pop(ruta.key, None)
-            self._recent_probes.append(ahora)
-            self._last_on_demand_probe[ruta.key] = ahora
-            tarea = asyncio.create_task(self._probe_on_demand(ruta, ahora))
-            self._probes_in_flight[ruta.key] = tarea
+            self._awaiting_probe.pop(route.key, None)
+            self._recent_probes.append(now)
+            self._last_on_demand_probe[route.key] = now
+            tarea = asyncio.create_task(self._probe_on_demand(route, now))
+            self._probes_in_flight[route.key] = tarea
             tarea.add_done_callback(
-                lambda _t, clave=ruta.key: self._probes_in_flight.pop(clave, None))
+                lambda _t, key=route.key: self._probes_in_flight.pop(key, None))
 
-    def _suspect_paid(self, ruta: Route, ahora: float) -> None:
+    def _suspect_paid(self, route: Route, now: float) -> None:
         """HIGH 4 (round 9): paid routes stay out of suspicion+probe (see
         _suspect) because an on-demand probe would spend real money with no owner
         -- but that CANNOT mean nothing excludes them: without this, a broken paid
@@ -984,14 +984,14 @@ class Proxy:
         Measured through the real API: 60->120->...->3600s in 24 requests from one
         key, with the paid fallback out for ALL keys for an hour. Flat, capped
         (`PAID_DIRECT_COOLDOWN_S`), no escalation -- same as `_punish_429`."""
-        n = min(self._paid_failures.get(ruta.key, 0) + 1, SUSPICION_THRESHOLD)
-        self._paid_failures[ruta.key] = n
+        n = min(self._paid_failures.get(route.key, 0) + 1, SUSPICION_THRESHOLD)
+        self._paid_failures[route.key] = n
         if n >= SUSPICION_THRESHOLD:
-            self.cooldowns[ruta.key] = ahora + PAID_DIRECT_COOLDOWN_S
-            self._cooldown_generation[ruta.key] = self._cooldown_generation.get(ruta.key, 0) + 1
-            self._paid_failures.pop(ruta.key, None)
+            self.cooldowns[route.key] = now + PAID_DIRECT_COOLDOWN_S
+            self._cooldown_generation[route.key] = self._cooldown_generation.get(route.key, 0) + 1
+            self._paid_failures.pop(route.key, None)
 
-    async def _probe_on_demand(self, ruta: Route, ahora: float) -> None:
+    async def _probe_on_demand(self, route: Route, now: float) -> None:
         """The probe `_suspect` schedules. It reuses complete() with
         `is_probe=True` over a chain of a SINGLE route -- the same path that
         already punishes unambiguously -- and additionally records a row in
@@ -1016,21 +1016,21 @@ class Proxy:
         suspected again until the rate limit decayed, with a stale suspicion
         attached). It is caught, logged, and `_suspicions` is ALWAYS cleared so
         the route is never left half-way."""
-        if self.cooldowns.get(ruta.key, 0.0) > ahora:
-            self._suspicions.pop(ruta.key, None)
+        if self.cooldowns.get(route.key, 0.0) > now:
+            self._suspicions.pop(route.key, None)
             return
-        generacion_antes = self._cooldown_generation.get(ruta.key, 0)
+        generation_before = self._cooldown_generation.get(route.key, 0)
         try:
             t0 = time.monotonic()
-            r = await self.complete([ruta], dict(PING), ahora, is_probe=True)
+            r = await self.complete([route], dict(PING), now, is_probe=True)
             ms = int((time.monotonic() - t0) * 1000)
             # Round 10, small fix: it is stamped with NOW + how long the probe
-            # took, not with the `ahora` from when it was SCHEDULED -- the same
+            # took, not with the `now` from when it was SCHEDULED -- the same
             # class of bug as round 9's HIGH 2, one level up: for a hung route (up
             # to TIMEOUT_S=90s) the `sondas` row was dated up to 90s in the past,
             # which could mis-order the `ORDER BY momento DESC` that
             # `has_liveness_evidence` relies on.
-            ahora_resuelto = ahora + ms / 1000.0
+            resolved_at = now + ms / 1000.0
             if r.upstream_code != 429:
                 # Small fix: a 429 against the PROBE already has its own
                 # proportional punishment (_punish_429, inside complete()) -- it
@@ -1040,18 +1040,18 @@ class Proxy:
                 # the probe would be enough for `has_liveness_evidence` (round 9)
                 # to declare it dead -- a momentary capacity signal is not
                 # evidence of death.
-                self.store.record_probe(ruta.key, "salud", r.status == 200, ms, 0,
-                                             r.upstream_code, 0, 0, ahora_resuelto)
-            if r.status == 200 and self._cooldown_generation.get(ruta.key, 0) == generacion_antes:
-                self._clear_punishment(ruta.key)
+                self.store.record_probe(route.key, "salud", r.status == 200, ms, 0,
+                                             r.upstream_code, 0, 0, resolved_at)
+            if r.status == 200 and self._cooldown_generation.get(route.key, 0) == generation_before:
+                self._clear_punishment(route.key)
         except Exception:
             log.exception(
                 "on-demand probe of %s failed with a non-HTTP exception "
                 "(possibly SQLite contention under WAL) -- no probe is "
                 "recorded and nothing is punished or cleared: the route "
-                "is left WITHOUT A VERDICT, not dead by accident.", ruta.key)
+                "is left WITHOUT A VERDICT, not dead by accident.", route.key)
         finally:
-            self._suspicions.pop(ruta.key, None)
+            self._suspicions.pop(route.key, None)
 
     async def wait_for_pending_probes(self) -> None:
         """Tests only: on-demand probes run in the background (see _suspect) so
@@ -1059,18 +1059,18 @@ class Proxy:
         this lets the ones in flight RIGHT NOW finish before asserting on
         cooldowns/probes -- without it, a test checking `p.cooldowns` right after
         crossing the threshold can run before the background probe has."""
-        tareas = list(self._probes_in_flight.values())
-        if tareas:
-            await asyncio.gather(*tareas)
+        tasks = list(self._probes_in_flight.values())
+        if tasks:
+            await asyncio.gather(*tasks)
 
     @staticmethod
-    def _clean(datos: dict, desenvolver_canvas: bool) -> str:
-        razon_total = ""
-        for eleccion in datos.get("choices", []):
-            msg = eleccion.get("message") or {}
-            contenido = msg.get("content")
-            if isinstance(contenido, str):
-                limpio, razon = trim(contenido, desenvolver_canvas)
-                msg["content"] = limpio
-                razon_total += razon
-        return razon_total
+    def _clean(data: dict, unwrap_canvas: bool) -> str:
+        total_reasoning = ""
+        for choice in data.get("choices", []):
+            msg = choice.get("message") or {}
+            content = msg.get("content")
+            if isinstance(content, str):
+                clean_text, reasoning_text = trim(content, unwrap_canvas)
+                msg["content"] = clean_text
+                total_reasoning += reasoning_text
+        return total_reasoning
