@@ -554,7 +554,7 @@ async def test_deepseek_emulates_tool_call():
                 "tools": [WEATHER_TOOL],
                 "tool_choice": "required",
             },
-            ahora=0.0,
+            now=0.0,
         )
 
     assert r.status == 200, f"deepseek returned HTTP {r.status}: {r.json}"
@@ -590,7 +590,7 @@ async def test_deepseek_text_response_without_tools():
             [route],
             {"model": "deepseek-chat",
              "messages": [{"role": "user", "content": "Say only: hello"}]},
-            ahora=0.0,
+            now=0.0,
         )
 
     assert r.status == 200

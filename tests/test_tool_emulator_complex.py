@@ -99,7 +99,7 @@ async def test_selects_correct_tool_from_multiple():
                  "messages": [{"role": "user", "content": question}],
                  "tools": ALL_TOOLS,
                  "tool_choice": "required"},
-                ahora=0.0,
+                now=0.0,
             )
             assert r.status == 200, f"HTTP {r.status} for: {question}"
             tcs = _tool_calls(r)
@@ -128,7 +128,7 @@ async def test_includes_optional_arguments_when_relevant():
                            "content": "What temperature in Fahrenheit is it in New York?"}],
              "tools": [WEATHER_TOOL],
              "tool_choice": "required"},
-            ahora=0.0,
+            now=0.0,
         )
         assert r.status == 200
         tcs = _tool_calls(r)
@@ -164,7 +164,7 @@ async def test_two_turn_agentic_loop():
              "messages": messages,
              "tools": [WEATHER_TOOL],
              "tool_choice": "required"},
-            ahora=0.0,
+            now=0.0,
         )
         assert r1.status == 200, f"Turn 1 failed: {r1.json}"
         tcs = _tool_calls(r1)
@@ -194,7 +194,7 @@ async def test_two_turn_agentic_loop():
             {"model": "deepseek-chat",
              "messages": messages,
              "tools": [WEATHER_TOOL]},
-            ahora=0.0,
+            now=0.0,
         )
         assert r2.status == 200, f"Turn 2 failed: {r2.json}"
         final_text = _content(r2)
@@ -238,7 +238,7 @@ async def test_three_turn_comparison_loop():
                 {"model": "deepseek-chat",
                  "messages": messages,
                  "tools": [WEATHER_TOOL]},
-                ahora=0.0,
+                now=0.0,
             )
             # The free DeepSeek proxy intermittently answers 200 with an empty
             # body under consecutive calls -- its own session degrading, not an
