@@ -7,7 +7,7 @@ expects a structured call, and nothing signals the failure.
 
 This module closes that gap in two halves, wired in at opposite ends of a request:
 
-- :func:`inject_into_body` (called from ``cliente.armar_peticion``) rewrites the
+- :func:`inject_into_body` (called from ``client.build_request``) rewrites the
   request so a non-native model can participate: ``tools`` becomes prose in the
   system prompt, and any tool-call history is replayed as plain text.
 - :func:`detect_and_convert` (called from ``proxy.completar``) reads the model's
@@ -67,7 +67,7 @@ def _describe_params(params: dict) -> str:
     Every field is type-checked before use. This runs on a body the client sent
     verbatim -- ``api.py`` does no schema validation -- so a malformed ``tools``
     entry must degrade to a thinner prompt, never raise: an exception here
-    escapes ``armar_peticion`` inside the route loop and aborts the whole chain
+    escapes ``build_request`` inside the route loop and aborts the whole chain
     before a single upstream attempt.
     """
     if not isinstance(params, dict):

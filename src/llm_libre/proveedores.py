@@ -68,7 +68,7 @@ def unir_ruta(base_url: str, sufijo: str) -> str:
     "/chat/completions"` da `"...:8888?token=abc/chat/completions"` en vez
     de `"...:8888/chat/completions?token=abc"`. Round 5: este bug se
     arreglo primero solo en `_resolver_base_url` (donde se GUARDA
-    `Proveedor.base_url`), pero `cliente.armar_peticion` y
+    `Proveedor.base_url`), pero `client.build_request` y
     `sondeo.sincronizar_catalogo` seguian concatenando texto al construir
     la URL FINAL que de verdad se manda por la red -- la astilla se habia
     movido una capa mas abajo. Los dos ahora pasan por aca."""

@@ -17,7 +17,7 @@ YAML = os.getenv("PROVEEDORES_YAML", "proveedores.yaml")
 RUTA_DB = os.getenv("RUTA_DB", "/datos/llm-libre.sqlite3")
 HORAS_SALUD = float(os.getenv("SONDEO_SALUD_HORAS", "5"))
 # Sorteo entre rutas empatadas. Encendido por defecto: con la bateria de
-# calidad dandole 1.00 a todo el catalogo (ver bateria.py), el orden estricto
+# calidad dandole 1.00 a todo el catalogo (ver quality_suite.py), el orden estricto
 # manda SIEMPRE la misma ruta y quema la cuota de un solo proveedor mientras
 # los demas miran. Apagarlo (ROTAR_EMPATES=false) devuelve el orden
 # determinista de antes, util para depurar una respuesta rara.

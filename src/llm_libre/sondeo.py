@@ -4,7 +4,7 @@ import time
 
 import httpx
 
-from llm_libre.bateria import CASOS, evaluar
+from llm_libre.quality_suite import CASES, evaluate
 from llm_libre.catalogo import normalizar
 from llm_libre.modelos import Ruta
 from llm_libre.proveedores import Proveedor, rutas_fijas, unir_ruta
@@ -171,8 +171,8 @@ async def sondear_calidad(proxy, almacen, rutas: list[Ruta], ahora: float) -> No
     # el escape de emergencia.
     for ruta in (r for r in rutas if r.tier == "gratis"):
         resultados = []
-        for caso in CASOS:
-            if caso.nombre == "tools" and not ruta.capacidades.tools:
+        for caso in CASES:
+            if caso.name == "tools" and not ruta.capacidades.tools:
                 # Esta ruta no declara soporte de tools (ver Capacidades, viene
                 # de /models o del YAML de fijos): pedirselo igual solo gastaria
                 # cuota gratis para un fallo garantizado, y contarlo como caso
@@ -181,18 +181,18 @@ async def sondear_calidad(proxy, almacen, rutas: list[Ruta], ahora: float) -> No
                 # igual en el puntaje de calidad. Se omite el caso entero: no
                 # se llama al proxy y no cuenta ni para pasados ni para totales.
                 continue
-            cuerpo = dict(caso.cuerpo)
+            cuerpo = dict(caso.body)
             # Round 10, fix chico: mismo hueco de wiring que HIGH 1 (round
             # 9), una funcion mas alla. `caso.cuerpo` es tan gateway-autor
-            # como `PING` -- son CASOS fijos de bateria.py, nunca algo que
+            # como `PING` -- son CASES fijos de quality_suite.py, nunca algo que
             # un cliente real escriba -- asi que un fallo aca es evidencia
             # de la ruta igual de inequivoca. Sin `es_sonda=True`, un fallo
             # de bateria alimentaba `_sospechar` (pensada para trafico de
             # CLIENTE) y gastaba cupo del presupuesto de sondas bajo
             # demanda, escaso y compartido con el trafico real.
             r = await proxy.completar([ruta], cuerpo, ahora, es_sonda=True)
-            resultados.append(r.estado == 200 and caso.verificar(r.json))
-        pasados, totales = evaluar(resultados)
+            resultados.append(r.estado == 200 and caso.check(r.json))
+        pasados, totales = evaluate(resultados)
         almacen.registrar_sonda(ruta.clave, "calidad", pasados > 0, 0, 0, 200,
                                 pasados, totales, ahora)
 

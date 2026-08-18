@@ -8,7 +8,7 @@ from llm_libre.api import Estado
 from llm_libre.modelos import Capacidades, Ruta
 from llm_libre.proveedores import Proveedor
 from llm_libre.proxy import Proxy
-from llm_libre.bateria import TOPE_CORTO
+from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
 from llm_libre.sondeo import (PING, ciclo, sincronizar_catalogo, sondear_calidad,
                               sondear_salud)
 
@@ -453,7 +453,7 @@ async def test_la_sonda_de_calidad_guarda_casos_pasados_sobre_totales():
 #     completar() sin es_sonda=True, asi que un caso de bateria fallido
 #     alimentaba `_sospechar` (pensada para trafico de CLIENTE) y gastaba
 #     cupo del presupuesto de sondas bajo demanda, escaso y compartido con
-#     el trafico real. `caso.cuerpo` es tan gateway-autor como PING. ---
+#     el trafico real. `caso.body` es tan gateway-autor como PING. ---
 
 async def test_la_sonda_de_calidad_castiga_directo_sin_pasar_por_sospecha():
     p = _proxy(lambda req: httpx.Response(500))
@@ -682,7 +682,7 @@ async def test_la_sonda_de_salud_no_mata_a_un_modelo_por_no_dejarlo_pensar():
 async def test_el_ping_de_salud_no_puede_quedarse_atras_del_tope_de_la_bateria():
     # Los dos topes existen por la misma razon; si la bateria sube y el ping no,
     # vuelve exactamente este bug.
-    assert PING["max_tokens"] >= TOPE_CORTO
+    assert PING["max_tokens"] >= SHORT_TOKEN_BUDGET
 
 
 async def test_la_sonda_de_salud_guarda_el_codigo_del_proveedor_no_el_del_gateway():

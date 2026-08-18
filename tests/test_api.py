@@ -277,7 +277,7 @@ def test_completions_con_model_de_tipo_invalido_da_400_no_500(cliente):
 #     modelo Pydantic que ligue el cuerpo (eso haria que FastAPI descarte
 #     cualquier campo que no declare, rompiendo el contrato passthrough que
 #     este proyecto existe para dar). `test_cliente.py` ya prueba esto al
-#     nivel de `armar_peticion` (la copia somera que le saca las extensiones
+#     nivel de `build_request` (la copia somera que le saca las extensiones
 #     x_* al cuerpo); este test lo extiende al nivel HTTP completo -- cliente
 #     -> FastAPI -> proxy -> proveedor -- para que quede pineado que un campo
 #     que ni el gateway ni ningun SDK de OpenAI conocen sigue llegando al

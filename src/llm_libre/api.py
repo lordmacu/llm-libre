@@ -36,7 +36,7 @@ def _leer_campo(campo: str, valor_bruto, mensaje: str, calcular):
     seguia sin atrapar cuando se encontraron las otras dos. El eje real
     nunca fue "este campo puntual", fue "cualquier campo que este
     endpoint interpreta antes de usarlo llega crudo del cliente, sin
-    tipo garantizado" -- ver el docstring de `armar_peticion`, el mismo
+    tipo garantizado" -- ver el docstring de `build_request`, el mismo
     principio de "esto es passthrough, no confiar en la forma". Esta
     funcion es el punto UNICO por el que pasa esa interpretacion de aca
     en mas, para que un cuarto campo (si este endpoint gana uno) no

@@ -86,7 +86,7 @@ async def test_chatgpt_proxy_no_hace_function_calling_de_verdad():
     url = os.getenv("CHATGPT_PROXY_URL")
     if not url:
         pytest.skip("CHATGPT_PROXY_URL no esta configurada")
-    from llm_libre.bateria import HERRAMIENTA
+    from llm_libre.quality_suite import WEATHER_TOOL
 
     chatgpt = _proveedor_chatgpt(url)
     rutas = await _rutas_chatgpt_descubiertas(chatgpt)
@@ -97,7 +97,7 @@ async def test_chatgpt_proxy_no_hace_function_calling_de_verdad():
                              json={"model": ruta.modelo_id,
                                    "messages": [{"role": "user",
                                                 "content": "Que clima hace en Bogota?"}],
-                                   "tools": [HERRAMIENTA], "tool_choice": "required"})
+                                   "tools": [WEATHER_TOOL], "tool_choice": "required"})
         # Mandarle tools ya no revienta (eso cambio, y esta bien): lo que se
         # verifica es que la RESPUESTA sigue sin ser function calling de
         # verdad. El mensaje distingue las dos formas de fallar -- el status

@@ -156,7 +156,7 @@ _ESQUEMA_CUERPO_CHAT = {
     "type": "object",
     "required": ["messages"],
     "description": (
-        "This endpoint is a pure passthrough (see llm_libre.cliente.armar_peticion): "
+        "This endpoint is a pure passthrough (see llm_libre.client.build_request): "
         "the request is read as raw JSON, never validated against a strict schema, "
         "and forwarded to the chosen provider almost verbatim -- only the gateway "
         "extensions below (`x_*`) are stripped, and `model` is rewritten to the "

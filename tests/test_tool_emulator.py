@@ -398,7 +398,7 @@ def test_inject_strips_tools_even_when_none_are_callable():
 
 # --- malformed client input must degrade, never raise ---
 # api.py does no schema validation, so these bodies reach the emulator verbatim.
-# An exception here escapes armar_peticion inside the route loop and aborts the
+# An exception here escapes build_request inside the route loop and aborts the
 # whole chain before a single upstream attempt is made.
 
 @pytest.mark.parametrize("tools", [

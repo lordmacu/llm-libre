@@ -9,8 +9,8 @@ from dataclasses import dataclass
 import httpx
 
 from llm_libre import tool_emulator as _emu
-from llm_libre.bateria import TOPE_CORTO
-from llm_libre.cliente import armar_peticion
+from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
+from llm_libre.client import build_request
 from llm_libre.modelos import Ruta
 from llm_libre.reasoning import CompositeStreamTrimmer, trim
 
@@ -26,7 +26,7 @@ COOLDOWN_BASE_S = 60.0  # backoff de una ruta castigada por una SONDA (propia,
 COOLDOWN_TOPE_S = 3600.0
 TIMEOUT_S = 90.0
 
-# El PING de salud comparte el tope de la bateria (TOPE_CORTO) por la MISMA
+# El PING de salud comparte el tope de la bateria (SHORT_TOKEN_BUDGET) por la MISMA
 # razon, y no puede quedarse atras cuando ese numero se mueve.
 #
 # Tenia `max_tokens: 8`, cuatro veces menos que los 32 que la bateria ya
@@ -50,7 +50,7 @@ TIMEOUT_S = 90.0
 # PERIODICA y la sonda BAJO DEMANDA sigan siendo, literalmente, el mismo
 # pedido.
 PING = {"messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": TOPE_CORTO, "temperature": 0}
+        "max_tokens": SHORT_TOKEN_BUDGET, "temperature": 0}
 
 # Round 8. Seis rondas del mismo mecanismo (retryability, una lista de
 # codigos, la lista con el default invertido, atribucion a nivel de
@@ -408,7 +408,7 @@ class Proxy:
         claves_del_pedido = {ruta.clave for ruta in rutas}
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
-            url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
+            url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.modelo_id)
             intentos += 1
             t0 = time.monotonic()
             try:
@@ -491,7 +491,7 @@ class Proxy:
                     self._limpiar_castigo(ruta.clave)
                 if proveedor.emula_tools:
                     # `cuerpo` es el pedido del CLIENTE, con su `tools` intacto:
-                    # armar_peticion lo saca solo de la copia que viaja al
+                    # build_request lo saca solo de la copia que viaja al
                     # proveedor. Ese array es el allow-list que evita convertir
                     # una respuesta de texto legitima en un tool call inventado.
                     datos = _emu.detect_and_convert(datos, cuerpo.get("tools"),
@@ -552,7 +552,7 @@ class Proxy:
         volver a desincronizarse (ese fue justo el vector de round 8)."""
         for ruta in rutas:
             proveedor = self.proveedores[ruta.proveedor]
-            url, cabeceras, payload = armar_peticion(proveedor, cuerpo, ruta.modelo_id)
+            url, cabeceras, payload = build_request(proveedor, cuerpo, ruta.modelo_id)
             payload["stream"] = True
             t0 = time.monotonic()
             emitido = False          # ya salio algun chunk hacia el cliente
