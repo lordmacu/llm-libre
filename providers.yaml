@@ -206,8 +206,25 @@ providers:
     # from an answer would mean guessing at prose -- so they are dropped at the
     # source, by message kind, in grok-proxy's is_status_header.
     strips_xai_cards: true
-    # Same pattern as chatgpt: the ids are DISCOVERED from /models (33 of them
-    # on 2026-08-18, with a high-rate pool behind), but that catalogue only
+    # `emulates_tools` is deliberately ABSENT here, and that is a claim worth
+    # writing down rather than leaving as a silence. deepseek and mistral declare
+    # it: for them this gateway injects the tool definitions into the prompt as
+    # text and parses the answer back into OpenAI shape (see tool_emulator.py).
+    # grok does NOT need that -- its plugin agents do real, native function
+    # calling, and the difference is not academic: emulation is fragile against
+    # unusual prompts and spends context on instructions.
+    #
+    # Verified live 2026-08-19 against grok-plugins-4p6-excel, -outlook and
+    # 4p5-word, with two INVENTED tools (a hardware-store order and a Mars-weather
+    # decoy) so nothing internal to Grok could account for the result. All three
+    # picked the right function, ignored the decoy, pulled the SKU out of prose,
+    # returned `cantidad` as an integer rather than a string, and mapped "es
+    # urgente, para hoy" onto the enum value `alta`. That is a real schema being
+    # honoured, not a plugin being triggered.
+    #
+    # Same pattern as chatgpt: the ids are DISCOVERED from /models (26 of them
+    # since grok-proxy stopped advertising the six models whose quota is too
+    # small to route on), but that catalogue only
     # brings id/object/created/owned_by/notes -- neither capabilities nor
     # context -- so capabilities are declared once for all of them.
     #
