@@ -70,6 +70,24 @@ _SPANISH_VALUES = [("routes", "tier", "gratis", "free"), ("routes", "tier", "pag
 
 WINDOW = 50  # how many recent observations weigh in reliability and latency
 
+# How many quality-battery RUNS are averaged into `quality`.
+#
+# This used to be 1 -- the last run, full stop -- which made `quality` exactly as
+# noisy as a single pass of the battery. That is fine while the battery is five
+# short prompts a route either can or cannot do, and stops being fine the moment a
+# case is long enough for a free tier to shed it: measured live on 2026-08-18, the
+# SAME route on the SAME case scored 6/6, then 0/6 (an empty 200 returned in 0.8s),
+# then 6/6 again. With one sample that is a route whose quality flips between 1.0
+# and 0.0 every cycle, and a score that flips is a routing roulette on a 25h clock
+# -- the slow version of the bug this whole change set exists to remove.
+#
+# 3 is a deliberate compromise. The battery runs every QUALITY_EVERY_N_CYCLES health
+# cycles (~25h in production), so three runs is ~3 days of evidence: enough to
+# outvote a single shed request, short enough that a route that genuinely got worse
+# converges in days rather than weeks -- and it moves immediately anyway, just
+# partially, because the bad run is already a third of the average.
+QUALITY_RUNS = 3
+
 # How far back POSITIVE EVIDENCE that a route works is searched for, for /health
 # (Task 13, round 6 review, Part 2). Larger than the default health-probe interval
 # (HEALTH_PROBE_HOURS=5h) with enough margin that ONE probing pass failing or
@@ -95,11 +113,20 @@ LIVENESS_WINDOW_S = 24 * 3600.0
 # already asked for it in `events` -- and exposed in /v1/ranking, but it does NOT
 # feed the score's latency factor, which is calibrated on the ttft scale.
 #
-# Accepted consequence: in a deployment using only the non-streaming path, no ttft
-# is ever measured and every route keeps the neutral value, i.e. latency stops
-# discriminating. That is preferable to discriminating by an invented number: it
-# is visible in /v1/ranking (ttft_p50_ms == the neutral for all) and fixes itself
-# as soon as there is streaming traffic.
+# Consequence, and how it is handled since 2026-08-18: in a deployment using only
+# the non-streaming path no ttft is ever measured, so every route keeps the neutral
+# value. That was accepted here as "latency stops discriminating, which beats
+# discriminating by an invented number" -- and the second half of that sentence was
+# right while the first half was far too mild. Measured on the live deployment, 48
+# of 52 routes sat at the neutral, which does not merely weaken the latency factor:
+# it makes it a CONSTANT, common to every route, and therefore unable to reorder
+# anything at any exponent. `fast`, `balanced` and `strong` returned identical
+# orderings; the profiles were dead.
+#
+# So `_ttft_p50` now also reports WHETHER it measured anything, and the score falls
+# back to this column -- a real observation on a coarser scale -- instead of to a
+# fabricated constant. See `ranking.latency_signal_ms`. `latency_ms` is still not a
+# ttft and the two still must not share a p50.
 
 
 class Storage:
@@ -367,17 +394,33 @@ class Storage:
         return out
 
     def _quality(self, key: str) -> tuple[float, float | None]:
-        """(quality, time of the measurement). The time is None if it was never
-        measured: there the returned quality is the NEUTRAL value, an assumption
-        -- and whoever consumes it has to be able to tell a measured 0.6 from an
-        assumed one."""
-        row = self._con.execute(
+        """(quality, time of the most recent measurement). The time is None if it
+        was never measured: there the returned quality is the NEUTRAL value, an
+        assumption -- and whoever consumes it has to be able to tell a measured 0.6
+        from an assumed one.
+
+        The score is the POINTS of the last QUALITY_RUNS runs over the points those
+        runs could have earned -- summing both sides rather than averaging each
+        run's ratio. That difference matters: runs can have different denominators
+        (the `tools` case is skipped for a route that does not declare tools, and a
+        weighted case changes the total), and a mean of ratios would silently weigh
+        a 4-point run the same as an 11-point one.
+
+        The TIME stays the most recent run's, not an average of the timestamps:
+        it answers "when did we last look at this route", which is a real moment,
+        and averaging it would invent one nothing happened at.
+        """
+        rows = self._con.execute(
             """SELECT cases_passed, cases_total, at FROM probes
                WHERE key = ? AND kind = 'quality' AND cases_total > 0
-               ORDER BY at DESC LIMIT 1""", (key,)).fetchone()
-        if not row:
+               ORDER BY at DESC LIMIT ?""", (key, QUALITY_RUNS)).fetchall()
+        if not rows:
             return NEUTRAL_QUALITY, None
-        return row[0] / row[1], row[2]
+        earned = sum(r[0] for r in rows)
+        possible = sum(r[1] for r in rows)
+        if possible <= 0:                      # every run in the window was empty
+            return NEUTRAL_QUALITY, None
+        return earned / possible, rows[0][2]
 
     def _last_probe(self, key: str) -> float | None:
         row = self._con.execute(

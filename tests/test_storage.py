@@ -2,7 +2,7 @@ import sqlite3
 
 import pytest
 
-from llm_libre.storage import Storage
+from llm_libre.storage import QUALITY_RUNS, Storage
 from llm_libre.models import Capabilities, Route
 
 
@@ -139,11 +139,65 @@ def test_deactivating_unregistered_providers_with_an_empty_set_switches_off_noth
     assert {r.key for r in store.active_routes()} == {"kilo/a:free", "chatgpt/c:free"}
 
 
-def test_quality_comes_from_the_last_quality_probe(store):
+def test_quality_averages_the_last_few_quality_probes(store):
+    """It used to be the LAST probe alone, which made `quality` as noisy as one
+    battery run. Measured live 2026-08-18: the same route scored 6/6, then 0/6,
+    then 6/6 on the same case, because a free tier sheds load on long generations.
+    With a single sample that swings the score between 1.0 and 0.0 every cycle and
+    reintroduces exactly the routing roulette this all started from."""
     store.upsert_routes([_route()], timestamp=100.0)
     store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 2, 5, 100.0)
     store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 4, 5, 200.0)
+    # (2 + 4) / (5 + 5), not the last one's 4/5.
+    assert store.metrics()["kilo/a:free"].quality == pytest.approx(0.6)
+
+
+def test_one_bad_run_cannot_zero_a_consistently_good_route(store):
+    """The whole point: a single shed request must dent the score, not erase it."""
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 5, 5, 100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 5, 5, 200.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 0, 5, 300.0)
+    q = store.metrics()["kilo/a:free"].quality
+    assert q == pytest.approx(10 / 15)
+    assert q > 0.5, "one shed run must not sink a route that passes twice as often"
+
+
+def test_the_average_ignores_runs_older_than_the_window(store):
+    """Bounded, so a route that genuinely got worse still converges instead of
+    being propped up by ancient good runs forever."""
+    store.upsert_routes([_route()], timestamp=100.0)
+    for i in range(QUALITY_RUNS + 3):        # oldest ones must fall out
+        store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 5, 5,
+                           100.0 + i)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 0, 5, 999.0)
+    expected = (5 * (QUALITY_RUNS - 1)) / (5 * QUALITY_RUNS)
+    assert store.metrics()["kilo/a:free"].quality == pytest.approx(expected)
+
+
+def test_the_measurement_time_is_the_most_recent_run_not_an_average(store):
+    """`quality_measured_at` answers "when did we last look", which is a real
+    moment. Averaging it would invent a timestamp nothing happened at."""
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 5, 5, 100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 5, 5, 900.0)
+    assert store.metrics()["kilo/a:free"].quality_measured_at == 900.0
+
+
+def test_a_route_with_a_single_run_still_scores_from_it(store):
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 4, 5, 100.0)
     assert store.metrics()["kilo/a:free"].quality == pytest.approx(0.8)
+
+
+def test_a_skipped_tools_case_does_not_distort_the_average(store):
+    """Runs can have different denominators (the tools case is skipped for a route
+    that does not declare tools). Summing both sides handles that; averaging the
+    per-run ratios would silently weight a 4-case run like a 5-case one."""
+    store.upsert_routes([_route()], timestamp=100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 4, 4, 100.0)
+    store.record_probe("kilo/a:free", "quality", True, 500, 200, 200, 0, 5, 200.0)
+    assert store.metrics()["kilo/a:free"].quality == pytest.approx(4 / 9)
 
 
 def test_reliability_mixes_probes_and_events(store):
@@ -273,7 +327,9 @@ def test_a_probed_route_declares_the_time_of_its_last_quality_probe(store):
     store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 4, 5, 900.0)
     m = store.metrics()["kilo/a:free"]
     assert m.quality_measured_at == 900.0
-    assert m.quality == pytest.approx(0.8)
+    # The TIME is the last run's; the SCORE averages the window (see
+    # QUALITY_RUNS): (2 + 4) / (5 + 5). The two answer different questions.
+    assert m.quality == pytest.approx(0.6)
 
 
 def test_the_last_probe_counts_health_probes_too(store):
