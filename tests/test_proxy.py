@@ -9,6 +9,7 @@ from llm_libre.models import Capabilities, Route
 from llm_libre.storage import Storage
 from llm_libre.providers import Provider, load
 from llm_libre.proxy import (COOLDOWN_429_DEFAULT_S, COOLDOWN_429_MAX_S,
+                             COOLDOWN_429_STATED_MAX_S,
                              COOLDOWN_BASE_S, PAID_DIRECT_COOLDOWN_S,
                              ON_DEMAND_PROBE_LIMIT_S,
                              GLOBAL_PROBE_LIMIT_PER_MINUTE, SUSPICION_THRESHOLD,
@@ -91,9 +92,15 @@ async def test_a_429_respects_the_providers_retry_after():
 
 
 async def test_a_429_caps_an_absurd_retry_after():
+    # The ceiling moved from COOLDOWN_429_MAX_S to COOLDOWN_429_STATED_MAX_S when
+    # the two caps were split: a Retry-After the provider actually SENT is a
+    # statement about itself, not a guess by the gateway, and 300s was folding a
+    # measured 23.7-hour DeepSeek mute into ~288 retries a day. Still bounded --
+    # that is what this test is really pinning -- just at the hour this deployment
+    # already accepts elsewhere (COOLDOWN_CAP_S).
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "999999"}))
     await p.complete([_route("a:free")], BODY, now=0.0)
-    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_MAX_S, abs=0.5)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_STATED_MAX_S, abs=0.5)
 
 
 async def test_a_429_without_retry_after_punishes_with_no_probe_at_all():
@@ -1367,3 +1374,45 @@ async def test_the_503_says_how_many_routes_were_actually_tried():
     assert r.json["error"]["routes_tried"] == 1
     r2 = await p.complete([_route("a:free"), _route("b:free")], BODY, now=0.0)
     assert r2.json["error"]["routes_tried"] == 2
+
+
+# --- A provider that STATES how long to back off, added 2026-08-19 ------------
+#
+# COOLDOWN_429_MAX_S (300s) capped every 429 alike, whether the provider had said
+# how long to wait or the gateway was guessing. Those are not the same claim, and
+# conflating them makes the cap wrong in one direction or the other.
+#
+# The tight cap exists for the GUESSED case, and the measurement behind it is
+# real: 12 requests from one key cooled a whole small catalogue through 429s that
+# carried no Retry-After, over windows the provider resets in seconds.
+#
+# But a provider that sends `Retry-After` is not being guessed at -- it is stating
+# a fact about itself. Measured live on 2026-08-19: DeepSeek muted the anonymous
+# account for 23.7 HOURS and said so. Folded into 300s, the gateway would retry a
+# muted account roughly 288 times a day, which is plausibly how the mute got there.
+
+
+async def test_a_stated_retry_after_is_honoured_far_past_the_guessed_cap():
+    p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "1800"}))
+    await p.complete([_route("a:free")], BODY, now=0.0)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(1800.0)
+
+
+async def test_a_stated_retry_after_is_still_bounded():
+    """Bounded, because a compromised provider could send an absurd one."""
+    p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "99999999"}))
+    await p.complete([_route("a:free")], BODY, now=0.0)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_STATED_MAX_S)
+
+
+async def test_without_a_retry_after_the_short_guessed_cap_still_applies():
+    """The original measurement must keep holding: a 429 the gateway has to guess
+    about cannot cool a route for an hour."""
+    p = _proxy(lambda req: httpx.Response(429))
+    await p.complete([_route("a:free")], BODY, now=0.0)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_DEFAULT_S)
+    assert p.cooldowns["kilo/a:free"] <= COOLDOWN_429_MAX_S
+
+
+async def test_the_guessed_cap_stays_tighter_than_the_stated_one():
+    assert COOLDOWN_429_MAX_S < COOLDOWN_429_STATED_MAX_S

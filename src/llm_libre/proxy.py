@@ -149,11 +149,29 @@ GLOBAL_PROBE_WINDOW_S = 60.0
 # happening (a rate-limit window), not escalate toward an hour-long exclusion
 # across ALL keys. The provider's `Retry-After` is respected when it sends one (it
 # is the most precise source possible); when it does not, a short default is used;
-# either way it is capped (`COOLDOWN_429_MAX_S`) so an absurd `Retry-After` (or a
-# malicious one, via a compromised provider) cannot reopen the door to an
-# hours-long exclusion.
+# either way it is capped so an absurd `Retry-After` (or a malicious one, via a
+# compromised provider) cannot reopen the door to an unbounded exclusion.
+#
+# There are TWO caps, because there are two different claims here and one cap for
+# both is wrong in one direction or the other:
+#
+# - No `Retry-After` -> the gateway is GUESSING. That is what the measurement above
+#   is about, and the tight cap belongs to it: a 429 the gateway had to interpret
+#   must not cool a route for an hour.
+# - An explicit `Retry-After` -> the provider is STATING a fact about itself, and
+#   it is the most precise source that exists. Measured live 2026-08-19: DeepSeek
+#   muted the anonymous account for 23.7 HOURS and said so in the response. Folded
+#   into 300s, the gateway would retry a muted account ~288 times a day -- which is
+#   plausibly how an anonymous account gets muted in the first place.
+#
+# The stated cap is 3600s, the same ceiling `COOLDOWN_CAP_S` already uses for the
+# probe backoff: this deployment already accepts one hour as its longest exclusion,
+# so honouring a provider's own request up to that bound introduces no new worst
+# case. A longer deadline than that is not ignored, just truncated -- the route
+# comes back, tries once, and is told to back off again if the window is still open.
 COOLDOWN_429_DEFAULT_S = 30.0
 COOLDOWN_429_MAX_S = 300.0
+COOLDOWN_429_STATED_MAX_S = 3600.0
 
 # Round 10, MEDIUM from the gate: `_suspect_paid` (direct punishment for paid
 # routes, see below) reused `_punish`'s exponential backoff -- the SAME defect the
@@ -969,10 +987,14 @@ class Proxy:
         default is used (COOLDOWN_429_DEFAULT_S); either way it is capped at
         COOLDOWN_429_MAX_S. See the constants' header comment for the measurement
         that motivated the change."""
-        duration = self._retry_after_seconds(resp)
+        stated = self._retry_after_seconds(resp)
+        duration = stated
         if duration is None:
             duration = COOLDOWN_429_DEFAULT_S
-        duration = min(duration, COOLDOWN_429_MAX_S)
+        # Which ceiling applies depends on WHO decided the number -- see the
+        # constants' header comment.
+        duration = min(duration, COOLDOWN_429_STATED_MAX_S if stated is not None
+                       else COOLDOWN_429_MAX_S)
         self.cooldowns[key] = now + duration
         self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
