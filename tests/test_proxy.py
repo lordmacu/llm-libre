@@ -23,21 +23,21 @@ def _route(model, provider="kilo", tier="free"):
     return Route(provider, model, tier, Capabilities(True, False, 100000, 4096))
 
 
-def _prov(pid="kilo", tier="free", unwraps_canvas=False):
+def _prov(pid="kilo", tier="free", unwraps_canvas=False, strips_xai_cards=False):
     return Provider(pid, tier, "openai", f"https://{pid}.test", "", "/models", {}, [],
-                     unwraps_canvas=unwraps_canvas)
+                     unwraps_canvas=unwraps_canvas, strips_xai_cards=strips_xai_cards)
 
 
 def _ok(contenido="hi"):
     return {"choices": [{"message": {"role": "assistant", "content": contenido}}]}
 
 
-def _proxy(handler, providers=("kilo",), canvas=frozenset()):
+def _proxy(handler, providers=("kilo",), canvas=frozenset(), cards=frozenset()):
     store = Storage(":memory:")
     store.create_schema()
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    return Proxy({p: _prov(p, unwraps_canvas=p in canvas) for p in providers},
-                 store, client)
+    return Proxy({p: _prov(p, unwraps_canvas=p in canvas, strips_xai_cards=p in cards)
+                  for p in providers}, store, client)
 
 
 async def test_it_returns_the_first_route_that_answers():
@@ -146,6 +146,23 @@ async def test_it_unwraps_the_canvas_fence_on_the_non_streaming_path():
               providers=("chatgpt",), canvas={"chatgpt"})
     r = await p.complete([_route("a:free", provider="chatgpt")], BODY, now=0.0)
     assert r.json["choices"][0]["message"]["content"] == "hi\n"
+
+
+async def test_it_strips_xai_cards_on_the_non_streaming_path():
+    # Only a provider declaring strips_xai_cards=True (grok-proxy) strips them.
+    card = "a<xai:tool_usage_card>web_search</xai:tool_usage_card>b"
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(card)),
+              providers=("grok",), cards={"grok"})
+    r = await p.complete([_route("a:free", provider="grok")], BODY, now=0.0)
+    assert r.json["choices"][0]["message"]["content"] == "ab"
+
+
+async def test_a_provider_without_card_stripping_leaves_the_tags_alone():
+    # A model quoting grok's wire format is answering the question it was asked.
+    card = "escribe <xai:card>asi</xai:card> para la tarjeta"
+    p = _proxy(lambda req: httpx.Response(200, json=_ok(card)))   # kilo, cards={}
+    r = await p.complete([_route("a:free")], BODY, now=0.0)
+    assert r.json["choices"][0]["message"]["content"] == card
 
 
 # --- Finding 1 of the Task 13 review: canvas unwrapping was GLOBAL, but

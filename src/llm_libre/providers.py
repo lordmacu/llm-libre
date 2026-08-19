@@ -50,6 +50,13 @@ class Provider:
     # provider (verified live against Kilo). Default False: only chatgpt-proxy,
     # which genuinely leaks canvas mode into content, declares it true.
     unwraps_canvas: bool = False
+    # The same shape of decision as `unwraps_canvas`, for grok-proxy: strip its
+    # '<xai:...>'/'<grok:...>' UI cards from `content`. Default False -- a model
+    # asked to explain grok's wire format would legitimately quote those tags,
+    # so only the provider that emits them for real declares it true. See
+    # reasoning.XaiCardTrimmer, and note it does NOT cover grok's plain-text
+    # status labels: those carry no marker here and are dropped at the source.
+    strips_xai_cards: bool = False
     # Task 13 review, finding 2 (in passing): None = use proxy.py's global
     # TIMEOUT_S (the long-standing behaviour). When declared, it bounds the worst
     # case of ONE particular provider without lowering the timeout for everyone
@@ -179,6 +186,7 @@ def load(yaml_path: str, env: dict) -> list[Provider]:
         default_capabilities=_default_capabilities(p),
         exceptions=_exceptions(p),
         unwraps_canvas=bool(p.get("unwraps_canvas", False)),
+        strips_xai_cards=bool(p.get("strips_xai_cards", False)),
         timeout_s=(float(p["timeout_s"]) if p.get("timeout_s") is not None else None),
         emulates_tools=bool(p.get("emulates_tools", False)),
     ) for p in data["providers"]]

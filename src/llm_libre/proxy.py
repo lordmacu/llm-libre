@@ -448,7 +448,8 @@ class Proxy:
             # answer).
             reasoning_text = ""
             if data is not None:
-                reasoning_text = "" if raw else self._clean(data, provider.unwraps_canvas)
+                reasoning_text = "" if raw else self._clean(
+                    data, provider.unwraps_canvas, provider.strips_xai_cards)
                 if not has_answer(data):
                     data = None
                     last_error = "200 with neither content nor tool_calls"
@@ -694,7 +695,9 @@ class Proxy:
                         continue
                     if route.tier == "paid" and on_billable_attempt is not None:
                         on_billable_attempt(route)
-                    rec = CompositeStreamTrimmer(unwrap_canvas=provider.unwraps_canvas)
+                    rec = CompositeStreamTrimmer(
+                        unwrap_canvas=provider.unwraps_canvas,
+                        strip_cards=provider.strips_xai_cards)
 
                     # Tool emulation over streaming. Detecting a tool call needs
                     # the COMPLETE TEXT (the JSON arrives split across deltas), so
@@ -1176,13 +1179,13 @@ class Proxy:
             await asyncio.gather(*tasks)
 
     @staticmethod
-    def _clean(data: dict, unwrap_canvas: bool) -> str:
+    def _clean(data: dict, unwrap_canvas: bool, strip_cards: bool = False) -> str:
         total_reasoning = ""
         for choice in data.get("choices", []):
             msg = choice.get("message") or {}
             content = msg.get("content")
             if isinstance(content, str):
-                clean_text, reasoning_text = trim(content, unwrap_canvas)
+                clean_text, reasoning_text = trim(content, unwrap_canvas, strip_cards)
                 msg["content"] = clean_text
                 total_reasoning += reasoning_text
         return total_reasoning

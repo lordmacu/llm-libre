@@ -169,6 +169,19 @@ providers:
     base_url: http://127.0.0.1:8893/v1
     api_key_env: GROK_API_KEY   # the proxy demands Authorization: Bearer <API_KEY>
     models_path: /models
+    # grok-proxy writes Grok's web UI cards ('<xai:tool_usage_card>', '<grok:render>')
+    # into the token stream and removes them itself, with a state machine over
+    # tokens that split the tags at arbitrary points. Declared here for the same
+    # reason chatgpt declares unwraps_canvas: the front is not the only thing
+    # between its own artifacts and the client. See reasoning.XaiCardTrimmer.
+    #
+    # It does NOT cover what was actually measured leaking on 2026-08-18: Grok
+    # interleaves plain-text status labels ("Compilando las 20 recomendaciones")
+    # with the answer, and one of them landed inside a JSON value on the way to
+    # arkiv-api. Those carry no marker by the time they get here -- telling them
+    # from an answer would mean guessing at prose -- so they are dropped at the
+    # source, by message kind, in grok-proxy's is_status_header.
+    strips_xai_cards: true
     # Same pattern as chatgpt: the ids are DISCOVERED from /models (33 of them
     # on 2026-08-18, with a high-rate pool behind), but that catalogue only
     # brings id/object/created/owned_by/notes -- neither capabilities nor

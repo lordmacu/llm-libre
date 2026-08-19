@@ -305,6 +305,29 @@ catalogue sync.
   Docusaurus/MDX syntax, and applying the unwrapping blindly would tear those
   markers out of a legitimate documentation answer from Kilo. Only `chatgpt`
   declares it.
+- `grok-proxy` writes Grok's web UI cards (`<xai:tool_usage_card>`,
+  `<grok:render>`) into the token stream. It removes them itself, but the
+  gateway removes them again — card and innards, like `<think>` and unlike a
+  canvas fence, because a card is chrome describing what the model did, never
+  the answer. Same shape of declaration as canvas (`strips_xai_cards` in
+  `providers.yaml`, off by default): only `grok` declares it, so a model asked
+  to *explain* those tags still gets to quote them.
+
+  **What this does not cover, and why it is not a gateway problem.** Grok also
+  interleaves plain-text *status labels* with the answer — "Compilando las 20
+  recomendaciones", "Crafting the final JSON response" — and until 2026-08-18
+  `grok-proxy` concatenated them into `content` at whatever token boundary they
+  arrived at. Measured against the live gateway that day, one answer came back
+  as `..."anio":1994Generando recomendaciones de películas,"tipo":"movie"...`:
+  a label spliced into the middle of a JSON value. The labels are generated per
+  query and in the language of the query, so no phrase list catches them — the
+  proxy's old filter matched the single English string `Thinking about your
+  request` and let every other one through. By the time such a label reaches
+  the gateway it is ordinary prose with no marker, and telling it from an
+  answer would mean guessing. It is fixed where the distinction still exists:
+  Grok's stream tags every message with a kind (field 18), `header` being the
+  status labels and `final` the answer, and `grok-proxy` now drops the former
+  (`is_status_header`).
 - **The free providers' catalogue is always discovered from their own
   `/models`, never hardcoded** — Kilo **and `chatgpt` too**: that way a model
   that changes id, disappears or shows up is detected on its own, without

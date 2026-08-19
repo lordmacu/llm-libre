@@ -451,3 +451,32 @@ def test_mistral_emulates_tools_and_really_sees_images():
     # one shared account session. A 45s ceiling would be within ~3x of an
     # observed real request under load.
     assert ms.timeout_s == 60.0
+
+
+# --- The same shape of declaration, for grok-proxy's '<xai:...>' UI cards. It
+#     covers the MARKERS only: the plain-text status labels Grok interleaves with
+#     the answer ("Compilando las 20 recomendaciones", measured leaking into a
+#     JSON value on 2026-08-18) reach the gateway as ordinary prose, and are
+#     dropped at the source instead. ---
+
+def test_grok_declares_card_stripping():
+    grok = next(p for p in load(YAML, {}) if p.id == "grok")
+    assert grok.strips_xai_cards is True
+
+
+def test_kilo_does_not_strip_cards():
+    kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
+    assert kilo.strips_xai_cards is False
+
+
+def test_a_provider_without_card_stripping_in_the_yaml_defaults_to_false(tmp_path):
+    yaml_no_cards = tmp_path / "sin_cards.yaml"
+    yaml_no_cards.write_text(
+        "providers:\n"
+        "  - id: suelto\n"
+        "    tier: gratis\n"
+        "    dialect: openai\n"
+        "    base_url: https://suelto.test\n"
+        "    models_path: /models\n")
+    p = load(str(yaml_no_cards), {})[0]
+    assert p.strips_xai_cards is False

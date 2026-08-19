@@ -48,18 +48,24 @@ class ReasoningTrimmer:
         return rest
 
 
-def trim(text: str, unwrap_canvas: bool = False) -> tuple[str, str]:
+def trim(text: str, unwrap_canvas: bool = False,
+         strip_cards: bool = False) -> tuple[str, str]:
     """`unwrap_canvas` (default False) is a PROVIDER DECISION
     (Provider.unwraps_canvas), not a universal one: ':::note{...}' is also
     standard Docusaurus/MDX syntax (admonitions), and applying it blindly strips
     the markers from a Kilo/OpenRouter response that is quoting or generating
     that syntax on purpose -- which is what happened before this fix. Only a
     provider that genuinely leaks canvas mode (chatgpt-proxy) should pass True.
+
+    `strip_cards` (default False) is the same kind of decision for grok-proxy
+    (Provider.strips_xai_cards). See XaiCardTrimmer.
     """
     trimmer = ReasoningTrimmer()
     clean = trimmer.feed(text) + trimmer.close()
     if unwrap_canvas:
         clean = strip_canvas_fences(clean)
+    if strip_cards:
+        clean = strip_xai_cards(clean)
     return clean, trimmer.reasoning
 
 
@@ -213,6 +219,108 @@ def strip_canvas_fences(text: str) -> str:
     return trimmer.feed(text) + trimmer.close()
 
 
+# --- xAI cards: '<xai:...>' / '<grok:...>' ------------------------------
+#
+# grok-proxy (2026-08-18) writes the web UI's own cards into the token stream,
+# markers and all:
+#
+#   <xai:tool_usage_card>
+#     <xai:tool_name>web_search</xai:tool_name>
+#   </xai:tool_usage_card>
+#
+# Today grok-proxy removes them itself, with a hand-rolled state machine over a
+# stream whose tokens split tags at arbitrary points. This is the same posture
+# the gateway already takes with chatgpt-proxy's canvas: the front is not the
+# only thing between its artifacts and the client.
+#
+# LIKE <think>, and unlike a canvas fence: what sits inside a card is discarded.
+# A card is UI chrome describing what the model did, never the answer.
+#
+# The namespaces are the whole safety argument: '<xai:' and '<grok:' are not
+# valid HTML and are not syntax any model emits by accident, so this cannot eat
+# ordinary prose the way a phrase list would. It is still PROVIDER-SCOPED
+# (Provider.strips_xai_cards) rather than global, because a model that is asked
+# to explain grok's wire format would legitimately quote these tags.
+_RE_XAI_TAG = re.compile(r"<(/?)(?:xai|grok):[^>]*>")
+_XAI_PREFIXES = ("<xai:", "<grok:", "</xai:", "</grok:")
+
+
+def _could_be_xai_tag(s: str) -> bool:
+    """True if `s`, an incomplete tag with no '>' yet, could still become one."""
+    return any(p.startswith(s) or s.startswith(p) for p in _XAI_PREFIXES)
+
+
+class XaiCardTrimmer:
+    """Removes '<xai:...>'/'<grok:...>' cards, innards included, over a stream.
+
+    Nesting is counted rather than matched by name: a card that opens another
+    card is removed whole, and only the OUTERMOST close ends the discard. A
+    self-closing tag ('<xai:card/>') opens nothing.
+    """
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._depth = 0
+
+    def feed(self, delta: str) -> str:
+        self._buf += delta
+        out = ""
+        while True:
+            start = self._buf.find("<")
+            if start == -1:
+                # No '<' at all: inside a card everything is discarded, outside
+                # it everything is answer.
+                if self._depth == 0:
+                    out += self._buf
+                self._buf = ""
+                return out
+            if self._depth == 0:
+                out += self._buf[:start]
+                self._buf = self._buf[start:]
+            elif start > 0:
+                self._buf = self._buf[start:]
+
+            end = self._buf.find(">")
+            if end == -1:
+                if not _could_be_xai_tag(self._buf):
+                    # Cannot become a card marker: release it (outside a card)
+                    # and go on, so "2 < 3" is not held back forever.
+                    if self._depth == 0:
+                        out += self._buf[0]
+                        self._buf = self._buf[1:]
+                        continue
+                    self._buf = self._buf[1:]
+                    continue
+                return out   # still ambiguous: wait for the rest of the tag
+
+            tag = self._buf[:end + 1]
+            match = _RE_XAI_TAG.fullmatch(tag)
+            if match is None:
+                # An ordinary '<...>' -- '<b>' and friends are answer text.
+                if self._depth == 0:
+                    out += tag
+                self._buf = self._buf[end + 1:]
+                continue
+            self._buf = self._buf[end + 1:]
+            if match.group(1):                      # '</xai:...>'
+                self._depth = max(0, self._depth - 1)
+            elif not tag.endswith("/>"):
+                self._depth += 1
+
+    def close(self) -> str:
+        """Close the stream. An unclosed card keeps swallowing, exactly like an
+        unclosed <think>: what follows an opened card is card innards."""
+        rest, self._buf = self._buf, ""
+        if self._depth > 0:
+            return ""
+        return "" if _could_be_xai_tag(rest) else rest
+
+
+def strip_xai_cards(text: str) -> str:
+    trimmer = XaiCardTrimmer()
+    return trimmer.feed(text) + trimmer.close()
+
+
 class CompositeStreamTrimmer:
     """Chains ReasoningTrimmer (reasoning is discarded) with CanvasFenceTrimmer
     (canvas fences, inner content kept) so the streaming producer (proxy.py)
@@ -226,9 +334,11 @@ class CompositeStreamTrimmer:
     this branch does nothing to ':::' -- legitimate Docusaurus/MDX syntax in any
     provider that is not chatgpt-proxy."""
 
-    def __init__(self, unwrap_canvas: bool = False) -> None:
+    def __init__(self, unwrap_canvas: bool = False,
+                 strip_cards: bool = False) -> None:
         self._thinking = ReasoningTrimmer()
         self._canvas = CanvasFenceTrimmer() if unwrap_canvas else None
+        self._cards = XaiCardTrimmer() if strip_cards else None
 
     @property
     def reasoning(self) -> str:
@@ -236,10 +346,14 @@ class CompositeStreamTrimmer:
 
     def feed(self, delta: str) -> str:
         out = self._thinking.feed(delta)
-        return self._canvas.feed(out) if self._canvas is not None else out
+        if self._canvas is not None:
+            out = self._canvas.feed(out)
+        return self._cards.feed(out) if self._cards is not None else out
 
     def close(self) -> str:
         rest = self._thinking.close()
-        if self._canvas is None:
+        if self._canvas is not None:
+            rest = self._canvas.feed(rest) + self._canvas.close()
+        if self._cards is None:
             return rest
-        return self._canvas.feed(rest) + self._canvas.close()
+        return self._cards.feed(rest) + self._cards.close()
