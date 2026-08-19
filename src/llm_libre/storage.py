@@ -74,11 +74,26 @@ _SPANISH_VALUES = [("routes", "tier", "gratis", "free"), ("routes", "tier", "pag
 
 WINDOW = 50  # how many recent observations weigh in reliability and latency
 
-# The unit every rate estimate is expressed in. One hour because that is what
-# providers themselves publish (grok sends `requests_per_hour`), so a measured
-# allowance and an advertised one land in the same unit and can be compared
-# against catalog.SUSTAINED_RATE_FLOOR without converting anything.
-RATE_WINDOW_S = 3600.0
+# Candidate windows an allowance may belong to, TRIED IN THIS ORDER.
+#
+# Fixing this at one hour was the first version's mistake, and the live data
+# refuted it outright -- see RateBudget's docstring for the numbers. Providers
+# publish per-hour figures, so per-hour looked like the natural unit; the
+# refusals we actually receive are mostly against DAILY quotas, and an hourly
+# lens reports a daily quota as an allowance smaller than what the route has
+# already been seen to sustain.
+#
+# Shortest first, because where two windows both fit the evidence the tighter
+# constraint is the one that binds: perplexity/turbo took 16 successes inside ten
+# seconds before being refused, which is a real hourly (indeed burst) limit, and
+# reporting its daily total instead would hide the constraint that actually
+# stops it.
+#
+# One hour stays first in the list for that reason, and it is also the window
+# `floor` is always measured over -- that one is a different claim and does not
+# move with this list.
+RATE_WINDOWS_S = (3600.0, 86400.0)
+RATE_WINDOW_S = RATE_WINDOWS_S[0]   # the window `floor` is expressed in
 
 # How far back exhaustions are read. A limit measured three weeks ago describes a
 # policy the provider may have changed since; free tiers are re-tuned often and
@@ -841,19 +856,14 @@ def _budget(events, now: float) -> RateBudget:
     # Exhaustion edges: a refusal that (a) immediately followed a success, so it
     # marks where the provider drew the line, and (b) did NOT clear at once, so it
     # was a budget and not backpressure.
-    samples = []
+    edges = []
     previous_ok = False
     for at, ok, code in events:
         if code == 429 and previous_ok:
             cleared = _cleared_after(at)
             if cleared is not None and cleared >= TRANSIENT_REFUSAL_S:
-                spent = bisect.bisect_left(successes, at) - bisect.bisect_left(
-                    successes, at - RATE_WINDOW_S)
-                if spent > 0:      # a zero means a longer window, not a zero budget
-                    samples.append(spent)
+                edges.append(at)
         previous_ok = bool(ok)
-
-    per_hour = median(samples) if samples else None
 
     # The floor: the busiest hour that contains no refusal at all.
     floor = 0
@@ -863,17 +873,28 @@ def _budget(events, now: float) -> RateBudget:
             continue               # a refusal falls inside: this hour proves nothing
         floor = max(floor, bisect.bisect_left(successes, end) - i)
 
-    # Backstop: an allowance BELOW a hard lower bound is arithmetic that cannot be
-    # true -- the route demonstrably sustained `floor` requests in one clean hour,
-    # so its allowance is at least that. When the two disagree the estimate is
-    # measuring something other than a budget, and the honest report is that we do
-    # not know rather than a number the same data refutes. TRANSIENT_REFUSAL_S
-    # removes the cause that was actually observed; this catches whatever else
-    # produces the same contradiction.
-    if per_hour is not None and per_hour < floor:
-        per_hour = None
-        samples = []
+    # Which window does the evidence support? Each candidate is scored by counting
+    # what was spent inside it before each refusal, and kept only if the answer can
+    # be true: an allowance BELOW the hourly floor is arithmetic the same data
+    # refutes -- the route demonstrably sustained `floor` requests in one clean
+    # hour, so no real quota is smaller than that.
+    #
+    # Shortest window first (RATE_WINDOWS_S), so where two both fit, the tighter
+    # constraint is reported. A window whose counts are all zero is skipped rather
+    # than recorded as an allowance of zero: it means the limit lives in a LONGER
+    # window, which is precisely what the next candidate tests.
+    allowance, window_s, samples = None, RATE_WINDOW_S, []
+    for candidate in RATE_WINDOWS_S:
+        spent = [bisect.bisect_left(successes, at) -
+                 bisect.bisect_left(successes, at - candidate) for at in edges]
+        spent = [s for s in spent if s > 0]
+        if not spent:
+            continue
+        guess = median(spent)
+        if guess >= floor:
+            allowance, window_s, samples = guess, candidate, spent
+            break
 
-    used = len(successes) - bisect.bisect_left(successes, now - RATE_WINDOW_S)
-    return RateBudget(per_hour=per_hour, used=used, floor=floor,
-                      episodes=len(samples), recovery_s=recovery_s)
+    used = len(successes) - bisect.bisect_left(successes, now - window_s)
+    return RateBudget(allowance=allowance, window_s=window_s, used=used,
+                      floor=floor, episodes=len(samples), recovery_s=recovery_s)

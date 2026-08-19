@@ -91,13 +91,21 @@ def test_ranking_row_keys(client):
         # 2026-08-19, when punishments became scoped: `cooldown_until` alone
         # cannot distinguish "out of image quota" from "route is down".
         "cooldowns",
-        # The inferred CHAT allowance, added 2026-08-19 for the providers that
-        # publish no rate limit of their own. Same measured/assumed split as
-        # `quality`: `rate_per_hour` is null until an actual refusal has been
-        # seen, and `rate_floor` carries the lower bound separately so the two
-        # can never be confused.
-        "rate_per_hour", "rate_measured", "rate_floor", "rate_used_last_hour",
-        "rate_remaining", "rate_exhausts_in_s", "rate_recovery_s", "rate_episodes",
+        # The inferred CHAT quota, added 2026-08-19 for the providers that publish
+        # no rate limit of their own. Same measured/assumed split as `quality`:
+        # `rate_allowance` is null until an actual refusal has been seen, and
+        # `rate_floor` carries the lower bound separately so the two can never be
+        # confused.
+        #
+        # `rate_window_s` joined them the same day, when measuring the live data
+        # showed most refusals are against DAILY quotas: an allowance is
+        # meaningless without the window it belongs to, and reading a daily quota
+        # through an hourly lens produced allowances below what the same routes
+        # had already been observed sustaining. `rate_per_hour` stays as the
+        # normalised form, for comparison against providers that advertise one.
+        "rate_allowance", "rate_window_s", "rate_per_hour", "rate_measured",
+        "rate_floor", "rate_used", "rate_remaining", "rate_exhausts_in_s",
+        "rate_recovery_s", "rate_episodes",
         "tools", "vision",
         # image OUTPUT -- a separate axis from `vision`, which is image input
         "images",

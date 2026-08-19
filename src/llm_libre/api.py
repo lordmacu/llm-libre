@@ -495,18 +495,30 @@ def create_app(state: State) -> FastAPI:
                          "last_quality_probe": _iso(m.quality_measured_at),
                          "last_probe": _iso(m.last_probe_at),
                          "reliability": round(m.reliability, 3),
-                         # What we believe this route's hourly allowance is, and
-                         # how much of it is left -- inferred from our own history
-                         # for the providers that do not publish one. The same
-                         # measured/assumed split as `quality` above, and for the
-                         # same reason: `rate_per_hour` is null until the route has
-                         # actually been seen refusing, and `rate_floor` ("we have
-                         # seen it sustain at least this") is reported separately
-                         # so a lower bound is never mistaken for an allowance.
-                         "rate_per_hour": b.per_hour,
+                         # What we believe this route's quota is, over which
+                         # window, and how much of it is left -- inferred from our
+                         # own history for the providers that do not publish one.
+                         # The same measured/assumed split as `quality` above, and
+                         # for the same reason: `rate_allowance` is null until the
+                         # route has actually been seen refusing, and `rate_floor`
+                         # ("we have seen it sustain at least this per hour") is
+                         # reported separately so a lower bound is never mistaken
+                         # for an allowance.
+                         #
+                         # `rate_window_s` is part of the measurement: most
+                         # refusals we receive are against DAILY quotas, and an
+                         # allowance means nothing without the window it belongs
+                         # to. `rate_per_hour` normalises it for comparison
+                         # against providers that advertise an hourly figure --
+                         # read that one as a rate, never as a budget, since
+                         # nothing stops a daily quota being spent in one hour.
+                         "rate_allowance": b.allowance,
+                         "rate_window_s": b.window_s,
+                         "rate_per_hour": (round(b.per_hour, 2)
+                                           if b.per_hour is not None else None),
                          "rate_measured": b.measured,
                          "rate_floor": b.floor,
-                         "rate_used_last_hour": b.used,
+                         "rate_used": b.used,
                          "rate_remaining": b.remaining,
                          # Seconds until the allowance runs out at the current
                          # rate, and how long refusals have taken to clear. Both

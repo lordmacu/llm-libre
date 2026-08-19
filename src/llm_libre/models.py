@@ -154,36 +154,50 @@ class RateBudget:
     chatgpt proxy, Kilo's free pool -- none of them say how much they will take
     before refusing, so the only way to know is to remember what happened.
 
-    The unit is REQUESTS PER HOUR, deliberately the same one providers publish,
-    so a measured number and an advertised one are directly comparable and both
-    can be read against catalog.SUSTAINED_RATE_FLOOR.
+    THE WINDOW IS MEASURED, NOT ASSUMED. The first version of this fixed it at one
+    hour, on the reasoning that providers publish per-hour numbers (grok sends
+    `requests_per_hour`) so a measured and an advertised figure would be
+    comparable. Against 10,000 live events that produced arithmetic that cannot
+    be true: mistral-medium was credited with 4/h on a route already observed
+    sustaining 50 clean requests in one hour, and six of eight routes came out
+    the same way.
 
-    Per hour rather than "per replenishment window" because the window itself
-    cannot be measured honestly from here: the gateway backs off after a 429
-    (proxy._punish_429), so the gap from a refusal to the next success measures
-    OUR cooldown, not the provider's reset. Estimating a window from that would
-    dress up a number we control as a number they control.
+    Counting the same exhaustions over longer windows showed why. At the moment
+    of refusal these routes had sent almost NOTHING recently -- a median of 0 to
+    1 requests in the trailing minute, 4 to 10 in the trailing hour -- so no
+    short-window burst limit explains them. Over 24h the numbers become both
+    stable and coherent: grok's three imagine agents land on 60, 62 and 64, all
+    comfortably above their hourly floors. These are DAILY quotas, and an hourly
+    lens cannot see a daily quota except as nonsense.
+
+    So `window_s` is part of the measurement rather than a constant, and
+    Storage._budget picks it by which window the evidence actually supports.
+    `perplexity/turbo` remains genuinely hourly (16 successes inside 10 seconds
+    before a refusal, an actual burst), which is why the shorter window is tried
+    first: where both fit, the tighter constraint is the one that binds.
 
     The three fields answer three different questions, and conflating them is
     the mistake this class exists to prevent:
 
-      per_hour  -- what we believe the allowance IS. Only ever set from an
-                   observed exhaustion: the route accepted N requests and then
-                   said 429. `None` means we have never pushed this route to its
-                   limit, which is the common case (measured 2026-08-19: 60 of
-                   69 live routes had never once been refused).
-      floor     -- what we have SEEN it sustain in a clean hour. Always
-                   available, always a LOWER BOUND: it is capped by how much
-                   traffic we happened to send, so a quiet route reads low for
-                   want of demand, not for want of capacity.
-      used      -- successes in the last hour. The consumption side.
+      allowance -- what we believe the quota IS, per `window_s`. Only ever set
+                   from an observed exhaustion: the route accepted N requests and
+                   then said 429. `None` means we have never pushed this route to
+                   its limit, which is the common case (measured 2026-08-19: 60
+                   of 69 live routes had never once been refused).
+      floor     -- what we have SEEN it sustain in a clean HOUR -- always hourly,
+                   whatever `window_s` turns out to be, because it answers a
+                   different question. Always available, always a LOWER BOUND: it
+                   is capped by how much traffic we happened to send, so a quiet
+                   route reads low for want of demand, not for want of capacity.
+      used      -- successes in the trailing `window_s`. The consumption side.
 
     `remaining` is only meaningful when `per_hour` is known, and returns None
     otherwise rather than guessing -- the same rule as `quality_measured_at`.
     """
-    per_hour: float | None      # measured allowance; None = never seen exhausted
-    used: int                   # successful requests in the trailing hour
-    floor: int                  # most ever sustained in an hour with no refusal
+    allowance: float | None     # measured allowance PER `window_s`; None = unknown
+    window_s: float             # the window that allowance belongs to
+    used: int                   # successful requests in the trailing `window_s`
+    floor: int                  # most ever sustained in an HOUR with no refusal
     episodes: int               # exhaustions the estimate rests on (0 = none)
     # Median seconds from a refusal to the route's next SUCCESS. An UPPER BOUND,
     # never the reset itself: the gateway backs off after a 429
@@ -201,9 +215,9 @@ class RateBudget:
         allowance is still unknown. Never negative: once consumption passes the
         estimate the honest answer is "none left", not a negative budget -- the
         estimate is a median over episodes, so exceeding it is expected."""
-        if self.per_hour is None:
+        if self.allowance is None:
             return None
-        return max(0.0, self.per_hour - self.used)
+        return max(0.0, self.allowance - self.used)
 
     @property
     def exhausts_in_s(self) -> float | None:
@@ -220,7 +234,7 @@ class RateBudget:
         left = self.remaining
         if left is None or self.used <= 0:
             return None
-        return left / (self.used / 3600.0)
+        return left / (self.used / self.window_s)
 
     @property
     def measured(self) -> bool:
@@ -228,10 +242,26 @@ class RateBudget:
         nothing. Callers that change ROUTING must gate on this: `floor` looks
         like a small allowance for any route we simply never pushed, and
         demoting on that would punish routes for being idle."""
-        return self.per_hour is not None
+        return self.allowance is not None
+
+    @property
+    def per_hour(self) -> float | None:
+        """The allowance expressed as an hourly rate, for comparison against what
+        providers advertise (grok's `requests_per_hour`) and against
+        catalog.SUSTAINED_RATE_FLOOR.
+
+        READ IT AS A RATE, NOT AS A BUDGET. A daily quota of 60 is 2.5/h here,
+        and that number is true on average and misleading in the moment: nothing
+        stops all 60 being spent in one hour, leaving 23 with none. `allowance`
+        and `window_s` are what routing decisions should use; this is for putting
+        two providers side by side."""
+        if self.allowance is None:
+            return None
+        return self.allowance * 3600.0 / self.window_s
 
 
-UNKNOWN_BUDGET = RateBudget(per_hour=None, used=0, floor=0, episodes=0)
+UNKNOWN_BUDGET = RateBudget(allowance=None, window_s=3600.0, used=0, floor=0,
+                            episodes=0)
 
 
 @dataclass(frozen=True)

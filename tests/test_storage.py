@@ -685,17 +685,19 @@ def test_an_allowance_is_only_inferred_from_a_refusal_that_stuck(tmp_path):
     assert budgets["kilo/busy:free"].measured is False
 
 
-def test_an_allowance_below_a_proven_floor_is_reported_as_unknown(tmp_path):
-    """A number the same data refutes is not reported as a measurement.
+def test_an_hourly_estimate_under_the_floor_falls_through_to_the_daily_window(tmp_path):
+    """An allowance smaller than a proven floor is usually the wrong WINDOW, not
+    an unknowable quota.
 
-    The route sustains 30 requests in one clean hour, so its allowance is at
-    least 30. A later refusal that would imply 3/h contradicts that outright --
-    it is measuring something other than this budget, and the honest answer is
-    that we do not know.
+    The route sustains 30 requests in one clean hour, so no real quota is under
+    30. A later refusal after 3 requests would imply 3/h, which the same data
+    refutes. Read over a day the two episodes are one budget of 33, and that IS
+    coherent -- which is what the live data showed: grok's imagine agents look
+    like 6/h nonsense hourly and like a stable ~60/day daily.
     """
     store = Storage(str(tmp_path / "d.sqlite3"))
     store.create_schema()
-    store.upsert_routes([_route("a:free")], timestamp=0.0)
+    store.upsert_routes([_route()], timestamp=0.0)
 
     _spend(store, "kilo/a:free", 30, 1000.0, step=60.0)     # a clean, busy hour
     later = 1000.0 + 10 * 3600.0
@@ -705,7 +707,32 @@ def test_an_allowance_below_a_proven_floor_is_reported_as_unknown(tmp_path):
 
     b = store.rate_budgets(now=later + 7200.0)["kilo/a:free"]
     assert b.floor >= 30
-    assert b.per_hour is None, "an estimate under a proven floor must not be reported"
+    assert b.window_s == 86400.0, "the hourly window cannot explain this refusal"
+    assert b.allowance == 33
+    assert b.measured is True
+
+
+def test_when_no_window_can_explain_the_refusal_it_stays_unknown(tmp_path):
+    """The backstop still has teeth: if EVERY candidate window yields an
+    allowance the floor refutes, the honest answer remains that we do not know.
+
+    Here the busy hour sits four days before the refusal, outside even the daily
+    window, and the refusal itself follows only two requests.
+    """
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    store.upsert_routes([_route()], timestamp=0.0)
+
+    _spend(store, "kilo/a:free", 40, 1000.0, step=60.0)     # floor = 40/h
+    much_later = 1000.0 + 4 * 86400.0
+    at = _spend(store, "kilo/a:free", 2, much_later)
+    store.record_event("kilo/a:free", False, 0, 429, at)
+    store.record_event("kilo/a:free", True, 50, 200, at + 900.0)
+
+    b = store.rate_budgets(now=much_later + 7200.0)["kilo/a:free"]
+    assert b.floor >= 40
+    assert b.allowance is None
+    assert b.remaining is None
 
 
 def test_an_image_refusal_does_not_shrink_the_chat_allowance(tmp_path):
@@ -780,7 +807,7 @@ def test_consumption_past_the_estimate_reports_none_left_not_a_negative():
     an allowance for it. The clamp being asserted here belongs to the value, not
     to the inference.
     """
-    b = RateBudget(per_hour=5, used=9, floor=5, episodes=2)
+    b = RateBudget(allowance=5, window_s=3600.0, used=9, floor=5, episodes=2)
     assert b.remaining == 0
     assert b.exhausts_in_s == 0
 
