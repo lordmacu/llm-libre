@@ -27,6 +27,28 @@ QUALITY_EVERY_N_CYCLES = int(os.getenv("QUALITY_PROBE_EVERY_N_CYCLES")
                              or "5")   # legacy name honoured, see main._env
 RETENTION_DAYS = 30
 
+# How long the battery waits between runs, measured from the last one RECORDED --
+# not counted in cycles.
+#
+# `scheduler` starts at `counter = 0` on every process start and `cycle` ran the
+# battery when `counter % QUALITY_EVERY_N_CYCLES == 0`. Since 0 % 5 == 0, every
+# restart ran a full battery and the counter never survived long enough to apply
+# the pacing it was written for. That is invisible while deployments are rare and
+# brutal while they are not.
+#
+# Measured 2026-08-19 against the live deployment: the battery is meant to run
+# once every ~25h. On 2026-08-18 it ran 28 times against deepseek and wrote 824
+# quality rows across the catalogue -- roughly 4,120 requests to free providers in
+# a single day. DeepSeek muted the account at 01:25 the next morning, for 24h.
+#
+# The elapsed time is IN the database (storage.last_quality_probe_at), so the
+# decision is taken from evidence rather than from process bookkeeping: it holds
+# across restarts, crashes and redeploys, none of which an in-memory counter
+# survives. `counter` still gates the cycle for callers that pass it, so the
+# existing semantics are unchanged for anyone who never restarts.
+QUALITY_INTERVAL_S = QUALITY_EVERY_N_CYCLES * float(
+    os.getenv("HEALTH_PROBE_HOURS") or os.getenv("SONDEO_SALUD_HORAS") or "5") * 3600
+
 
 async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
                          store, now: float) -> int:
@@ -126,12 +148,19 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     return total
 
 
-async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
+async def probe_health(proxy, store, routes: list[Route], now: float) -> set[str]:
+    """...and returns the keys of the routes that ANSWERED.
+
+    That return value is what `probe_quality` gates on: one request has just
+    established whether a route is reachable at all, and spending five more on one
+    that is not is wasteful in two different ways. See probe_quality.
+    """
     # Same as probe_quality: PAID routes are NOT probed (design section 8). This
     # function receives active_routes(), which includes minimax/MiniMax-M3, and
     # every pass used to hit it: ~5 billable calls a day that also bypass
     # add_paid_usage, so they show up neither in /v1/uso nor against
     # DAILY_PAID_CAP. Real money, invisible.
+    answered: set[str] = set()
     for route in (r for r in routes if r.tier == "free"):
         t0 = time.monotonic()
         # HIGH 1 (round 9): without `is_probe=True` a failure here only
@@ -164,12 +193,44 @@ async def probe_health(proxy, store, routes: list[Route], now: float) -> None:
         if r.upstream_code != 429:
             store.record_probe(route.key, "health", r.status == 200, ms, 0,
                                r.upstream_code, 0, 0, now)
+        if r.status == 200:
+            answered.add(route.key)
+    return answered
 
 
-async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
+async def probe_quality(proxy, store, routes: list[Route], now: float,
+                        answered: set[str] | None = None) -> None:
+    """Score every free route against the battery.
+
+    `answered` is what `probe_health` just returned: the routes that responded to
+    the one-request health probe moments ago, in this same cycle. A route missing
+    from it is SKIPPED, and both reasons are worth stating because they are
+    different problems.
+
+    It BURNS quota that may be scarce. Measured 2026-08-19: DeepSeek had muted the
+    account, and the battery kept spending ten requests a run (five cases, two
+    routes) establishing that a muted account is muted.
+
+    And it POISONS the measurement, which is the worse of the two. A run against an
+    unreachable route records 0/5, which is indistinguishable from "this model
+    answers badly" -- so chatgpt sat at quality 0.333 and deepseek at 0.00 while
+    both were perfectly healthy models behind, respectively, a container that never
+    started and an account DeepSeek had muted. Recovery then costs as many runs as
+    the average is wide (QUALITY_RUNS), long after the outage itself is over.
+    Skipping keeps the previous real measurement, and a stale real number beats a
+    fresh fabricated zero.
+
+    `None` (the default) probes everything, which is what every caller predating
+    this parameter expects.
+    """
     # Paid routes are not probed: there is no sense in spending money scoring the
     # emergency escape hatch.
     for route in (r for r in routes if r.tier == "free"):
+        if answered is not None and route.key not in answered:
+            log.info("quality: %s skipped, it did not answer its health probe in "
+                     "this cycle -- the previous measurement is kept rather than "
+                     "recording a zero the route did not earn", route.key)
+            continue
         results = []
         for case in CASES:
             if case.name == "tools" and not route.capabilities.tools:
@@ -214,9 +275,21 @@ async def cycle(state, counter: int) -> None:
     now = time.time()
     await sync_catalogue(state.http, state.providers, state.store, now)
     routes = state.store.active_routes()
-    await probe_health(state.proxy, state.store, routes, now)
-    if counter % QUALITY_EVERY_N_CYCLES == 0:
-        await probe_quality(state.proxy, state.store, routes, now)
+    # The health probe runs FIRST, and what it learned gates the battery: one
+    # request has just established which routes are reachable, so the five-request
+    # battery is only spent on those. See probe_quality.
+    answered = await probe_health(state.proxy, state.store, routes, now)
+    # Two gates, and they answer different questions. `counter` is the schedule
+    # this loop was written around; `last_quality_probe_at` is what actually
+    # happened, and it is the one that survives a restart -- see
+    # QUALITY_INTERVAL_S.
+    last = state.store.last_quality_probe_at()
+    due = last is None or (now - last) >= QUALITY_INTERVAL_S
+    if counter % QUALITY_EVERY_N_CYCLES == 0 and due:
+        await probe_quality(state.proxy, state.store, routes, now, answered)
+    elif not due:
+        log.info("quality: battery skipped, it last ran %.1f h ago (interval %.1f h)",
+                 (now - last) / 3600, QUALITY_INTERVAL_S / 3600)
     state.store.prune(now - RETENTION_DAYS * 86400)
     # Generated assets age out on their own schedule (assets.RETENTION_S, 30
     # days): they are bytes on a finite volume, and without this the disk grows

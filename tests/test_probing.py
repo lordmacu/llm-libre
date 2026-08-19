@@ -10,8 +10,8 @@ from llm_libre.providers import Provider
 from llm_libre.quality_suite import CASES
 from llm_libre.proxy import Proxy
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
-from llm_libre.probing import (PING, cycle, probe_health, probe_quality,
-                               sync_catalogue)
+from llm_libre.probing import (PING, QUALITY_INTERVAL_S, cycle, probe_health,
+                               probe_quality, sync_catalogue)
 
 CATALOGUE = {"data": [
     {"id": "x:free", "pricing": {"prompt": "0"}, "context_length": 1000,
@@ -498,8 +498,17 @@ async def test_quality_skips_the_tools_case_without_counting_it_as_a_failure():
 
 async def test_cycle_syncs_probes_health_and_probes_quality_on_cycle_zero():
     store = _store()
-    http = httpx.AsyncClient(transport=httpx.MockTransport(
-        lambda req: httpx.Response(200, json=CATALOGUE)))
+
+    # The handler has to answer a CHAT request with a chat response. It used to
+    # return the catalogue to everything, which the health probe reads as "no
+    # answer" -- harmless while the battery ran unconditionally, and now decisive:
+    # the battery only measures routes whose health probe just succeeded.
+    def handler(req):
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json=CATALOGUE)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
     proxy = Proxy({"kilo": prov[0]}, store, http)
     state = State(store=store, proxy=proxy, api_keys=set(), daily_paid_cap=0,
@@ -710,3 +719,161 @@ async def test_the_health_probe_stores_the_real_404_of_a_model_that_no_longer_ex
     row = p.store._con.execute(
         "SELECT ok, http_code FROM probes WHERE kind='health'").fetchone()
     assert row == (0, 404)
+
+
+# --- The battery does not measure a route that just failed its health probe ---
+#
+# `probe_quality` spent five requests per route unconditionally, including on
+# routes that had just failed the one-request health probe moments earlier in the
+# same cycle. That is expensive in two different ways, and both were observed in
+# production on 2026-08-19.
+#
+# It BURNS scarce quota. DeepSeek muted the account, and the battery kept spending
+# ten requests a run (five per route, two routes) proving a muted account is muted.
+#
+# And it POISONS the measurement. Those runs record 0/5, which is indistinguishable
+# from "this model answers badly" -- so chatgpt read quality 0.333 and deepseek
+# 0.00 while both were perfectly healthy models behind a dead container and a
+# muted account. Recovery then takes as many runs as the average is wide.
+#
+# The health probe already runs FIRST in every cycle. One request now decides
+# whether five more are worth spending.
+
+
+async def test_the_battery_skips_a_route_whose_health_probe_just_failed():
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]})
+
+    p = _proxy(handler)
+    await probe_quality(p, p.store, [_route()], now=100.0, answered=set())
+    assert calls == []
+
+
+async def test_a_skipped_route_records_no_quality_row():
+    """The old measurement must survive untouched: a stale real number beats a
+    fresh fabricated zero."""
+    p = _proxy(lambda req: httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]}))
+    p.store.upsert_routes([_route()], timestamp=10.0)   # metrics() only sees active routes
+    p.store.record_probe("kilo/x:free", "quality", True, 0, 0, 200, 5, 5, 50.0)
+    await probe_quality(p, p.store, [_route()], now=100.0, answered=set())
+    rows = p.store._con.execute(
+        "SELECT cases_passed, cases_total FROM probes WHERE kind='quality'").fetchall()
+    assert rows == [(5, 5)]
+    assert p.store.metrics()["kilo/x:free"].quality == 1.0
+
+
+async def test_a_route_that_answered_is_still_measured():
+    p = _proxy(lambda req: httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]}))
+    await probe_quality(p, p.store, [_route()], now=100.0, answered={"kilo/x:free"})
+    assert p.store._con.execute(
+        "SELECT COUNT(*) FROM probes WHERE kind='quality'").fetchone()[0] == 1
+
+
+async def test_without_health_results_everything_is_measured_as_before():
+    """The 450-odd tests that predate this call probe_quality with four args."""
+    p = _proxy(lambda req: httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]}))
+    await probe_quality(p, p.store, [_route()], now=100.0)
+    assert p.store._con.execute(
+        "SELECT COUNT(*) FROM probes WHERE kind='quality'").fetchone()[0] == 1
+
+
+async def test_probe_health_reports_which_routes_answered():
+    ok = _route("vive:free")
+    dead = _route("muerta:free")
+
+    def handler(req):
+        body = req.content.decode()
+        if "muerta" in body or "muerta" in str(req.url):
+            return httpx.Response(500)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "hi"}}]})
+
+    p = _proxy(handler)
+    answered = await probe_health(p, p.store, [ok, dead], now=100.0)
+    assert answered == {"kilo/vive:free"}
+
+
+async def test_the_cycle_feeds_the_health_result_into_the_battery():
+    """Wiring: a dead provider must cost one request per route, not six."""
+    calls = []
+
+    def handler(req):
+        calls.append(str(req.url))
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json=CATALOGUE)
+        return httpx.Response(500)
+
+    store = _store()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
+    state = State(store=store, proxy=Proxy({"kilo": prov[0]}, store, http),
+                  api_keys=set(), daily_paid_cap=200, providers=prov, http=http)
+    await cycle(state, counter=0)          # counter 0 == a quality cycle
+    completions = [u for u in calls if "chat/completions" in u]
+    assert len(completions) == 1, completions
+
+
+# --- The battery paces itself on evidence, not on an in-memory counter --------
+#
+# `scheduler` starts at `counter = 0` on every process start, and `cycle` runs the
+# battery when `counter % QUALITY_EVERY_N_CYCLES == 0`. Since 0 % 5 == 0, EVERY
+# restart ran a full battery, and the counter never survived to apply the pacing
+# it was written for.
+#
+# Measured 2026-08-19 against the live deployment: the battery is meant to run once
+# every ~25h. On 2026-08-18 it ran 28 times against deepseek and produced 824
+# quality rows across the catalogue -- roughly 4,120 requests to free providers in
+# one day. DeepSeek muted the account at 01:25 the following morning.
+#
+# The elapsed time since the last battery run is IN THE DATABASE, so the decision
+# is taken from there. That survives restarts, crashes and redeploys alike, which
+# an in-memory counter cannot.
+
+
+async def test_the_battery_is_skipped_when_it_ran_recently(monkeypatch):
+    calls = []
+
+    def handler(req):
+        calls.append(str(req.url))
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json=CATALOGUE)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]})
+
+    store = _store()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
+    state = State(store=store, proxy=Proxy({"kilo": prov[0]}, store, http),
+                  api_keys=set(), daily_paid_cap=200, providers=prov, http=http)
+    await cycle(state, counter=0)
+    first = len([u for u in calls if "chat/completions" in u])
+    calls.clear()
+    await cycle(state, counter=0)          # a restart: counter is 0 again
+    second = len([u for u in calls if "chat/completions" in u])
+    assert first > second, (first, second)
+    assert second == 1, "only the health probe should have run"
+
+
+async def test_the_battery_runs_again_once_the_interval_has_passed(monkeypatch):
+    calls = []
+
+    def handler(req):
+        calls.append(str(req.url))
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json=CATALOGUE)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]})
+
+    store = _store()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
+    state = State(store=store, proxy=Proxy({"kilo": prov[0]}, store, http),
+                  api_keys=set(), daily_paid_cap=200, providers=prov, http=http)
+    await cycle(state, counter=0)
+    # Age every battery row well past the interval.
+    store._con.execute("UPDATE probes SET at = at - ? WHERE kind='quality'",
+                       (QUALITY_INTERVAL_S + 60,))
+    store._con.commit()
+    calls.clear()
+    await cycle(state, counter=0)
+    assert len([u for u in calls if "chat/completions" in u]) > 1

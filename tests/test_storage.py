@@ -632,3 +632,15 @@ def test_a_successful_probe_newer_than_a_failed_one_declares_the_route_alive(sto
     store.record_probe("kilo/a:free", "health", False, 100, 0, 500, 0, 0, 100.0)
     store.record_probe("kilo/a:free", "health", True, 100, 50, 200, 0, 0, 150.0)
     assert store.has_liveness_evidence("kilo/a:free", now=200.0) is True
+
+
+def test_the_store_knows_when_the_battery_last_ran(store):
+    """`cycle` needs this to pace itself on EVIDENCE rather than on an in-memory
+    counter -- see probing.cycle for the 28-runs-in-a-day it fixes."""
+    store.upsert_routes([_route()], timestamp=100.0)
+    assert store.last_quality_probe_at() is None
+    store.record_probe("kilo/a:free", "health", True, 10, 0, 200, 0, 0, 500.0)
+    assert store.last_quality_probe_at() is None, "a health probe is not a battery run"
+    store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 5, 5, 300.0)
+    store.record_probe("kilo/b:free", "quality", True, 0, 0, 200, 5, 5, 900.0)
+    assert store.last_quality_probe_at() == 900.0

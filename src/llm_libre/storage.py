@@ -393,6 +393,18 @@ class Storage:
             )
         return out
 
+    def last_quality_probe_at(self) -> float | None:
+        """When the battery last ran, over the WHOLE catalogue, or None if never.
+
+        `probing.cycle` paces itself on this instead of on an in-memory counter --
+        see the comment on QUALITY_INTERVAL_S for the 28-runs-in-one-day that
+        motivated it. Evidence in the database survives restarts; a counter does
+        not.
+        """
+        row = self._con.execute(
+            "SELECT MAX(at) FROM probes WHERE kind = 'quality'").fetchone()
+        return row[0] if row and row[0] is not None else None
+
     def _quality(self, key: str) -> tuple[float, float | None]:
         """(quality, time of the most recent measurement). The time is None if it
         was never measured: there the returned quality is the NEUTRAL value, an
