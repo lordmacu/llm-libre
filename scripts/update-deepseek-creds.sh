@@ -25,17 +25,23 @@ TOKEN=$(cat ~/.coolify-api-token)
 H="Authorization: Bearer $TOKEN"
 BASE="$API/applications/$APP_UUID/envs"
 
+# PATCH updates an EXISTING key and answers 404 for one that is not there yet;
+# POST is what creates. These keys already exist in the deployment this was
+# written against, so PATCH alone worked -- and would quietly configure nothing
+# on a fresh one. Verified against the live API on 2026-08-19.
 patch_env() {
   local key="$1" val="$2" preview="$3"
+  local body="{\"key\":\"$key\",\"value\":\"$val\",\"is_preview\":$preview}"
   STATUS=$(curl -s -o /tmp/coolify_resp.json -w "%{http_code}" \
-    -X PATCH "$BASE" \
-    -H "$H" -H "Content-Type: application/json" \
-    -d "{\"key\":\"$key\",\"value\":\"$val\",\"is_preview\":$preview}")
-  if [ "$STATUS" = "201" ]; then
-    echo "  OK  $key (preview=$preview)"
-  else
-    echo "  FAIL $key (preview=$preview) HTTP $STATUS: $(cat /tmp/coolify_resp.json)"
+    -X PATCH "$BASE" -H "$H" -H "Content-Type: application/json" -d "$body")
+  if [ "$STATUS" != "201" ] && [ "$STATUS" != "200" ]; then
+    STATUS=$(curl -s -o /tmp/coolify_resp.json -w "%{http_code}" \
+      -X POST "$BASE" -H "$H" -H "Content-Type: application/json" -d "$body")
   fi
+  case "$STATUS" in
+    201|200) echo "  OK  $key (preview=$preview)" ;;
+    *) echo "  FAIL $key (preview=$preview) HTTP $STATUS: $(cat /tmp/coolify_resp.json)" ;;
+  esac
 }
 
 echo "Updating production..."

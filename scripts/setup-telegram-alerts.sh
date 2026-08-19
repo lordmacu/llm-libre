@@ -90,10 +90,19 @@ TG_TOKEN="$1"; CHAT_ID="$2"; APP_UUID="$3"; API="$4"
 H="Authorization: Bearer $(cat ~/.coolify-api-token)"
 BASE="$API/applications/$APP_UUID/envs"
 
+# POST creates, PATCH updates, and Coolify does NOT accept either for the other
+# case: PATCH on a key that does not exist yet answers 404 "Environment variable
+# not found". These keys are new by definition the first time this runs, so
+# PATCH-only silently configured nothing at all -- verified against the live API
+# on 2026-08-19. POST first, fall back to PATCH for a re-run.
 put() {
-  STATUS=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" -X PATCH "$BASE" \
-    -H "$H" -H "Content-Type: application/json" \
-    -d "{\"key\":\"$1\",\"value\":\"$2\",\"is_preview\":$3}")
+  BODY="{\"key\":\"$1\",\"value\":\"$2\",\"is_preview\":$3}"
+  STATUS=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" -X POST "$BASE" \
+    -H "$H" -H "Content-Type: application/json" -d "$BODY")
+  if [ "$STATUS" != "201" ] && [ "$STATUS" != "200" ]; then
+    STATUS=$(curl -s -o /tmp/tg_resp.json -w "%{http_code}" -X PATCH "$BASE" \
+      -H "$H" -H "Content-Type: application/json" -d "$BODY")
+  fi
   case "$STATUS" in
     201|200) echo "  OK  $1 (preview=$3)" ;;
     *) echo "  FAIL $1 (preview=$3) HTTP $STATUS: $(cat /tmp/tg_resp.json)" ;;
