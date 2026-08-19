@@ -7,6 +7,7 @@ from llm_libre.storage import Storage
 from llm_libre.api import State
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
+from llm_libre.quality_suite import CASES
 from llm_libre.proxy import Proxy
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
 from llm_libre.probing import (PING, cycle, probe_health, probe_quality,
@@ -441,8 +442,13 @@ async def test_the_quality_probe_stores_passed_over_total_cases():
     await probe_quality(p, p.store, [_route()], now=100.0)
     row = p.store._con.execute(
         "SELECT cases_passed, cases_total FROM probes WHERE kind='quality'").fetchone()
-    assert row[1] == 5
-    assert 1 <= row[0] < 5   # pasa aritmetica y formato, falla json y tools
+    # POINTS, not a count of cases: a discriminating case is worth
+    # DISCRIMINATING_WEIGHT and a liveness case 1, so the denominator is the sum
+    # of the weights of the cases that ran, not len(CASES). See quality_suite.evaluate.
+    assert row[1] == sum(c.weight for c in CASES)
+    # This stub answers "12" to everything: it passes arithmetic and format and
+    # fails json, tools and all three discriminating cases.
+    assert 1 <= row[0] < row[1]
 
 
 # --- Round 10, small fix from the gate: the same wiring hole as HIGH 1 (round
@@ -483,8 +489,11 @@ async def test_quality_skips_the_tools_case_without_counting_it_as_a_failure():
     await probe_quality(p, p.store, [_route(tools=False)], now=100.0)
     row = p.store._con.execute(
         "SELECT cases_passed, cases_total FROM probes WHERE kind='quality'").fetchone()
-    assert row[1] == 4          # 5 cases minus the tools one, which was skipped
-    assert len(calls) == 4    # y no se le gasto cuota pidiendoselo
+    # The skipped case leaves BOTH sides of the fraction alone: the denominator is
+    # every weight EXCEPT the tools case's, not the full battery's.
+    tools_weight = next(c.weight for c in CASES if c.name == "tools")
+    assert row[1] == sum(c.weight for c in CASES) - tools_weight
+    assert len(calls) == len(CASES) - 1   # and no quota was spent asking for it
 
 
 async def test_cycle_syncs_probes_health_and_probes_quality_on_cycle_zero():

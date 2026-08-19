@@ -115,6 +115,22 @@ def _satisfies(r: Route, p: RouteRequest) -> bool:
 # on their own and the draw narrows without touching this number.
 TIE_BAND = 0.05
 
+# How close to the category best a route has to score to enter the draw, PER
+# PROFILE. `strong` gets 0.0: only an exact tie is drawn.
+#
+# The wide band exists to spread load, which is right when the routes really are
+# interchangeable -- that is what `fast` and `balanced` are saying. `strong` is
+# saying the opposite: the caller wants the best route this gateway can identify,
+# and answering with a uniformly random pick from everything within 5% is how
+# "strong" turned into a coin flip. Measured 2026-08-18 against the live
+# deployment: three routes sat inside the band for `strong`, one of them a 2.6B
+# model, and consecutive identical requests landed on different ones.
+#
+# 0.0 still draws a GENUINE exact tie (floor == best, so equal scores all qualify),
+# which keeps identical routes from starving and keeps rate limiting from
+# concentrating on whichever one happens to sort first.
+TIE_BAND_BY_PROFILE: dict[str, float] = {"strong": 0.0}
+
 
 def _category(r: Route, m: Metrics, now: float) -> tuple[bool, bool, int, int]:
     """The CATEGORICAL part of the sort key -- everything except the score.
@@ -134,8 +150,10 @@ def shuffle_ties(ordered: list[Route], metrics: dict[str, Metrics],
     """Shuffle the routes tied with the best of their category.
 
     `ordered` already comes sorted by `order_routes`. It is walked by consecutive
-    categories; within each one, those scoring >= best * (1 - TIE_BAND) are
-    shuffled among themselves and the rest keep their order behind them.
+    categories; within each one, those scoring >= best * (1 - band) are shuffled
+    among themselves and the rest keep their order behind them. The band depends on
+    the PROFILE -- see TIE_BAND_BY_PROFILE -- because `strong` asking for the best
+    route and then drawing at random between the top few is self-defeating.
 
     `rng` is any object with `.shuffle` (e.g. `random.Random`). It is injected
     rather than using the global `random` so tests can seed it and so
@@ -158,7 +176,7 @@ def shuffle_ties(ordered: list[Route], metrics: dict[str, Metrics],
         # than another: with non-positive scores the relative band means nothing,
         # so no draw happens and the deterministic order stands.
         if best > 0:
-            floor = best * (1 - TIE_BAND)
+            floor = best * (1 - TIE_BAND_BY_PROFILE.get(profile, TIE_BAND))
             k = 0
             while k < len(group) and scores[k] >= floor:
                 k += 1

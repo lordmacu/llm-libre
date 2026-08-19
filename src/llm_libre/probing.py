@@ -191,7 +191,7 @@ async def probe_quality(proxy, store, routes: list[Route], now: float) -> None:
             # `_sospechar` (meant for CLIENT traffic) and burned quota from the
             # on-demand probe budget, which is scarce and shared with real traffic.
             r = await proxy.complete([route], body, now, is_probe=True)
-            results.append(r.status == 200 and case.check(r.json))
+            results.append((case, r.status == 200 and case.check(r.json)))
         passed, total = evaluate(results)
         store.record_probe(route.key, "quality", passed > 0, 0, 0, 200,
                            passed, total, now)

@@ -22,6 +22,18 @@ class Case:
     name: str
     body: dict
     check: Callable[[dict], bool]
+    # How many points this case is worth. 1 = a liveness check (can this route
+    # add 7+5, emit one word, call one tool); >1 = a DISCRIMINATING case, one a
+    # small model gets wrong and a real reasoner gets right.
+    #
+    # The weight exists because an unweighted pass-count saturated. Measured
+    # 2026-08-18 against the live deployment: 14 of the 42 free routes carrying
+    # tools scored exactly 1.0, among them a 2.6B model sitting above
+    # deepseek-reasoner and grok-3. Every one of the five original cases is
+    # something a 2.6B model does perfectly, so `quality` had no headroom left to
+    # express "this one is actually better" -- and `auto:strong`, whose entire
+    # job is to weigh quality (its exponent is 2.0), had nothing to weigh.
+    weight: int = 1
 
 
 def _text(r: dict) -> str:
@@ -112,6 +124,26 @@ def _user(text: str) -> list:
 SHORT_TOKEN_BUDGET = 512   # a one or two word answer + its reasoning
 LONG_TOKEN_BUDGET = 1024   # json, a tool call or a sentence + its reasoning
 
+# What a discriminating case would be worth against a liveness case worth 1.
+#
+# Nothing carries it yet, and that is a measured result, not an oversight. Three
+# candidate case families were written and run against the live deployment on
+# 2026-08-18 -- the bat-and-ball trap, a four-step arithmetic chain, and a
+# two-constraint generation ("exactly five words, all starting with P") -- against
+# liquid/lfm-2.5-2.6b (2.6B parameters) and against deepseek-reasoner,
+# grok-3 and nvidia/nemotron-3-super-120b. EVERY route passed EVERY case. Two
+# further families (grounded high-volume JSON over a supplied catalogue, and
+# faithfulness to a context that omits the answer) also failed to separate them:
+# at that output volume the reasoning models blow their token budget on thinking
+# and get truncated, so the case penalises exactly the routes it is meant to
+# reward.
+#
+# The conclusion is about the AXIS, not the difficulty: short, well-specified
+# prompt-and-check tasks do not separate these routes, because a 2026-vintage 2.6B
+# model genuinely is as good at them as a frontier reasoner. The tie the battery
+# reports is real. Whatever `auto:strong` should be weighing, it is not this.
+DISCRIMINATING_WEIGHT = 2
+
 CASES: list[Case] = [
     Case("arithmetic",
          {"messages": _user("Cuanto es 7 mas 5? Responde solo el numero."),
@@ -133,5 +165,13 @@ CASES: list[Case] = [
 ]
 
 
-def evaluate(results: list[bool]) -> tuple[int, int]:
-    return sum(1 for r in results if r), len(results)
+def evaluate(scored: list[tuple[Case, bool]]) -> tuple[int, int]:
+    """(points earned, points possible) over the cases that actually ran.
+
+    Takes (case, passed) pairs rather than bare booleans because the caller skips
+    cases a route cannot be fairly asked (see probing.sample_quality and the
+    `tools` case): a skipped case has to leave BOTH sides of the fraction alone,
+    and with bare booleans there was no way to tell which weight to drop.
+    """
+    return (sum(c.weight for c, ok in scored if ok),
+            sum(c.weight for c, _ in scored))

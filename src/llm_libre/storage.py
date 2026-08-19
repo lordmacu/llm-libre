@@ -353,14 +353,16 @@ class Storage:
         out: dict[str, Metrics] = {}
         for (key,) in self._con.execute("SELECT key FROM routes WHERE active = 1"):
             quality, measured_at = self._quality(key)
+            ttft, ttft_measured = self._ttft_p50(key)
             out[key] = Metrics(
                 quality=quality,
                 reliability=self._reliability(key),
-                ttft_p50_ms=self._ttft_p50(key),
+                ttft_p50_ms=ttft,
                 cooldown_until=0.0,  # cooldown lives in the proxy's memory
                 quality_measured_at=measured_at,
                 last_probe_at=self._last_probe(key),
                 latency_p50_ms=self._latency_p50(key),
+                ttft_measured=ttft_measured,
             )
         return out
 
@@ -508,10 +510,19 @@ class Storage:
             "SELECT 1 FROM probes WHERE key = ? LIMIT 1", (key,)).fetchone()
         return any_probe is None
 
-    def _ttft_p50(self, key: str) -> float:
-        """p50 of time-to-first-token. Only observations that genuinely measured a
-        ttft (streaming) are included: the rest write 0 and fall outside the
-        `ttft_ms > 0`. With none, the neutral value is returned."""
+    def _ttft_p50(self, key: str) -> tuple[float, bool]:
+        """(p50 of time-to-first-token, whether it was actually measured).
+
+        Only observations that genuinely measured a ttft (streaming) are included:
+        the rest write 0 and fall outside the `ttft_ms > 0`. With none, the neutral
+        value is returned -- and the second element says so.
+
+        That flag is the whole reason this returns a pair. The neutral default is
+        an assumption, and a score that cannot tell it from a measurement turns the
+        latency factor into a constant for every non-streaming deployment, which
+        silently disables the fast/balanced/strong profiles entirely. See
+        ranking.latency_signal_ms for the measurement that caught it.
+        """
         rows = self._con.execute(
             """SELECT ttft_ms FROM (
                    SELECT at, ttft_ms FROM probes WHERE key = ? AND ok = 1
@@ -520,9 +531,9 @@ class Storage:
                ) WHERE ttft_ms > 0 ORDER BY at DESC LIMIT ?""",
             (key, key, WINDOW)).fetchall()
         if not rows:
-            return NEUTRAL_TTFT_MS
+            return NEUTRAL_TTFT_MS, False
         values = sorted(f[0] for f in rows)
-        return float(values[len(values) // 2])
+        return float(values[len(values) // 2]), True
 
     def _latency_p50(self, key: str) -> float | None:
         """p50 of the complete round-trip. It does not enter the score (the

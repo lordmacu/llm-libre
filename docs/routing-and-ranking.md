@@ -38,6 +38,20 @@ explicit id combined with an impossible `x_min_context` still gets `400`
 cooling down right now still gets `503` (step 2), exactly like `auto`
 would. The steps, in order:
 
+> **An explicit id buys you no failover, in practice none at all.** The
+> filter keeps every route serving that id, and in principle several
+> providers could serve the same one — but measured against this deployment
+> on 2026-08-18, **not one of the 52 model ids is served by more than one
+> provider**. So naming an id gives a chain of exactly ONE route: the first
+> failure is the last, and it is returned as a bare `503` while `auto`
+> would have walked 40+ alternatives. This bites hardest on a long prompt,
+> because the failure is usually the provider *timeout* firing —
+> `deepseek` declares `timeout_s: 60` and `grok` declares none and so takes
+> the global `TIMEOUT_S` of 90s, which is exactly where 503s at 60s and 90s
+> come from. The same ids answer a short prompt in ~2s. Check
+> `error.routes_tried` in the 503 body to tell "one route, no failover"
+> apart from "everything is down".
+
 1. **Filter by capability.** A route is a candidate at all only if it
    satisfies what the request requires: `tools` / `vision` if requested
    (via `x_requires`, an `auto:tools` / `auto:vision` alias, or simply
@@ -64,7 +78,7 @@ would. The steps, in order:
       point of starvation, just deprioritized against known quantities.
    4. **The score**, `score = quality^wc * reliability^wr * f(latency)^wl`,
       highest first. The exponents (`wc`, `wr`, `wl`) come from the
-      requested `profile` -- see `llm_libre/ranking.py`'s `PESOS` table.
+      requested `profile` -- see `llm_libre/ranking.py`'s `WEIGHTS` table.
       `x_allow_paid: false` on the request removes paid routes from
       consideration even earlier, before this sort even runs.
 
@@ -73,6 +87,28 @@ The result is the full ordered attempt chain, not just a single winner --
 here). Only step 1's outcome is visible to a client as an HTTP status
 (`400`); everything from step 2 onward is invisible unless you go looking,
 which is what the rest of this document is for.
+
+### The draw between tied routes, and why `strong` does not take part
+
+Routes that score within `TIE_BAND` (5%) of the best in their category are
+**shuffled at random** before the chain is built, so that traffic spreads
+across genuinely interchangeable routes instead of hammering whichever one
+sorts first and rate-limiting it. The draw can never cross a category, so
+it cannot lift a paid route above a free one or override `priority` -- see
+`router.shuffle_ties`.
+
+`strong` is the exception: its band is **0.0** (`TIE_BAND_BY_PROFILE`), so
+only an *exact* tie is drawn. The reason is that the wide band and the
+meaning of `strong` contradict each other. `fast` and `balanced` are saying
+"these routes are interchangeable, spread the load"; `strong` is saying
+"give me the best route you can identify", and answering that with a
+uniform random pick from everything within 5% is how the profile turned
+into a coin flip. Measured on 2026-08-18 against this deployment, three
+routes sat inside the band for `strong` -- one of them a 2.6B model -- and
+consecutive identical requests landed on different ones, which is exactly
+what a consumer sees as "the same prompt gives a great answer or a generic
+one at random". An exact tie is still drawn, so identical routes do not
+starve.
 
 ## Reading `GET /v1/ranking`
 
@@ -156,13 +192,39 @@ Reading it top to bottom:
   an SSH session against `blog` expecting it to work.)
 - **`ttft_p50_ms` and `latency_p50_ms` measure different things and are
   not interchangeable.** `ttft_p50_ms` (time to first token) only gets
-  populated by streaming traffic and probes, and is what the score's
-  latency factor is actually calibrated against. `latency_p50_ms` is the
-  full round-trip of the non-streaming path (and of every probe), exposed
-  for diagnostics only -- it does not feed the score. A deployment that
-  only ever sees non-streaming traffic will show every route's
-  `ttft_p50_ms` stuck at the neutral default (`1500.0`), because nothing
-  ever measured a real one; that is expected, not broken.
+  populated by streaming traffic, and is what the score's latency factor is
+  calibrated against. `latency_p50_ms` is the full round-trip of the
+  non-streaming path (and of every probe). A deployment that only ever sees
+  non-streaming traffic will show every route's `ttft_p50_ms` stuck at the
+  neutral default (`1500.0`), because nothing ever measured a real one.
+- **`latency_p50_ms` is no longer diagnostics-only: it BACKS the score
+  whenever `ttft_p50_ms` was never really measured.** This changed on
+  2026-08-18, and the reason is worth knowing, because the old behaviour
+  disabled a feature silently. Measured against this deployment, 48 of 52
+  routes sat at exactly `1500.0` — so the latency factor was the *same
+  constant* for almost every route, and a constant common to all of them
+  cannot reorder anything no matter what exponent it is raised to.
+  `auto:fast`, `auto:balanced` and `auto:strong` returned **byte-identical
+  orderings**: the profile knob did nothing at all. `latency_p50_ms` was
+  populated on 51 of those same 52 routes, so the signal existed and the
+  score simply never read it. See `ranking.latency_signal_ms`.
+- **`quality` saturates, and that is a real limit of the battery, not a
+  bug you can read around.** Measured 2026-08-18: of the 42 free routes
+  carrying `tools`, **14 tied at exactly `1.0`** and 19 more at `0.8`. The
+  battery is five short prompt-and-check cases (add 7+5, answer in one
+  word, emit two JSON keys, call one tool, write a Spanish sentence), and a
+  2026-vintage small model passes all five as reliably as a frontier
+  reasoner does. Three harder candidate cases were written and run live
+  against `liquid/lfm-2.5-2.6b` (2.6B params), `deepseek-reasoner`,
+  `grok-3` and `nvidia/nemotron-3-super-120b` — the bat-and-ball trap, a
+  four-step arithmetic chain, and a two-constraint generation — and **every
+  route passed every case**. Grounded high-volume JSON did not separate them
+  either: at that output length the reasoning models spend their token
+  budget thinking and get truncated, so the case punishes the routes it is
+  meant to reward. The tie the table reports is therefore *real* on this
+  axis. Do not read `quality: 1.0` as "this route is as good as any other
+  for a hard task" — read it as "this route passes every liveness check we
+  currently know how to run cheaply". See `quality_suite.DISCRIMINATING_WEIGHT`.
 - `score` is always computed with the `balanced` profile weights for
   this table, regardless of what any individual request asked for -- it is
   meant as a stable reference point, not a live prediction for every

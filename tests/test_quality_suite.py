@@ -1,4 +1,4 @@
-from llm_libre.quality_suite import CASES, evaluate
+from llm_libre.quality_suite import CASES, Case, evaluate
 
 
 def _response(text):
@@ -28,6 +28,12 @@ def test_the_budgets_leave_room_for_reasoning_tokens():
 def test_the_battery_stays_small_in_number_of_requests():
     # Section 14 budgets probing in REQUESTS, not tokens: what has to be watched
     # is how many cases there are, not how much each one may write.
+    #
+    # Still 6: the three candidate discriminating cases were measured against the
+    # live deployment and removed again, because they separated nothing (see
+    # DISCRIMINATING_WEIGHT). Adding cases costs free quota per CYCLE across every
+    # free route, so a case has to earn its place with evidence that it moves the
+    # ranking, not with the plausibility of its prompt.
     assert len(CASES) <= 6
 
 
@@ -83,5 +89,46 @@ def test_the_spanish_case_requires_whole_words_not_substrings():
     assert case.check(_response("The weather is nice today.")) is False
 
 
-def test_evaluate_counts_the_passing_cases():
-    assert evaluate([True, False, True]) == (2, 3)
+def test_evaluate_adds_up_the_weights_of_the_passing_cases():
+    a, b = CASES[0], CASES[1]
+    assert evaluate([(a, True), (b, False)]) == (a.weight, a.weight + b.weight)
+
+
+# --- Weighting, added 2026-08-18 ---------------------------------------------
+#
+# `evaluate` returns POINTS rather than a count of passing cases, so that a case
+# can be worth more than another. Nothing carries a weight above 1 yet -- see
+# DISCRIMINATING_WEIGHT in quality_suite.py for the live measurement that says why
+# -- so these tests pin the mechanism, not a particular battery.
+
+
+def test_every_case_declares_a_weight():
+    for c in CASES:
+        assert isinstance(c.weight, int) and c.weight >= 1, c.name
+
+
+def test_passing_everything_scores_exactly_one():
+    earned, possible = evaluate([(c, True) for c in CASES])
+    assert earned == possible
+
+
+def test_failing_everything_scores_zero():
+    earned, possible = evaluate([(c, False) for c in CASES])
+    assert earned == 0 and possible > 0
+
+
+def test_a_skipped_case_leaves_both_sides_of_the_fraction_alone():
+    """The `tools` case is skipped for a route that does not declare tools. It
+    must not count as failed -- that would conflate "does not promise this" with
+    "promised it and got it wrong"."""
+    tools = next(c for c in CASES if c.name == "tools")
+    ran = [(c, True) for c in CASES if c is not tools]
+    assert evaluate(ran) == (sum(c.weight for c in CASES) - tools.weight,) * 2
+
+
+def test_a_heavier_case_moves_the_score_more_than_a_light_one():
+    """The mechanism the battery will need the day a case earns weight > 1."""
+    light = Case("light", {}, lambda r: True, weight=1)
+    heavy = Case("heavy", {}, lambda r: True, weight=3)
+    assert evaluate([(light, True), (heavy, False)])[0] < evaluate(
+        [(light, False), (heavy, True)])[0]

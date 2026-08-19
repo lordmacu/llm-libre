@@ -1316,3 +1316,54 @@ async def test_the_probe_row_is_stamped_at_resolution_not_at_scheduling():
     row = p.store._con.execute(
         "SELECT at FROM probes WHERE key = 'kilo/a:free'").fetchone()
     assert row[0] >= now + delay_s
+
+
+# --- A timed-out route must not 503 with an empty reason, added 2026-08-18 ----
+#
+# Reported symptom: pinning `model` to a real id and sending a long prompt gave a
+# 503 after exactly 60s (deepseek, whose provider declares timeout_s: 60) or
+# exactly 90s (grok, which declares none and so takes the global TIMEOUT_S). The
+# same ids with a short prompt answered 200 in ~2s.
+#
+# Those numbers are the configured ceilings, not a coincidence -- but the body the
+# client got back said only `"message": "no routes available"` with `"detail": ""`,
+# because httpx raises ReadTimeout with an empty message and `str(e)` is "". A
+# timeout and a DNS failure and a connection refusal were indistinguishable, and
+# none of them said "this route was still generating when the clock ran out".
+
+
+async def test_a_timeout_is_named_in_the_503_instead_of_an_empty_detail():
+    def handler(req):
+        raise httpx.ReadTimeout("")
+
+    p = _proxy(handler)
+    r = await p.complete([_route("a:free")], BODY, now=0.0)
+    assert r.status == 503
+    detail = r.json["error"]["detail"]
+    assert detail, "an empty detail tells the client nothing"
+    assert "ReadTimeout" in detail
+
+
+async def test_a_network_error_that_does_describe_itself_keeps_its_message():
+    def handler(req):
+        raise httpx.ConnectError("nodename nor servname provided")
+
+    p = _proxy(handler)
+    r = await p.complete([_route("a:free")], BODY, now=0.0)
+    assert "nodename nor servname provided" in r.json["error"]["detail"]
+    assert "ConnectError" in r.json["error"]["detail"]
+
+
+async def test_the_503_says_how_many_routes_were_actually_tried():
+    """With an explicit model id the chain is ONE route, so there is no failover
+    at all -- every model id in the production catalogue is served by exactly one
+    provider. The client has to be able to tell that apart from "we tried 40
+    routes and all of them failed"."""
+    def handler(req):
+        raise httpx.ReadTimeout("")
+
+    p = _proxy(handler)
+    r = await p.complete([_route("a:free")], BODY, now=0.0)
+    assert r.json["error"]["routes_tried"] == 1
+    r2 = await p.complete([_route("a:free"), _route("b:free")], BODY, now=0.0)
+    assert r2.json["error"]["routes_tried"] == 2

@@ -258,6 +258,23 @@ def _is_client_error(code: int) -> bool:
     return code in _REQUEST_EVIDENCE_CODES
 
 
+def describe_error(e: Exception) -> str:
+    """A transport failure, in words, never empty.
+
+    `str(e)` alone is not enough: httpx raises its timeout exceptions with an
+    EMPTY message, so a route that was still generating when the clock ran out
+    produced `"detail": ""` in the 503 -- indistinguishable from a DNS failure or
+    a refused connection, and giving no hint that a ceiling had fired at all.
+
+    Reported from production on 2026-08-18: an explicit `model` id 503'd after
+    exactly 60s (deepseek, `timeout_s: 60`) and after exactly 90s (grok, which
+    declares none and takes the global TIMEOUT_S). Those are the configured
+    ceilings, and the body said nothing about any of it.
+    """
+    text = str(e).strip()
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+
 def _timeout_for(provider) -> float:
     """`Provider.timeout_s` (default None) bounds the worst case of ONE
     particular provider -- e.g. one that can hang -- without lowering the timeout
@@ -395,7 +412,7 @@ class Proxy:
                                             timeout=_timeout_for(provider))
                 code = resp.status_code
             except httpx.HTTPError as e:
-                code, resp, last_error = 0, None, str(e)
+                code, resp, last_error = 0, None, describe_error(e)
             last_code = code
             # A COMPLETE round-trip, NOT a time-to-first-token: on this path the
             # response arrives all at once, so this number includes the whole
@@ -491,6 +508,13 @@ class Proxy:
         return ProxyResponse(503, {"error": {
             "message": "no routes available",
             "detail": last_error,
+            # How long the attempt chain actually was. An explicit `model` id
+            # narrows it to the routes serving THAT id -- one route, for every id
+            # in the production catalogue, since no model is served by two
+            # providers -- so a failure there has no failover behind it at all,
+            # while `auto` walks 40+. Without this number both cases return the
+            # same "no routes available" and look like the same outage.
+            "routes_tried": attempts,
             "next_release": (min(request_cooldowns.values())
                                    if request_cooldowns else None),
         }}, None, attempts, "", last_code)
@@ -535,7 +559,7 @@ class Proxy:
                                             timeout=_timeout_for(provider))
                 code = resp.status_code
             except httpx.HTTPError as e:
-                code, resp, last_error = 0, None, str(e)
+                code, resp, last_error = 0, None, describe_error(e)
             last_code = code
             latency_ms = int((time.monotonic() - t0) * 1000)
             punish_at = now + latency_ms / 1000.0
@@ -603,6 +627,8 @@ class Proxy:
         return ProxyResponse(503, {"error": {
             "message": "no routes available",
             "detail": last_error,
+            # Same reason as the chat path: see the sibling 503 in `complete`.
+            "routes_tried": attempts,
             "next_release": (min(request_cooldowns.values())
                              if request_cooldowns else None),
         }}, None, attempts, "", last_code)

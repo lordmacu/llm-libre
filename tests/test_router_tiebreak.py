@@ -91,3 +91,47 @@ def test_the_distribution_is_reasonably_even():
     assert len(counts) == 4
     for key, n in counts.items():
         assert 800 < n < 1200, counts   # 1000 expected, +-20%
+
+
+# --- `strong` must be repeatable, added 2026-08-18 ----------------------------
+#
+# The consumer symptom that started this: with the SAME code and the SAME prompt,
+# consecutive requests to `auto:strong` came back sometimes excellent and
+# sometimes generic. Measured against the live deployment, three routes sat inside
+# the 5% band for `strong` -- among them a 2.6B model -- and `shuffle_ties` drew
+# between them per request. A profile whose whole purpose is "give me the best
+# route" cannot be answering with a random one of the top three.
+#
+# `fast` and `balanced` keep the wide band on purpose: there the routes really are
+# interchangeable, and spreading load across them is what keeps a single free
+# route from absorbing all the traffic and rate-limiting.
+
+
+def test_strong_does_not_draw_between_merely_close_routes():
+    routes = [r("best"), r("close"), r("closer")]
+    met = {"kilo/best": m(quality=1.0, reliability=1.00),
+           "kilo/closer": m(quality=1.0, reliability=0.98),
+           "kilo/close": m(quality=1.0, reliability=0.97)}
+    firsts = {order_routes(routes, met, RouteRequest(profile="strong"), 0.0,
+                           random.Random(s))[0].key for s in range(60)}
+    assert firsts == {"kilo/best"}, firsts
+
+
+def test_fast_still_spreads_load_across_close_routes():
+    routes = [r("best"), r("close"), r("closer")]
+    met = {"kilo/best": m(quality=1.0, reliability=1.00),
+           "kilo/closer": m(quality=1.0, reliability=0.98),
+           "kilo/close": m(quality=1.0, reliability=0.97)}
+    firsts = {order_routes(routes, met, RouteRequest(profile="fast"), 0.0,
+                           random.Random(s))[0].key for s in range(60)}
+    assert len(firsts) > 1, firsts
+
+
+def test_strong_still_rotates_a_genuine_exact_tie():
+    """Identical evidence is not a reason to pin one route forever: that would
+    starve the others and concentrate rate limiting on a single provider."""
+    routes = [r("a"), r("b"), r("c")]
+    met = {"kilo/a": m(), "kilo/b": m(), "kilo/c": m()}
+    firsts = {order_routes(routes, met, RouteRequest(profile="strong"), 0.0,
+                           random.Random(s))[0].key for s in range(60)}
+    assert firsts == {"kilo/a", "kilo/b", "kilo/c"}, firsts

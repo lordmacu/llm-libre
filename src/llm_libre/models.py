@@ -116,9 +116,30 @@ class Metrics:
     # asks for it for /v1/ranking.
     last_probe_at: float | None = None
     # p50 of the COMPLETE round-trip, which is a different thing from
-    # `ttft_p50_ms` (see the comment in storage.py). It does not enter the score:
-    # it is exposed for diagnostics. None = never observed.
+    # `ttft_p50_ms` (see the comment in storage.py). None = never observed.
+    #
+    # It used to be diagnostics-only. It now BACKS the score's latency factor for
+    # any route whose ttft was never really measured -- see ranking.latency_signal_ms
+    # and `ttft_measured` right below.
     latency_p50_ms: float | None = None
+    # Whether `ttft_p50_ms` above is a real observation or the neutral default.
+    #
+    # This exists because the neutral default made the latency factor a CONSTANT.
+    # Measured 2026-08-18 against the live deployment: 48 of 52 routes had
+    # ttft_p50_ms == NEUTRAL_TTFT_MS, because only streaming traffic records a real
+    # ttft and both the probes and this gateway's non-streaming path write 0. A
+    # constant is common to every route, so raising it to the profile's exponent
+    # cannot reorder anything -- `fast`, `balanced` and `strong` returned literally
+    # identical orderings in production. `latency_p50_ms` was populated on 51 of
+    # those same 52 routes: the signal existed, the score just never read it.
+    #
+    # Defaults to True so that every direct construction (tests, NEUTRAL_METRICS)
+    # keeps meaning "use the ttft I am handing you". Only storage.metrics(), which
+    # is the one caller that can actually tell, passes False.
+    ttft_measured: bool = True
 
 
-NEUTRAL_METRICS = Metrics(NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS, 0.0)
+# `ttft_measured=False`: nothing has been observed for a brand-new route, so its
+# ttft is the neutral default by definition, not a measurement.
+NEUTRAL_METRICS = Metrics(NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS, 0.0,
+                          ttft_measured=False)
