@@ -11,6 +11,7 @@ from llm_libre.assets import AssetStore
 from llm_libre.auth import RateLimiter
 from llm_libre.probing import cycle
 from llm_libre.providers import load
+from llm_libre.notify import from_env as notify_from_env
 from llm_libre.proxy import Proxy
 from llm_libre.storage import Storage
 
@@ -86,7 +87,8 @@ def build_state() -> State:
     store = Storage(DB_PATH)
     store.create_schema()
     http = httpx.AsyncClient()
-    proxy = Proxy({p.id: p for p in providers}, store, http)
+    proxy = Proxy({p.id: p for p in providers}, store, http,
+                  notifier=notify_from_env())
     state = State(store=store, proxy=proxy, api_keys=api_keys,
                   daily_paid_cap=int(_env("DAILY_PAID_CAP", "TOPE_PAGO_DIARIO", "200")),
                   rate_limiter=RateLimiter(
