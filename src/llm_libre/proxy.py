@@ -3,7 +3,7 @@ import json
 import logging
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
 
 import httpx
@@ -276,6 +276,93 @@ def _is_client_error(code: int) -> bool:
     return code in _REQUEST_EVIDENCE_CODES
 
 
+# The capability a punishment is EVIDENCE ABOUT.
+#
+# `_punish_429` used to key on `route.key` alone, so a rate limit hit on one
+# capability removed the route from all of them. Measured against grok on
+# 2026-08-19, where the two are not remotely the same resource:
+# `imagine-agent-mode` carries 999 chat requests per HOUR (987 still unused at the
+# time) while its image generation draws on a separate ACCOUNT-level bucket of a
+# handful per DAY, which was empty. One 429 from that empty image bucket took a
+# fully healthy 999/h chat route out of the CHAT rotation.
+#
+# The two-cap change made earlier the same day sharpened the edge rather than
+# blunting it: a provider that states a `Retry-After` is now honoured up to an
+# hour, so an image quota resetting tomorrow would have parked a chat route for a
+# full hour over something that never concerned chat.
+#
+# The rule, and the reason the scopes are not symmetric: a RATE LIMIT is evidence
+# about the capability it rate-limited, and nothing more. A FAILURE -- a confirmed
+# probe, a route answering 500, a paid route failing real traffic -- is evidence
+# about the ROUTE, and still punishes everything.
+ALL_CAPABILITIES = "*"
+CHAT = "chat"
+IMAGES = "images"
+
+
+class Cooldowns(MutableMapping):
+    """Punishments, scoped to the capability they are evidence about.
+
+    This deliberately behaves as the plain `dict[route_key, until]` it replaced
+    for every caller that already existed -- reading gives the moment the route is
+    free for CHAT, writing punishes every capability at once, which is exactly what
+    `cooldowns[key] = t` has always been used to express. The scope-aware methods
+    are additive, so the ~86 existing call sites keep meaning what they meant and
+    the new behaviour is opt-in at the sites that know which capability they are
+    serving.
+    """
+
+    def __init__(self) -> None:
+        self._until: dict[tuple[str, str], float] = {}
+
+    # -- scope aware ---------------------------------------------------------
+    def punish(self, key: str, until: float, scope: str = ALL_CAPABILITIES) -> None:
+        self._until[(key, scope)] = until
+
+    def until(self, key: str, capability: str = CHAT) -> float:
+        """When `key` is free to serve `capability`: the later of the punishment
+        aimed at the whole route and the one aimed at this capability."""
+        return max(self._until.get((key, ALL_CAPABILITIES), 0.0),
+                   self._until.get((key, capability), 0.0))
+
+    def scopes(self, key: str) -> dict[str, float]:
+        """Every live scope for one route, for diagnostics (/v1/ranking)."""
+        return {scope: until for (k, scope), until in self._until.items() if k == key}
+
+    def drop(self, key: str) -> None:
+        """Erase every scope for a route. A success is evidence about the route,
+        so it clears the capability-specific punishments too."""
+        for k in [k for k in self._until if k[0] == key]:
+            del self._until[k]
+
+    # -- the plain mapping the previous callers see ---------------------------
+    def __getitem__(self, key: str) -> float:
+        if not any(k == key for k, _ in self._until):
+            raise KeyError(key)
+        return self.until(key)
+
+    def __setitem__(self, key: str, value: float) -> None:
+        self.punish(key, value)          # no scope given == the whole route
+
+    def __delitem__(self, key: str) -> None:
+        if not any(k == key for k, _ in self._until):
+            raise KeyError(key)
+        self.drop(key)
+
+    def __iter__(self):
+        seen = []
+        for k, _ in self._until:
+            if k not in seen:
+                seen.append(k)
+        return iter(seen)
+
+    def __len__(self) -> int:
+        return len({k for k, _ in self._until})
+
+    def __repr__(self) -> str:
+        return f"Cooldowns({dict(self.items())!r})"
+
+
 def describe_error(e: Exception) -> str:
     """A transport failure, in words, never empty.
 
@@ -359,7 +446,7 @@ class Proxy:
         self.providers = providers
         self.store = store
         self.http = http_client
-        self.cooldowns: dict[str, float] = {}
+        self.cooldowns = Cooldowns()
         self._punishments: dict[str, int] = {}
         # Round 9: how many generations of cooldown/punishment this key has had
         # (incremented on EVERY _punish/_punish_429/_clear_punishment) -- it lets
@@ -513,7 +600,7 @@ class Proxy:
                 return ProxyResponse(200, data, route, attempts, reasoning_text, code)
 
             if code == 429:
-                self._punish_429(route.key, punish_at, resp)
+                self._punish_429(route.key, punish_at, resp, scope=CHAT)
             elif not _is_client_error(code):
                 self._react_to_non_429_failure(route, now, punish_at, is_probe)
             last_error = last_error or f"HTTP {code}"
@@ -635,7 +722,7 @@ class Proxy:
                 return ProxyResponse(200, data, route, attempts, "", code)
 
             if code == 429:
-                self._punish_429(route.key, punish_at, resp)
+                self._punish_429(route.key, punish_at, resp, scope=IMAGES)
             elif not _is_client_error(code):
                 self._react_to_non_429_failure(route, now, punish_at, is_probe=False)
             last_error = last_error or f"HTTP {code}"
@@ -729,7 +816,7 @@ class Proxy:
                     punish_at = now + (time.monotonic() - t0)
                     if resp.status_code != 200:
                         if resp.status_code == 429:
-                            self._punish_429(route.key, punish_at, resp)
+                            self._punish_429(route.key, punish_at, resp, scope=CHAT)
                         elif not _is_client_error(resp.status_code):
                             self._react_to_non_429_failure(
                                 route, now, punish_at, is_probe=False)
@@ -979,7 +1066,8 @@ class Proxy:
         self.cooldowns[key] = now + min(COOLDOWN_BASE_S * (2 ** (n - 1)), COOLDOWN_CAP_S)
         self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
-    def _punish_429(self, key: str, now: float, resp: httpx.Response | None) -> None:
+    def _punish_429(self, key: str, now: float, resp: httpx.Response | None,
+                    scope: str = CHAT) -> None:
         """Round 9, MEDIUM 7: a 429 still punishes immediately (an unambiguous
         signal about the route, no probe needed) but NO longer reuses `_punish`'s
         exponential backoff (which could escalate to COOLDOWN_CAP_S=3600s). The
@@ -995,7 +1083,11 @@ class Proxy:
         # constants' header comment.
         duration = min(duration, COOLDOWN_429_STATED_MAX_S if stated is not None
                        else COOLDOWN_429_MAX_S)
-        self.cooldowns[key] = now + duration
+        # Scoped: a rate limit is evidence about the capability it rate-limited
+        # and nothing else -- see ALL_CAPABILITIES. `_punish` (a CONFIRMED probe
+        # failure) and `_suspect_paid` keep punishing the whole route, because
+        # those are evidence about the route itself.
+        self.cooldowns.punish(key, now + duration, scope=scope)
         self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
     @staticmethod
@@ -1041,7 +1133,7 @@ class Proxy:
         _record_success_once) cannot drift apart on which dictionaries they
         clear."""
         self._punishments.pop(key, None)
-        self.cooldowns.pop(key, None)
+        self.cooldowns.drop(key)
         self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
 
     def _react_to_non_429_failure(self, route: Route, now: float, punish_at: float,

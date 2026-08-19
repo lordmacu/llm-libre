@@ -86,7 +86,12 @@ def test_ranking_row_keys(client):
     assert set(body["routes"][0]) == {
         "key", "tier", "priority", "score", "quality", "quality_measured",
         "quality_assumed", "last_quality_probe", "last_probe", "reliability",
-        "ttft_p50_ms", "latency_p50_ms", "cooldown_until", "tools", "vision",
+        "ttft_p50_ms", "latency_p50_ms", "cooldown_until",
+        # Every live punishment by the capability it is evidence ABOUT. Added
+        # 2026-08-19, when punishments became scoped: `cooldown_until` alone
+        # cannot distinguish "out of image quota" from "route is down".
+        "cooldowns",
+        "tools", "vision",
         # image OUTPUT -- a separate axis from `vision`, which is image input
         "images",
         "context",
@@ -317,3 +322,63 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
     assert store.paid_usage("secreta", "2026-08-18") == 7
     assert [r.key for r in store.active_routes()] == ["kilo/a:free", "minimax/M3"]
     assert store.metrics()["kilo/a:free"].quality == 4 / 5
+
+
+# --- /v1/ranking exposes cooldowns per capability, 2026-08-19 ----------------
+#
+# `cooldown_until` keeps meaning what it always did -- when this route is free for
+# CHAT -- because that is what `auto` uses and what every reader of this table has
+# assumed. But punishments are now scoped (see proxy.ALL_CAPABILITIES), so that
+# single number can no longer tell the whole story: a grok agent whose image
+# bucket is empty is unavailable for images and perfectly healthy for chat, and an
+# operator asking "why did my image request 503 while chat works" has to be able
+# to see it.
+
+
+def _state_and_client():
+    """Like the `client` fixture, but hands back the State too so a test can
+    punish a route directly."""
+    store = Storage(":memory:")
+    store.create_schema()
+    store.upsert_routes([
+        Route("kilo", "a:free", "free", Capabilities(True, False, 100000, 4096)),
+        Route("grok", "imagine", "free",
+              Capabilities(False, False, 100000, 4096, images=True)),
+    ], 1.0)
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, []),
+            "grok": Provider("grok", "free", "openai", "https://g.test", "", "/models", {}, [])}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}]})))
+    state = State(store=store, proxy=Proxy(prov, store, http),
+                  api_keys={"buena"}, daily_paid_cap=200)
+    return state, TestClient(create_app(state))
+
+
+def _row(client, key):
+    return next(x for x in client.get("/v1/ranking", headers=AUTH).json()["routes"]
+                if x["key"] == key)
+
+
+def test_the_ranking_reports_a_cooldown_that_only_affects_images():
+    state, client = _state_and_client()
+    state.proxy.cooldowns.punish("grok/imagine", 9e9, scope="images")
+    row = _row(client, "grok/imagine")
+    # The headline number is the CHAT one, and chat is unaffected.
+    assert row["cooldown_until"] == 0.0
+    assert row["cooldowns"]["images"] == 9e9
+
+
+def test_a_route_wide_cooldown_shows_up_in_the_headline_number():
+    state, client = _state_and_client()
+    state.proxy.cooldowns["kilo/a:free"] = 9e9        # no scope == the whole route
+    row = _row(client, "kilo/a:free")
+    assert row["cooldown_until"] == 9e9
+    assert row["cooldowns"]["*"] == 9e9
+
+
+def test_a_route_with_no_punishment_reports_no_scopes():
+    _, client = _state_and_client()
+    row = _row(client, "kilo/a:free")
+    assert row["cooldown_until"] == 0.0
+    assert row["cooldowns"] == {}

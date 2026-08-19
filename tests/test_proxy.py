@@ -1416,3 +1416,89 @@ async def test_without_a_retry_after_the_short_guessed_cap_still_applies():
 
 async def test_the_guessed_cap_stays_tighter_than_the_stated_one():
     assert COOLDOWN_429_MAX_S < COOLDOWN_429_STATED_MAX_S
+
+
+# --- Cooldowns are scoped to the capability they are evidence about ----------
+#
+# `_punish_429` keyed on `route.key` alone, so a rate limit hit on ONE capability
+# removed the route from ALL of them. Measured against grok on 2026-08-19, where
+# the two are not remotely the same resource: `imagine-agent-mode` carries 999
+# chat requests per HOUR (987 of them still unused) while its image generation
+# draws on a separate ACCOUNT-level bucket of a handful per DAY, which was empty.
+# One 429 from that empty image bucket took a fully healthy 999/h chat route out
+# of the chat rotation.
+#
+# The two-cap change earlier the same day made this worse rather than better: a
+# provider that states a `Retry-After` now gets honoured up to an hour, so an
+# image quota that resets tomorrow would have parked a chat route for a full hour.
+#
+# The rule: a RATE LIMIT is evidence about the capability it rate-limited. A
+# FAILURE (a confirmed probe, a broken route) is evidence about the route itself
+# and still punishes everything.
+
+IMAGE_BODY = {"prompt": "un gato", "n": 1}
+
+
+def _image_route(model, provider="grok", tier="free"):
+    return Route(provider, model, tier,
+                 Capabilities(False, False, 100000, 4096, images=True))
+
+
+async def test_an_image_rate_limit_leaves_the_chat_capability_alone():
+    p = _proxy(lambda req: httpx.Response(429), providers=("grok",))
+    await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=0.0)
+    assert p.cooldowns.until("grok/imagine", "images") > 0.0
+    assert p.cooldowns.until("grok/imagine", "chat") == 0.0
+
+
+async def test_an_image_rate_limit_does_remove_it_from_image_routing():
+    p = _proxy(lambda req: httpx.Response(429), providers=("grok",))
+    await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=0.0)
+    r = await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=1.0)
+    assert r.status == 503
+
+
+async def test_a_chat_rate_limit_leaves_the_image_capability_alone():
+    p = _proxy(lambda req: httpx.Response(429))
+    await p.complete([_route("a:free")], BODY, now=0.0)
+    assert p.cooldowns.until("kilo/a:free", "chat") > 0.0
+    assert p.cooldowns.until("kilo/a:free", "images") == 0.0
+
+
+async def test_a_confirmed_probe_failure_still_punishes_every_capability():
+    """A broken route is broken for everything -- only RATE LIMITS are scoped."""
+    p = _proxy(lambda req: httpx.Response(500))
+    for _ in range(SUSPICION_THRESHOLD):
+        await p.complete([_route("a:free")], BODY, now=0.0)
+    await p.wait_for_pending_probes()
+    assert p.cooldowns.until("kilo/a:free", "chat") > 0.0
+    assert p.cooldowns.until("kilo/a:free", "images") > 0.0
+
+
+async def test_the_plain_mapping_view_still_means_what_it_always_did():
+    """86 call sites read this as `dict[route_key, until]`. Reading gives the
+    moment the route is free for CHAT; writing punishes every capability, which is
+    what `cooldowns[key] = t` has always been used to express."""
+    p = _proxy(lambda req: httpx.Response(200, json=_ok()))
+    assert p.cooldowns == {}
+    assert "kilo/a:free" not in p.cooldowns
+    p.cooldowns["kilo/a:free"] = 500.0
+    assert p.cooldowns["kilo/a:free"] == 500.0
+    assert "kilo/a:free" in p.cooldowns
+    assert p.cooldowns.until("kilo/a:free", "images") == 500.0   # writing hits ALL
+    assert dict(p.cooldowns.items()) == {"kilo/a:free": 500.0}
+
+
+async def test_a_success_clears_every_scope():
+    p = _proxy(lambda req: httpx.Response(200, json=_ok()))
+    p.cooldowns.punish("kilo/a:free", 500.0, scope="images")
+    p.cooldowns.punish("kilo/a:free", 500.0, scope="chat")
+    await p.complete([_route("a:free")], BODY, now=600.0)
+    assert p.cooldowns.until("kilo/a:free", "images") == 0.0
+    assert p.cooldowns.until("kilo/a:free", "chat") == 0.0
+
+
+async def test_the_scopes_are_visible_for_diagnostics():
+    p = _proxy(lambda req: httpx.Response(429), providers=("grok",))
+    await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=0.0)
+    assert set(p.cooldowns.scopes("grok/imagine")) == {"images"}

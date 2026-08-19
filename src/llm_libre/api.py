@@ -12,6 +12,7 @@ from llm_libre.models import NEUTRAL_METRICS, RouteRequest
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
                                ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
                                USAGE_DOCS, VERSION, customise_openapi)
+from llm_libre.proxy import CHAT, IMAGES
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
 
@@ -260,7 +261,8 @@ def create_app(state: State) -> FastAPI:
                 request = replace(request, allow_paid=False)
                 cap_reached = True
         now = time.time()
-        metrics = _metrics(state, now)
+        # The capability this request is actually asking for -- see _metrics.
+        metrics = _metrics(state, now, IMAGES if request.needs_images else CHAT)
         routes = order_routes(active, metrics, request, now, state.rng)
         if not routes:
             _no_routes(active, request, metrics, now, cap_reached)   # always raises
@@ -465,7 +467,18 @@ def create_app(state: State) -> FastAPI:
                          # nothing.
                          "ttft_p50_ms": m.ttft_p50_ms,
                          "latency_p50_ms": m.latency_p50_ms,
+                         # The CHAT cooldown, which is what this field has always
+                         # meant and what `auto` routes on.
                          "cooldown_until": m.cooldown_until,
+                         # Every live punishment for this route, by the capability
+                         # it is evidence ABOUT ("*" = the whole route). Since
+                         # punishments became scoped, the single number above can
+                         # no longer tell the whole story: a grok agent with an
+                         # empty image bucket is unavailable for images and
+                         # perfectly healthy for chat, and "why did my image
+                         # request 503 while chat works" has to be answerable from
+                         # this table.
+                         "cooldowns": state.proxy.cooldowns.scopes(r.key),
                          "tools": r.capabilities.tools, "vision": r.capabilities.vision,
                          # Two different axes on purpose: `vision` is image
                          # INPUT, `images` is image OUTPUT. An operator asking
@@ -609,9 +622,19 @@ def _iso(at: float | None) -> str | None:
     return datetime.fromtimestamp(at, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _metrics(state: State, now: float) -> dict:
+def _metrics(state: State, now: float, capability: str = CHAT) -> dict:
+    """Route metrics with the proxy's punishments merged in, for ONE capability.
+
+    `capability` matters because a punishment is scoped to what it is evidence
+    about (see proxy.ALL_CAPABILITIES): a rate limit on image generation must not
+    remove a route from CHAT routing, and a grok agent carries 999 chat requests
+    an hour against a handful of images a day, so the two are nowhere near the
+    same resource. `cooldowns.until` folds the route-wide punishment together with
+    the capability-specific one, so callers never have to remember both exist.
+    """
     base = state.store.metrics()
-    for key, until in state.proxy.cooldowns.items():
+    for key in list(state.proxy.cooldowns):
+        until = state.proxy.cooldowns.until(key, capability)
         if key in base:
             # `replace` and not a positional `type(m)(...)`: rebuilding by hand
             # leaves out any new Metrics field (e.g. quality_measured_at), and a
