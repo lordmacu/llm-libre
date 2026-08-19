@@ -345,7 +345,8 @@ providers:
 
   - id: kilo
     tier: free
-    priority: 1
+    priority: 2   # behind BOTH the branded proxies (0) and their scarce
+                  # reserve routes (1, see catalog.SUSTAINED_RATE_FLOOR)
     dialect: openai
     base_url: https://api.kilo.ai/api/gateway
     api_key_env: KILO_API_KEY          # OPTIONAL: the anonymous tier works without a key

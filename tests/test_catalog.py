@@ -2,7 +2,7 @@ import json
 import logging
 from pathlib import Path
 
-from llm_libre.catalog import normalize
+from llm_libre.catalog import SUSTAINED_RATE_FLOOR, normalize
 from llm_libre.models import Capabilities
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -319,3 +319,71 @@ def test_against_the_real_chatgpt_proxy_catalogue():
     assert len(routes) == 5
     assert all(r.provider == "chatgpt" for r in routes)
     assert all(r.tier == "free" for r in routes)
+
+
+# --- Scarce routes go behind their provider's abundant ones, 2026-08-19 -------
+#
+# Measured against grok-proxy: it publishes 33 models that llm-libre treated as
+# 33 interchangeable routes, and their real sustained capacity differs by three
+# orders of magnitude. Seventeen of them (the `grok-plugins-*` file agents and
+# `imagine-agent-mode*`) carry 999 requests/hour EACH, on independent windows --
+# ~17,000/h between them -- while `grok-3` carries 30 per 24h and `grok-4` seven.
+# All of them are the same Grok 4.5 underneath.
+#
+# Treating those alike is expensive in both directions. The quality battery costs
+# five requests per route per run, which is 17% of grok-3's ENTIRE daily budget
+# for one run, and real traffic then finds it exhausted. Meanwhile the abundant
+# pool -- same model, effectively unmetered -- sits idle.
+#
+# So a route that cannot sustain a request a minute is a RESERVE, not a workhorse:
+# it keeps its provider's band but sorts after the abundant ones in it.
+
+def _rated_model(mid, rate=None):
+    m = {"id": mid, "pricing": {"prompt": "0"}, "context_length": 1000,
+         "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+         "supported_parameters": ["tools"], "top_provider": {"max_completion_tokens": 100}}
+    if rate is not None:
+        m["requests_per_hour"] = rate
+    return m
+
+
+def test_an_abundant_route_keeps_its_providers_priority():
+    routes = normalize("grok", {"data": [_rated_model("grok-plugins-4p6-excel", rate=999)]},
+                       priority=0)
+    assert routes[0].priority == 0
+
+
+def test_a_scarce_route_is_demoted_behind_them():
+    routes = normalize("grok", {"data": [_rated_model("grok-3", rate=1.25)]}, priority=0)
+    assert routes[0].priority == 1
+
+
+def test_a_route_that_declares_no_rate_is_not_demoted():
+    """Every provider that does not publish this field must behave exactly as
+    before -- the demotion is opt-in evidence, not an assumption."""
+    routes = normalize("kilo", {"data": [_rated_model("x:free")]}, priority=1)
+    assert routes[0].priority == 1
+
+
+def test_the_demotion_is_relative_so_a_scarce_premium_still_leads_the_next_band():
+    """grok's scarce routes drop behind grok's abundant ones, NOT behind Kilo:
+    they are still premium, just held in reserve."""
+    scarce = normalize("grok", {"data": [_rated_model("grok-3", rate=1.25)]}, priority=0)[0]
+    kilo = normalize("kilo", {"data": [_rated_model("x:free")]}, priority=2)[0]
+    assert scarce.priority < kilo.priority
+
+
+def test_the_threshold_sits_at_one_request_a_minute():
+    """A route that can sustain a request a minute can carry real traffic; one
+    that cannot is a reserve. The measured populations are nowhere near this line
+    -- 999/h against 1.25/h -- so its exact value is not load-bearing."""
+    assert SUSTAINED_RATE_FLOOR == 60
+    assert normalize("p", {"data": [_rated_model("a", rate=60)]}, priority=0)[0].priority == 0
+    assert normalize("p", {"data": [_rated_model("b", rate=59)]}, priority=0)[0].priority == 1
+
+
+def test_a_malformed_rate_does_not_break_discovery():
+    """The field comes from a provider's JSON: it can be anything."""
+    for bad in ("mucho", None, [], {}):
+        routes = normalize("grok", {"data": [_rated_model("m", rate=bad)]}, priority=0)
+        assert routes and routes[0].priority == 0, bad

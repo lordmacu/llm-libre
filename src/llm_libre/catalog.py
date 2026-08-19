@@ -68,6 +68,42 @@ _DISCARD = re.compile("|".join(_SPECIALITY + _META_ROUTER), re.IGNORECASE)
 # `is_reserved_id` covers the whole PATTERN, not a list of ids known today.
 RESERVED_IDS = frozenset({"auto"})
 
+# Sustained requests per hour below which a route is a RESERVE, not a workhorse:
+# it keeps its provider's band but sorts after the abundant routes in it.
+#
+# Measured against grok-proxy on 2026-08-19. It publishes 33 models that this
+# gateway treated as 33 interchangeable routes, while their real sustained
+# capacity differs by three orders of magnitude: the `grok-plugins-*` file agents
+# and `imagine-agent-mode*` carry 999 requests/hour EACH on independent windows
+# (~17,000/h between them), whereas `grok-3` carries 30 per 24h and `grok-4`
+# seven. Underneath they are the same Grok 4.5.
+#
+# Treating them alike is expensive in both directions. The quality battery costs
+# five requests per route per run -- 17% of grok-3's ENTIRE daily budget for a
+# single run -- so real traffic arrives to find it exhausted, while the abundant
+# pool of the same model sits idle. On the day this was measured the gateway's own
+# probing had consumed 19 of grok-3's 30 daily requests.
+#
+# One request a minute is the line: above it a route can carry real traffic,
+# below it it cannot. The measured populations are nowhere near that boundary
+# (999/h against 1.25/h), so the exact value is not load-bearing.
+SUSTAINED_RATE_FLOOR = 60
+
+
+def _is_scarce(m: dict) -> bool:
+    """True if the provider publishes a sustained rate below the floor.
+
+    Absent field -> False: every provider that does not publish this keeps its
+    previous behaviour exactly. This is opt-in EVIDENCE, never an assumption --
+    the same principle as the rest of this module, where what a provider says
+    about itself is what counts. The value arrives as provider JSON, so anything
+    non-numeric is treated as "did not say".
+    """
+    rate = m.get("requests_per_hour")
+    if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        return False
+    return rate < SUSTAINED_RATE_FLOOR
+
 
 def is_reserved_id(id_: str) -> bool:
     """True if `id_` collides with "auto" or with any compound alias
@@ -171,7 +207,10 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
             model_id=m["id"],
             tier="free",
             capabilities=capabilities,
-            priority=priority,
+            # A scarce route sorts one band behind its provider's abundant ones --
+            # still ahead of the next provider, because it is held in reserve, not
+            # demoted for being worse. See SUSTAINED_RATE_FLOOR.
+            priority=priority + 1 if _is_scarce(m) else priority,
         ))
     return routes
 

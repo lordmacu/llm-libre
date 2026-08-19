@@ -113,9 +113,12 @@ def test_chatgpt_has_priority_zero_and_is_free():
     assert chatgpt.priority == 0
 
 
-def test_kilo_sits_at_priority_one():
+def test_kilo_sits_behind_the_branded_band_and_its_reserve():
     kilo = next(p for p in load(YAML, {}) if p.id == "kilo")
-    assert kilo.priority == 1
+    # 2 since the 2026-08-19 experiment: 0 is the branded proxies, 1 is the band
+    # their SCARCE routes are demoted into (catalog.SUSTAINED_RATE_FLOOR), and Kilo
+    # is the safety net behind both.
+    assert kilo.priority == 2
 
 
 def test_minimax_sits_at_priority_two():
@@ -528,7 +531,9 @@ def test_the_paid_tier_is_untouched_by_the_experiment():
     there through `tier`, never through `priority`."""
     providers = _providers()
     assert providers["minimax"].tier == "paid"
-    assert providers["minimax"].priority > providers["kilo"].priority
+    # NOT via priority -- it now TIES with kilo's 2, and that is precisely the
+    # point: `tier` is what keeps it last, and no priority number can change that.
+    assert providers["minimax"].priority >= providers["kilo"].priority
 
 
 def test_no_branded_proxy_is_cut_off_by_its_own_timeout_before_two_minutes():
