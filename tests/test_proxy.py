@@ -1502,3 +1502,20 @@ async def test_the_scopes_are_visible_for_diagnostics():
     p = _proxy(lambda req: httpx.Response(429), providers=("grok",))
     await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=0.0)
     assert set(p.cooldowns.scopes("grok/imagine")) == {"images"}
+
+
+async def test_the_image_503_reports_when_IMAGES_comes_back_not_chat():
+    """`next_release` is the one number a client can act on, and it was reading the
+    CHAT view: an images-scoped punishment left it at 0.0, which says "retry now"
+    about a bucket that resets tomorrow."""
+    p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "1800"}),
+               providers=("grok",))
+    r = await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=0.0)
+    assert r.status == 503
+    assert r.json["error"]["next_release"] == pytest.approx(1800.0)
+
+
+async def test_the_chat_503_still_reports_the_chat_cooldown():
+    p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "1800"}))
+    r = await p.complete([_route("a:free")], BODY, now=0.0)
+    assert r.json["error"]["next_release"] == pytest.approx(1800.0)

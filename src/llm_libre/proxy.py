@@ -608,8 +608,8 @@ class Proxy:
         # Only the cooldowns of THIS request's routes count: the proxy outlives
         # a single call and may have punished routes unrelated to this chain,
         # whose expiry is of no use to whoever is asking now.
-        request_cooldowns = {c: v for c, v in self.cooldowns.items()
-                                if c in request_keys}
+        request_cooldowns = {c: self.cooldowns.until(c, CHAT) for c in request_keys
+                             if self.cooldowns.until(c, CHAT)}
         return ProxyResponse(503, {"error": {
             "message": "no routes available",
             "detail": last_error,
@@ -727,8 +727,11 @@ class Proxy:
                 self._react_to_non_429_failure(route, now, punish_at, is_probe=False)
             last_error = last_error or f"HTTP {code}"
 
-        request_cooldowns = {c: v for c, v in self.cooldowns.items()
-                             if c in request_keys}
+        # The IMAGES scope, not the chat view: an images-scoped punishment left this
+        # at 0.0, which tells a client "retry now" about a bucket that resets
+        # tomorrow. `until` folds in the route-wide punishment too.
+        request_cooldowns = {c: self.cooldowns.until(c, IMAGES) for c in request_keys
+                             if self.cooldowns.until(c, IMAGES)}
         return ProxyResponse(503, {"error": {
             "message": "no routes available",
             "detail": last_error,
