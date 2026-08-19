@@ -90,17 +90,36 @@ RESERVED_IDS = frozenset({"auto"})
 SUSTAINED_RATE_FLOOR = 60
 
 
-def _is_scarce(m: dict) -> bool:
-    """True if the provider publishes a sustained rate below the floor.
+def _is_scarce(m: dict, measured: float | None = None) -> bool:
+    """True if this route's sustained rate is known to be below the floor.
 
-    Absent field -> False: every provider that does not publish this keeps its
-    previous behaviour exactly. This is opt-in EVIDENCE, never an assumption --
-    the same principle as the rest of this module, where what a provider says
-    about itself is what counts. The value arrives as provider JSON, so anything
-    non-numeric is treated as "did not say".
+    Two sources, in order of authority. What the PROVIDER PUBLISHES
+    (`requests_per_hour`) wins whenever it is there: it is a statement about
+    policy, it covers the whole population rather than the slice we happened to
+    send, and it is available before a single request is made.
+
+    `measured` is Storage.rate_budgets' inference, and it exists for everyone
+    else -- which is most of them. DeepSeek, the chatgpt proxy and Kilo's free
+    pool publish nothing at all, so before this the floor could only ever demote
+    grok routes, and a genuinely tiny allowance elsewhere stayed invisible until
+    it started failing under real traffic.
+
+    THE CALLER MUST PASS ONLY A MEASURED ALLOWANCE (RateBudget.measured), never
+    the floor. `RateBudget.floor` is capped by how much traffic we sent, so an
+    idle route reads low for want of demand -- feeding that here would demote
+    routes for being unused, which is both wrong and self-reinforcing, since a
+    demoted route receives even less traffic.
+
+    Absent both -> False: a provider that publishes nothing AND has never been
+    seen refusing keeps its previous behaviour exactly. Opt-in evidence, never an
+    assumption -- the same principle as the rest of this module. The published
+    value arrives as provider JSON, so anything non-numeric is treated as "did
+    not say".
     """
     rate = m.get("requests_per_hour")
     if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+        rate = measured
+    if rate is None:
         return False
     return rate < SUSTAINED_RATE_FLOOR
 
@@ -131,7 +150,8 @@ def _is_alias(m: dict) -> bool:
 def normalize(provider: str, data: dict | list, priority: int = 100,
               default_capabilities: Capabilities | None = None,
               exceptions: dict | None = None,
-              emulates_tools: bool = False) -> list[Route]:
+              emulates_tools: bool = False,
+              measured_rates: dict[str, float] | None = None) -> list[Route]:
     """Turn a /models response into usable free chat routes.
 
     `priority` belongs to the PROVIDER (see Provider.priority), not to anything
@@ -210,7 +230,8 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
             # A scarce route sorts one band behind its provider's abundant ones --
             # still ahead of the next provider, because it is held in reserve, not
             # demoted for being worse. See SUSTAINED_RATE_FLOOR.
-            priority=priority + 1 if _is_scarce(m) else priority,
+            priority=priority + 1 if _is_scarce(
+                m, (measured_rates or {}).get(f"{provider}/{m['id']}")) else priority,
         ))
     return routes
 

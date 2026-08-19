@@ -143,3 +143,92 @@ class Metrics:
 # ttft is the neutral default by definition, not a measurement.
 NEUTRAL_METRICS = Metrics(NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS, 0.0,
                           ttft_measured=False)
+
+
+@dataclass(frozen=True)
+class RateBudget:
+    """How much of a route's rate limit is left, inferred from our own history.
+
+    Providers that publish their allowance (grok sends `requests_per_hour`) are
+    already handled in catalog.py. This is for everyone else: DeepSeek, the
+    chatgpt proxy, Kilo's free pool -- none of them say how much they will take
+    before refusing, so the only way to know is to remember what happened.
+
+    The unit is REQUESTS PER HOUR, deliberately the same one providers publish,
+    so a measured number and an advertised one are directly comparable and both
+    can be read against catalog.SUSTAINED_RATE_FLOOR.
+
+    Per hour rather than "per replenishment window" because the window itself
+    cannot be measured honestly from here: the gateway backs off after a 429
+    (proxy._punish_429), so the gap from a refusal to the next success measures
+    OUR cooldown, not the provider's reset. Estimating a window from that would
+    dress up a number we control as a number they control.
+
+    The three fields answer three different questions, and conflating them is
+    the mistake this class exists to prevent:
+
+      per_hour  -- what we believe the allowance IS. Only ever set from an
+                   observed exhaustion: the route accepted N requests and then
+                   said 429. `None` means we have never pushed this route to its
+                   limit, which is the common case (measured 2026-08-19: 60 of
+                   69 live routes had never once been refused).
+      floor     -- what we have SEEN it sustain in a clean hour. Always
+                   available, always a LOWER BOUND: it is capped by how much
+                   traffic we happened to send, so a quiet route reads low for
+                   want of demand, not for want of capacity.
+      used      -- successes in the last hour. The consumption side.
+
+    `remaining` is only meaningful when `per_hour` is known, and returns None
+    otherwise rather than guessing -- the same rule as `quality_measured_at`.
+    """
+    per_hour: float | None      # measured allowance; None = never seen exhausted
+    used: int                   # successful requests in the trailing hour
+    floor: int                  # most ever sustained in an hour with no refusal
+    episodes: int               # exhaustions the estimate rests on (0 = none)
+    # Median seconds from a refusal to the route's next SUCCESS. An UPPER BOUND,
+    # never the reset itself: the gateway backs off after a 429
+    # (proxy._punish_429), so what this measures is "it had recovered by the time
+    # we asked again" -- the true reset happened at some unknown earlier moment.
+    # Useful exactly as that ("it was usable again within X"), misleading if read
+    # as the provider's window. None while no refusal has been followed by a
+    # success. When a provider states `Retry-After` the proxy already honours it
+    # directly, which is a real answer and does not need inferring.
+    recovery_s: float | None = None
+
+    @property
+    def remaining(self) -> float | None:
+        """How many requests are believed to be left this hour, or None while the
+        allowance is still unknown. Never negative: once consumption passes the
+        estimate the honest answer is "none left", not a negative budget -- the
+        estimate is a median over episodes, so exceeding it is expected."""
+        if self.per_hour is None:
+            return None
+        return max(0.0, self.per_hour - self.used)
+
+    @property
+    def exhausts_in_s(self) -> float | None:
+        """Seconds until the allowance runs out AT THE CURRENT RATE, or None when
+        that cannot be said honestly -- either the allowance was never measured,
+        or nothing is being consumed right now (an idle route never runs out, and
+        dividing by a zero rate would claim it runs out instantly).
+
+        This is the forward-looking half of the pair: `remaining` says how much is
+        left, this says how long that lasts if traffic keeps behaving as it has
+        for the past hour. It is a projection from one hour of history, so it
+        moves as traffic moves -- which is the point. It answers "this one is
+        nearly done" before the 429 arrives, rather than after."""
+        left = self.remaining
+        if left is None or self.used <= 0:
+            return None
+        return left / (self.used / 3600.0)
+
+    @property
+    def measured(self) -> bool:
+        """True when `per_hour` rests on an observed refusal rather than on
+        nothing. Callers that change ROUTING must gate on this: `floor` looks
+        like a small allowance for any route we simply never pushed, and
+        demoting on that would punish routes for being idle."""
+        return self.per_hour is not None
+
+
+UNKNOWN_BUDGET = RateBudget(per_hour=None, used=0, floor=0, episodes=0)

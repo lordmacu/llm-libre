@@ -87,6 +87,12 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     always fail.
     """
     known = {p.id for p in providers}
+    # What we have MEASURED about allowances nobody publishes, for catalog's
+    # scarcity check. Only the routes whose limit was actually observed are
+    # passed: `RateBudget.floor` is bounded by our own demand, so handing it over
+    # would demote routes for being idle -- see _is_scarce.
+    measured_rates = {k: b.per_hour for k, b in store.rate_budgets(now).items()
+                      if b.measured}
     deactivated = store.deactivate_unregistered_providers(known)
     if deactivated:
         log.warning(
@@ -122,7 +128,8 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
             continue
         try:
             fresh = normalize(p.id, r.json(), p.priority, p.default_capabilities,
-                              p.exceptions, emulates_tools=p.emulates_tools)
+                              p.exceptions, emulates_tools=p.emulates_tools,
+                              measured_rates=measured_rates)
         except (ValueError, TypeError, AttributeError, KeyError) as e:
             # A non-JSON body (ValueError/JSONDecodeError) or JSON of an
             # unexpected shape -- e.g. an auth error disguised as a 200, which

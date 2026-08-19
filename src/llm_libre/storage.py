@@ -1,7 +1,9 @@
+import bisect
 import sqlite3
+from statistics import median
 
 from llm_libre.models import (NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS,
-                               Capabilities, Metrics, Route)
+                              Capabilities, Metrics, RateBudget, Route)
 
 # The schema below is the CURRENT shape. A live database (the /datos volume, which
 # deliberately survives redeploys) may still carry the previous Spanish-named
@@ -25,7 +27,8 @@ CREATE INDEX IF NOT EXISTS ix_probes ON probes(key, kind, at DESC);
 CREATE TABLE IF NOT EXISTS events (
     key TEXT NOT NULL, at REAL NOT NULL, ok INTEGER NOT NULL,
     ttft_ms INTEGER, http_code INTEGER, latency_ms INTEGER,
-    is_client_error INTEGER NOT NULL DEFAULT 0);
+    is_client_error INTEGER NOT NULL DEFAULT 0,
+    capability TEXT NOT NULL DEFAULT 'chat');
 CREATE INDEX IF NOT EXISTS ix_events ON events(key, at DESC);
 
 CREATE TABLE IF NOT EXISTS paid_usage (
@@ -69,6 +72,41 @@ _SPANISH_VALUES = [("routes", "tier", "gratis", "free"), ("routes", "tier", "pag
                    ("probes", "kind", "calidad", "quality")]
 
 WINDOW = 50  # how many recent observations weigh in reliability and latency
+
+# The unit every rate estimate is expressed in. One hour because that is what
+# providers themselves publish (grok sends `requests_per_hour`), so a measured
+# allowance and an advertised one land in the same unit and can be compared
+# against catalog.SUSTAINED_RATE_FLOOR without converting anything.
+RATE_WINDOW_S = 3600.0
+
+# How far back exhaustions are read. A limit measured three weeks ago describes a
+# policy the provider may have changed since; free tiers are re-tuned often and
+# without notice. Seven days is long enough to collect several episodes on a
+# route that only exhausts occasionally, short enough that the estimate follows
+# the provider rather than the archive. It sits inside prune()'s 30-day
+# retention, so this bound -- not the table -- is what decides the answer.
+RATE_LOOKBACK_S = 7 * 86400.0
+
+# Below this, a 429 is read as TRANSIENT BACKPRESSURE rather than an exhausted
+# allowance, and is not allowed to inform the estimate.
+#
+# Not every 429 means "you have spent your quota". Providers also send it when
+# they are momentarily saturated or when too many requests arrive at once, and
+# that refusal says nothing about a budget. The two are told apart by what
+# happens NEXT: a spent allowance stays spent until it replenishes, while
+# backpressure clears at once.
+#
+# Measured 2026-08-19 against 10,026 live events, this was not a hypothetical.
+# The first version of this estimator conflated them and produced arithmetic that
+# cannot be true: mistral-medium was credited with an allowance of 4/h on a route
+# that had already been observed sustaining 50 clean requests in a single hour,
+# and both poolside routes came out the same way. Every one of those bogus
+# episodes had recovered in ZERO seconds; every genuine one -- the grok image
+# agents, perplexity -- took ten minutes or more.
+#
+# 60s is placed in the empty middle of that split (0s against 600s+), so its
+# exact value is not load-bearing.
+TRANSIENT_REFUSAL_S = 60.0
 
 # How many quality-battery RUNS are averaged into `quality`.
 #
@@ -221,6 +259,15 @@ class Storage:
         if "is_client_error" not in event_columns:
             self._con.execute(
                 "ALTER TABLE events ADD COLUMN is_client_error INTEGER NOT NULL DEFAULT 0")
+        if "capability" not in event_columns:
+            # DEFAULT 'chat' because that is what every pre-existing row WAS: image
+            # generation arrived later and, until this column, produced no separable
+            # trace. The default is honest for the overwhelming majority and merely
+            # imprecise for a handful of grok image rows, which rate_budgets treats
+            # as chat -- an over-count on the abundant capability, never an
+            # under-count that would starve routing.
+            self._con.execute(
+                "ALTER TABLE events ADD COLUMN capability TEXT NOT NULL DEFAULT 'chat'")
         route_columns = self._columns("routes")
         if "priority" not in route_columns:
             self._con.execute(
@@ -350,7 +397,8 @@ class Storage:
     def record_event(self, key: str, ok: bool, ttft_ms: int,
                      http_code: int, timestamp: float,
                      latency_ms: int | None = None,
-                     is_client_error: bool = False) -> None:
+                     is_client_error: bool = False,
+                     capability: str = "chat") -> None:
         """`ttft_ms` is only written by whoever could measure a real
         time-to-first-token (the streaming path); everyone else passes 0 and sends
         their round-trip in `latency_ms`. See the comment at the top of the file.
@@ -371,9 +419,10 @@ class Storage:
         observations."""
         self._con.execute(
             """INSERT INTO events (key, at, ok, ttft_ms, http_code, latency_ms,
-                   is_client_error)
-               VALUES (?,?,?,?,?,?,?)""",
-            (key, timestamp, int(ok), ttft_ms, http_code, latency_ms, int(is_client_error)))
+                   is_client_error, capability)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (key, timestamp, int(ok), ttft_ms, http_code, latency_ms,
+             int(is_client_error), capability))
         self._con.commit()
 
     def metrics(self) -> dict[str, Metrics]:
@@ -456,6 +505,66 @@ class Storage:
         if not rows:
             return NEUTRAL_RELIABILITY
         return sum(f[0] for f in rows) / len(rows)
+
+    def rate_budgets(self, now: float,
+                     capability: str = "chat") -> dict[str, RateBudget]:
+        """Infer each route's hourly allowance from what it has already done to us.
+
+        The provider's own number is better evidence and takes precedence
+        wherever it exists (catalog._is_scarce reads `requests_per_hour` off
+        /models). This covers the majority that publish nothing.
+
+        THE ESTIMATE. A route's allowance is only ever inferred from an
+        EXHAUSTION: a 429 whose immediately preceding event was a success. That
+        edge is the informative one -- it is the moment the provider drew the
+        line, so the successes in the hour behind it are, near enough, the
+        allowance. The refusals that FOLLOW it carry no capacity information at
+        all (the budget was already spent), and averaging them in would drag
+        every estimate toward zero: measured 2026-08-19, z-ai/glm-5.2 had 55
+        refusals but only 11 edges, so 44 of them would have been counted as
+        evidence of an allowance they say nothing about.
+
+        An edge with ZERO successes in the trailing hour is DISCARDED rather than
+        recorded as an allowance of zero. It means the refusal came from a window
+        longer than an hour -- a daily quota, or an account-level mute like the
+        one DeepSeek applied on 2026-08-19 -- and "this route accepts nothing per
+        hour" is the wrong reading of "this route is serving a 24h penalty".
+
+        The median, not the minimum: an edge whose hour happens to straddle a
+        provider-side reset undercounts, and one bad straddle should not become
+        the permanent verdict.
+
+        THE FLOOR is a different claim and is kept in a different field. It is the
+        most successes seen in any single hour with no refusal in it -- a genuine
+        LOWER bound, and one bounded by our own demand rather than by the
+        provider's generosity. It exists so an unmeasured route can still say
+        something true ("at least this much") without that being mistaken for an
+        allowance. Nothing that changes routing may read it: 60 of 69 live routes
+        have never been refused, and demoting them for a low floor would punish
+        every route we simply never pushed.
+
+        PER CAPABILITY, for the same reason punishments are (proxy.Cooldowns): an
+        allowance belongs to a resource, and chat and image generation are not the
+        same resource. Measured 2026-08-19, mixing them was not a subtlety but the
+        dominant error -- grok's three `imagine` agents carry ~999 chat requests an
+        hour against a handful of images, so their image refusals divided by their
+        chat successes produced allowances of 6 to 8/h for routes observed
+        sustaining 12 to 14, and the coherence backstop below had to discard all
+        three. Counting each capability against its own successes is what turns
+        those episodes into measurements instead of merely detectable noise.
+        """
+        floor_at = now - RATE_LOOKBACK_S
+        per: dict[str, list[tuple[float, int, int]]] = {}
+        for key, at, ok, code in self._con.execute(
+                """SELECT key, at, ok, http_code FROM events
+                   WHERE at >= ? AND capability = ? ORDER BY at""",
+                (floor_at, capability)):
+            per.setdefault(key, []).append((at, ok, code))
+
+        out: dict[str, RateBudget] = {}
+        for (key,) in self._con.execute("SELECT key FROM routes WHERE active = 1"):
+            out[key] = _budget(per.get(key, ()), now)
+        return out
 
     def has_liveness_evidence(self, key: str, now: float) -> bool:
         """For `/health` (Task 13, round 6 review, Part 2; corrected in round 7)
@@ -625,3 +734,65 @@ class Storage:
         self._con.execute("DELETE FROM probes WHERE at < ?", (before,))
         self._con.execute("DELETE FROM events WHERE at < ?", (before,))
         self._con.commit()
+
+
+def _budget(events, now: float) -> RateBudget:
+    """The per-route half of Storage.rate_budgets -- see its docstring for why
+    each of these three numbers is computed the way it is.
+
+    `events` is that route's (at, ok, http_code) rows in ascending time.
+    """
+    successes = [at for at, ok, _ in events if ok]
+    refusals = [at for at, _, code in events if code == 429]
+
+    # How long each refusal took to clear. Computed FIRST because it is what
+    # separates a spent allowance from momentary backpressure -- see
+    # TRANSIENT_REFUSAL_S. An upper bound by construction (RateBudget.recovery_s).
+    # A refusal with no later success is skipped rather than counted as infinite:
+    # it means the history ends mid-outage, not that the route never came back.
+    def _cleared_after(at: float) -> float | None:
+        nxt = bisect.bisect_left(successes, at)
+        return successes[nxt] - at if nxt < len(successes) else None
+
+    recoveries = [g for g in (_cleared_after(at) for at in refusals) if g is not None]
+    recovery_s = median(recoveries) if recoveries else None
+
+    # Exhaustion edges: a refusal that (a) immediately followed a success, so it
+    # marks where the provider drew the line, and (b) did NOT clear at once, so it
+    # was a budget and not backpressure.
+    samples = []
+    previous_ok = False
+    for at, ok, code in events:
+        if code == 429 and previous_ok:
+            cleared = _cleared_after(at)
+            if cleared is not None and cleared >= TRANSIENT_REFUSAL_S:
+                spent = bisect.bisect_left(successes, at) - bisect.bisect_left(
+                    successes, at - RATE_WINDOW_S)
+                if spent > 0:      # a zero means a longer window, not a zero budget
+                    samples.append(spent)
+        previous_ok = bool(ok)
+
+    per_hour = median(samples) if samples else None
+
+    # The floor: the busiest hour that contains no refusal at all.
+    floor = 0
+    for i, start in enumerate(successes):
+        end = start + RATE_WINDOW_S
+        if bisect.bisect_left(refusals, start) != bisect.bisect_left(refusals, end):
+            continue               # a refusal falls inside: this hour proves nothing
+        floor = max(floor, bisect.bisect_left(successes, end) - i)
+
+    # Backstop: an allowance BELOW a hard lower bound is arithmetic that cannot be
+    # true -- the route demonstrably sustained `floor` requests in one clean hour,
+    # so its allowance is at least that. When the two disagree the estimate is
+    # measuring something other than a budget, and the honest report is that we do
+    # not know rather than a number the same data refutes. TRANSIENT_REFUSAL_S
+    # removes the cause that was actually observed; this catches whatever else
+    # produces the same contradiction.
+    if per_hour is not None and per_hour < floor:
+        per_hour = None
+        samples = []
+
+    used = len(successes) - bisect.bisect_left(successes, now - RATE_WINDOW_S)
+    return RateBudget(per_hour=per_hour, used=used, floor=floor,
+                      episodes=len(samples), recovery_s=recovery_s)

@@ -711,9 +711,16 @@ class Proxy:
             # ttft stays 0 exactly as on the non-streaming chat path: nothing here
             # measured a time-to-first-token, and writing the round-trip into that
             # column is what made the p50 meaningless before (see storage.py).
+            # `capability=IMAGES`: this is generate_images, and an allowance
+            # belongs to the resource it was spent on. A grok agent carries ~999
+            # chat requests an hour against a handful of images, so filing an
+            # image refusal against chat traffic is how Storage.rate_budgets
+            # ended up computing allowances a route had already been observed
+            # exceeding -- see its docstring.
             self.store.record_event(route.key, success, 0, code, now,
                                     latency_ms=latency_ms,
-                                    is_client_error=_is_client_error(code))
+                                    is_client_error=_is_client_error(code),
+                                    capability=IMAGES)
 
             if success:
                 self._suspicions.pop(route.key, None)

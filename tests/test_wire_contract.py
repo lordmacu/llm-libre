@@ -91,6 +91,13 @@ def test_ranking_row_keys(client):
         # 2026-08-19, when punishments became scoped: `cooldown_until` alone
         # cannot distinguish "out of image quota" from "route is down".
         "cooldowns",
+        # The inferred CHAT allowance, added 2026-08-19 for the providers that
+        # publish no rate limit of their own. Same measured/assumed split as
+        # `quality`: `rate_per_hour` is null until an actual refusal has been
+        # seen, and `rate_floor` carries the lower bound separately so the two
+        # can never be confused.
+        "rate_per_hour", "rate_measured", "rate_floor", "rate_used_last_hour",
+        "rate_remaining", "rate_exhausts_in_s", "rate_recovery_s", "rate_episodes",
         "tools", "vision",
         # image OUTPUT -- a separate axis from `vision`, which is image input
         "images",
@@ -308,7 +315,12 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         "key", "kind", "at", "ok", "latency_ms", "ttft_ms", "http_code",
         "cases_passed", "cases_total"]
     assert [f[1] for f in con.execute("PRAGMA table_info(events)")] == [
-        "key", "at", "ok", "ttft_ms", "http_code", "latency_ms", "is_client_error"]
+        "key", "at", "ok", "ttft_ms", "http_code", "latency_ms", "is_client_error",
+        # Also added after the rename, for Storage.rate_budgets: an allowance
+        # belongs to the resource it was spent on, so an image refusal must not be
+        # counted against chat traffic. Old rows default to 'chat', which is what
+        # they were -- image generation arrived later.
+        "capability"]
     assert [f[1] for f in con.execute("PRAGMA table_info(paid_usage)")] == [
         "api_key", "day", "requests"]
 

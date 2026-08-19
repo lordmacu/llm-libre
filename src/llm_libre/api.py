@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llm_libre.assets import content_disposition, localise
 from llm_libre.auth import RateLimiter, client_ip
-from llm_libre.models import NEUTRAL_METRICS, RouteRequest
+from llm_libre.models import NEUTRAL_METRICS, UNKNOWN_BUDGET, RouteRequest
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
                                ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
                                USAGE_DOCS, VERSION, customise_openapi)
@@ -442,9 +442,15 @@ def create_app(state: State) -> FastAPI:
         # exposed per row for diagnostics; what changes is the ORDER.
         active = sorted(state.store.active_routes(),
                         key=lambda r: sort_key(r, metrics[r.key], "balanced", now))
+        # What we have inferred about each route's CHAT allowance, for the
+        # providers that publish nothing (see Storage.rate_budgets). Chat because
+        # that is the capability this table orders by; an image allowance is a
+        # different resource and would answer a different question.
+        budgets = state.store.rate_budgets(now, capability=CHAT)
         rows = []
         for r in active:
             m = metrics[r.key]
+            b = budgets.get(r.key, UNKNOWN_BUDGET)
             measured = m.quality_measured_at is not None
             rows.append({"key": r.key, "tier": r.tier, "priority": r.priority,
                          "score": round(score(m, "balanced"), 4),
@@ -459,6 +465,28 @@ def create_app(state: State) -> FastAPI:
                          "last_quality_probe": _iso(m.quality_measured_at),
                          "last_probe": _iso(m.last_probe_at),
                          "reliability": round(m.reliability, 3),
+                         # What we believe this route's hourly allowance is, and
+                         # how much of it is left -- inferred from our own history
+                         # for the providers that do not publish one. The same
+                         # measured/assumed split as `quality` above, and for the
+                         # same reason: `rate_per_hour` is null until the route has
+                         # actually been seen refusing, and `rate_floor` ("we have
+                         # seen it sustain at least this") is reported separately
+                         # so a lower bound is never mistaken for an allowance.
+                         "rate_per_hour": b.per_hour,
+                         "rate_measured": b.measured,
+                         "rate_floor": b.floor,
+                         "rate_used_last_hour": b.used,
+                         "rate_remaining": b.remaining,
+                         # Seconds until the allowance runs out at the current
+                         # rate, and how long refusals have taken to clear. Both
+                         # null while unknown rather than zero, which would read
+                         # as "runs out now" and "recovers instantly".
+                         "rate_exhausts_in_s": (round(b.exhausts_in_s)
+                                                if b.exhausts_in_s is not None else None),
+                         "rate_recovery_s": (round(b.recovery_s)
+                                             if b.recovery_s is not None else None),
+                         "rate_episodes": b.episodes,
                          # Two different numbers on purpose: ttft_p50_ms is
                          # time to first token (only streaming measures it, and
                          # it is what weighs in the score); latency_p50_ms is

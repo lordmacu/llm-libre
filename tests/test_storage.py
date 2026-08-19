@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from llm_libre.storage import QUALITY_RUNS, Storage
-from llm_libre.models import Capabilities, Route
+from llm_libre.models import Capabilities, RateBudget, Route
 
 
 def _route(model="a:free", provider="kilo", tools=True, priority=100):
@@ -644,3 +644,142 @@ def test_the_store_knows_when_the_battery_last_ran(store):
     store.record_probe("kilo/a:free", "quality", True, 0, 0, 200, 5, 5, 300.0)
     store.record_probe("kilo/b:free", "quality", True, 0, 0, 200, 5, 5, 900.0)
     assert store.last_quality_probe_at() == 900.0
+
+
+# --- rate_budgets: what the gateway can infer about an allowance nobody publishes
+
+
+def _spend(store, key, count, start, step=10.0, capability="chat"):
+    """`count` successful requests, `step` seconds apart, from `start`."""
+    for i in range(count):
+        store.record_event(key, True, 50, 200, start + i * step,
+                           capability=capability)
+    return start + count * step
+
+
+def test_an_allowance_is_only_inferred_from_a_refusal_that_stuck(tmp_path):
+    """The estimate rests on exhaustions, and a 429 that clears at once is not one.
+
+    Both routes below are refused after the same 5 successes. The difference is
+    what happens NEXT: `spent` stays refused for a quarter of an hour, `busy`
+    succeeds again three seconds later. Only the first is evidence about a budget
+    -- see TRANSIENT_REFUSAL_S for the live measurement that forced the
+    distinction.
+    """
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    store.upsert_routes([_route("spent:free"), _route("busy:free")], timestamp=0.0)
+
+    at = _spend(store, "kilo/spent:free", 5, 1000.0)
+    store.record_event("kilo/spent:free", False, 0, 429, at)
+    store.record_event("kilo/spent:free", True, 50, 200, at + 900.0)
+
+    at = _spend(store, "kilo/busy:free", 5, 1000.0)
+    store.record_event("kilo/busy:free", False, 0, 429, at)
+    store.record_event("kilo/busy:free", True, 50, 200, at + 3.0)
+
+    budgets = store.rate_budgets(now=2000.0)
+    assert budgets["kilo/spent:free"].per_hour == 5
+    assert budgets["kilo/spent:free"].measured is True
+    assert budgets["kilo/busy:free"].per_hour is None
+    assert budgets["kilo/busy:free"].measured is False
+
+
+def test_an_allowance_below_a_proven_floor_is_reported_as_unknown(tmp_path):
+    """A number the same data refutes is not reported as a measurement.
+
+    The route sustains 30 requests in one clean hour, so its allowance is at
+    least 30. A later refusal that would imply 3/h contradicts that outright --
+    it is measuring something other than this budget, and the honest answer is
+    that we do not know.
+    """
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    store.upsert_routes([_route("a:free")], timestamp=0.0)
+
+    _spend(store, "kilo/a:free", 30, 1000.0, step=60.0)     # a clean, busy hour
+    later = 1000.0 + 10 * 3600.0
+    at = _spend(store, "kilo/a:free", 3, later)
+    store.record_event("kilo/a:free", False, 0, 429, at)
+    store.record_event("kilo/a:free", True, 50, 200, at + 900.0)
+
+    b = store.rate_budgets(now=later + 7200.0)["kilo/a:free"]
+    assert b.floor >= 30
+    assert b.per_hour is None, "an estimate under a proven floor must not be reported"
+
+
+def test_an_image_refusal_does_not_shrink_the_chat_allowance(tmp_path):
+    """Allowances belong to a resource, and chat is not image generation.
+
+    This is the failure that was actually measured against production: grok's
+    image agents refuse images while chat stays abundant, and counting the two
+    together produced allowances below what the route was already sustaining.
+    """
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    store.upsert_routes([_route("agent:free")], timestamp=0.0)
+    key = "kilo/agent:free"
+
+    _spend(store, key, 40, 1000.0, step=60.0)               # plenty of chat
+    at = _spend(store, key, 2, 1000.0, step=5.0, capability="images")
+    store.record_event(key, False, 0, 429, at, capability="images")
+    store.record_event(key, True, 50, 200, at + 900.0, capability="images")
+
+    chat = store.rate_budgets(now=5000.0, capability="chat")[key]
+    images = store.rate_budgets(now=5000.0, capability="images")[key]
+    assert chat.per_hour is None, "an image refusal says nothing about chat"
+    assert chat.floor >= 40
+    assert images.per_hour == 2
+
+
+def test_remaining_and_exhaustion_are_silent_until_the_allowance_is_known(tmp_path):
+    """Before the first measurement the honest answer is None, not a guess."""
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    store.upsert_routes([_route("a:free")], timestamp=0.0)
+    _spend(store, "kilo/a:free", 4, 1000.0)
+
+    b = store.rate_budgets(now=1100.0)["kilo/a:free"]
+    assert b.per_hour is None
+    assert b.remaining is None
+    assert b.exhausts_in_s is None
+    assert b.used == 4          # consumption is always known, even unmeasured
+
+
+def test_remaining_counts_down_and_projects_when_the_allowance_is_known(tmp_path):
+    """Once measured, `remaining` and `exhausts_in_s` answer the operator's
+    question: how much is left, and how long that lasts at this rate."""
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    store.upsert_routes([_route("a:free")], timestamp=0.0)
+    key = "kilo/a:free"
+
+    at = _spend(store, key, 10, 1000.0)
+    store.record_event(key, False, 0, 429, at)
+    store.record_event(key, True, 50, 200, at + 900.0)
+
+    # A fresh hour with 4 of the 10 spent.
+    later = at + 10 * 3600.0
+    _spend(store, key, 4, later)
+    b = store.rate_budgets(now=later + 1800.0)[key]
+
+    assert b.per_hour == 10
+    assert b.used == 4
+    assert b.remaining == 6
+    # 4 requests in the trailing hour -> 6 left lasts an hour and a half.
+    assert b.exhausts_in_s == pytest.approx(6 / (4 / 3600.0))
+
+
+def test_consumption_past_the_estimate_reports_none_left_not_a_negative():
+    """The estimate is a median over episodes, so consumption CAN pass it -- and
+    "none left" is the truthful reading of that, never a negative budget.
+
+    Constructed directly rather than through the estimator: a history where the
+    route both serves more than its allowance and keeps a clean hour to prove it
+    is self-contradictory, and the coherence backstop rightly refuses to report
+    an allowance for it. The clamp being asserted here belongs to the value, not
+    to the inference.
+    """
+    b = RateBudget(per_hour=5, used=9, floor=5, episodes=2)
+    assert b.remaining == 0
+    assert b.exhausts_in_s == 0

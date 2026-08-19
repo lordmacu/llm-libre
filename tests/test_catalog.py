@@ -387,3 +387,45 @@ def test_a_malformed_rate_does_not_break_discovery():
     for bad in ("mucho", None, [], {}):
         routes = normalize("grok", {"data": [_rated_model("m", rate=bad)]}, priority=0)
         assert routes and routes[0].priority == 0, bad
+
+
+# --- scarcity from a MEASURED allowance, for providers that publish none
+
+
+def _catalogue(model_id="m", **extra):
+    return {"data": [{"id": model_id, "pricing": {"prompt": "0"},
+                      "supported_parameters": ["tools"], **extra}]}
+
+
+def test_a_measured_allowance_below_the_floor_holds_a_route_in_reserve():
+    """The providers this exists for publish nothing, so the only evidence is ours."""
+    routes = normalize("kilo", _catalogue(), priority=0,
+                       measured_rates={"kilo/m": 4.0})
+    assert routes[0].priority == 1, "a measured 4/h is below the floor"
+
+
+def test_a_published_allowance_outranks_a_measured_one():
+    """What the provider states is a claim about policy; ours is a sample of it.
+
+    The published number covers the whole population and is available before a
+    single request; the measurement only ever sees the slice we sent. When both
+    exist the statement wins -- here an abundant 999/h keeps the route in front
+    even though our own traffic happened to run into a refusal.
+    """
+    routes = normalize("grok", _catalogue(requests_per_hour=999), priority=0,
+                       measured_rates={"grok/m": 4.0})
+    assert routes[0].priority == 0
+
+
+def test_a_route_that_was_never_refused_is_never_demoted():
+    """The safety property: absence of evidence is not evidence of scarcity.
+
+    Measured 2026-08-19, 60 of 69 live routes had never once been refused -- if
+    an unmeasured route could be demoted, that would be nearly the whole
+    catalogue, and the demotion would be self-reinforcing: less traffic, less
+    chance of ever measuring it. `sync_catalogue` passes only measured
+    allowances for exactly this reason.
+    """
+    routes = normalize("deepseek", _catalogue(), priority=0, measured_rates={})
+    assert routes[0].priority == 0
+    assert normalize("deepseek", _catalogue(), priority=0)[0].priority == 0
