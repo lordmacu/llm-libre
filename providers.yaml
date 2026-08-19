@@ -15,10 +15,34 @@
 # tried first (never mix the two). Default 100 when not declared. It does NOT
 # break the invariant that paid routes always go last: that is decided by
 # `tier`, not by `priority` (see router.order_routes).
+# --- EXPERIMENT, 2026-08-19: the branded proxies go first ---------------------
+#
+# Every provider below except minimax is `tier: free` -- none of them costs money
+# -- so `tier` cannot express a preference between them. `priority` can, and this
+# is what it is for: the branded model families reached through our own proxies
+# (ChatGPT, Perplexity, DeepSeek, Grok, Mistral) sit at priority 0, and Kilo, the
+# broad free aggregator, sits behind them at 1 as the safety net.
+#
+# Inside a single priority band the SCORE decides, so the branded families rotate
+# among themselves by measured quality, reliability and latency -- which is the
+# rotation this experiment wants. Falling through to Kilo needs no new machinery:
+# a route in cooldown (a 429, a confirmed probe failure) is filtered out BEFORE
+# ordering runs, so "none of the branded ones can serve right now" automatically
+# means the chain starts at Kilo.
+#
+# The paid invariant is untouched: minimax goes last through `tier`, never through
+# `priority`, and no number here can buy it a place ahead of anything free.
+#
+# What this costs, stated up front: it puts 40 routes ahead of Kilo's 10 (31 of
+# them grok's). The score orders them, so the healthy ones lead and the broken
+# ones sort to the back of the band -- but a request that has to walk a long
+# stretch of failing branded routes reaches Kilo slower than before. Watch
+# `X-Attempts`, and see the timeout note on each provider.
+
 providers:
   - id: chatgpt
     tier: free          # costs no money: does NOT consume the paid cap
-    priority: 0           # before everything else
+    priority: 0
     dialect: openai
     base_url_env: CHATGPT_PROXY_URL   # the real URL is set in the environment;
     base_url: http://127.0.0.1:8888/v1   # default when the variable is absent.
@@ -43,7 +67,7 @@ providers:
     # confirmation probe suspicion fires is a short PING that normally answers
     # in the typical range, not in the worst case of a full generation. No other
     # provider's timeout is touched.
-    timeout_s: 45
+    timeout_s: 150
     unwraps_canvas: true   # see finding 1 of the review in catalog.py/reasoning.py:
                                 # it is the ONLY provider that genuinely leaks canvas mode into
                                 # content -- ':::nota{...}' is also legitimate Docusaurus/MDX
@@ -94,7 +118,7 @@ providers:
     # The same priority as kilo ON PURPOSE: there is no evidence it is better or
     # worse, so the measured ranking decides, which is what it exists for.
     # Priority is manual preference, not a hunch.
-    priority: 1
+    priority: 0
     dialect: openai
     base_url_env: PERPLEXITY_PROXY_URL
     base_url: http://127.0.0.1:8891/v1   # default; the /v1 is mandatory (see chatgpt)
@@ -121,12 +145,12 @@ providers:
     # Measured latency (2026-08-17): 1.85-2.47s, faster than chatgpt-proxy
     # (3.5-4.4s). Still a 45s ceiling, like chatgpt: it bounds a hang without
     # cutting a legitimately long generation short.
-    timeout_s: 45
+    timeout_s: 150
 
   - id: deepseek
     tier: free
     # The same priority as kilo and perplexity: let the measured ranking decide.
-    priority: 1
+    priority: 0
     dialect: openai
     base_url_env: DEEPSEEK_PROXY_URL
     base_url: http://127.0.0.1:8892/v1
@@ -153,7 +177,7 @@ providers:
     # declaring a capability without checking it is routing blind.
     # Measured latency: 4.2-4.5s. A 60s ceiling: the WASM proof-of-work adds
     # variable time before DeepSeek even starts answering.
-    timeout_s: 60
+    timeout_s: 150
     # Tool-calling emulation through prompt injection.
     # client.build_request turns `tools` into text instructions in the system
     # prompt; proxy.py detects whether the answer is a tool-call JSON and
@@ -163,7 +187,7 @@ providers:
 
   - id: grok
     tier: free          # the proxy runs on Grok's free tier
-    priority: 1
+    priority: 0
     dialect: openai
     base_url_env: GROK_PROXY_URL
     base_url: http://127.0.0.1:8893/v1
@@ -232,12 +256,13 @@ providers:
       imagine-agent-mode:          {tools: false, vision: false, images: true}
       imagine-agent-mode-dev:      {tools: false, vision: false, images: true}
       imagine-agent-mode-grok-4-5: {tools: false, vision: false, images: true}
+    timeout_s: 150
 
   - id: mistral
     tier: free          # a free Le Chat account: no per-request billing
     # The same priority as the other free third parties: no evidence it is
     # better or worse, so the measured ranking decides.
-    priority: 1
+    priority: 0
     dialect: openai
     base_url_env: MISTRAL_PROXY_URL
     base_url: http://127.0.0.1:8894/v1   # default; the /v1 is mandatory (see chatgpt)
@@ -306,7 +331,7 @@ providers:
     # A 45s ceiling like chatgpt's would be within ~3x of an observed real
     # request under load, which is how a healthy provider gets timed out for
     # being busy rather than broken.
-    timeout_s: 60
+    timeout_s: 150
     # emulates_tools ON, and this is the ONE provider besides deepseek that
     # earned it. Measured 2026-08-18 by running llm-libre's own tool_emulator
     # against the real backend: 6/6 across three cases x two attempts --

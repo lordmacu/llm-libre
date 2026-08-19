@@ -168,9 +168,9 @@ def test_yaml_keys_are_still_understood():
     ds = next(p for p in provs if p.id == "deepseek")
     assert ds.tier == "free"
     assert ds.dialect == "openai"
-    assert ds.priority == 1
+    assert ds.priority == 0   # branded proxies lead since the 2026-08-19 experiment
     assert ds.emulates_tools is True
-    assert ds.timeout_s == 60.0
+    assert ds.timeout_s == 150.0
     cg = next(p for p in provs if p.id == "chatgpt")
     assert cg.default_capabilities is not None
     assert cg.unwraps_canvas is True

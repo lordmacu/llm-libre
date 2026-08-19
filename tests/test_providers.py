@@ -261,7 +261,9 @@ def test_chatgpt_declares_its_own_timeout_in_the_real_yaml():
     # providers.yaml for the measurement justifying it) halves that worst case
     # without lowering anyone else's timeout.
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
-    assert chatgpt.timeout_s == 45.0
+    assert chatgpt.timeout_s == 150.0   # 150 since the 2026-08-19 experiment: a branded proxy must not lose
+                                  # because the gateway gave up on a generation that was
+                                  # still coming. See test_no_branded_proxy_is_cut_off_*.
 
 
 def test_a_provider_can_declare_its_own_timeout(tmp_path):
@@ -407,7 +409,9 @@ def test_deepseek_declares_two_routes_with_emulated_tools():
     assert all(r.capabilities.tools is True for r in routes)
     assert all(r.capabilities.vision is False for r in routes)
     assert ds.base_url.endswith("/v1")
-    assert ds.timeout_s == 60.0   # the WASM proof-of-work adds variable time
+    assert ds.timeout_s == 150.0  # was 60: the WASM proof-of-work adds variable time
+                                  # on top, and 60 was measured cutting off a real
+                                  # generation at exactly 60.1s (2026-08-19).
 
 
 def test_mistral_declares_one_route_not_the_ten_its_catalogue_publishes():
@@ -450,7 +454,9 @@ def test_mistral_emulates_tools_and_really_sees_images():
     # in 3.5-7.4s, but three concurrent requests measured 4.9/12.6/16.2s against
     # one shared account session. A 45s ceiling would be within ~3x of an
     # observed real request under load.
-    assert ms.timeout_s == 60.0
+    assert ms.timeout_s == 150.0   # 150 since the 2026-08-19 experiment: a branded proxy must not lose
+                                  # because the gateway gave up on a generation that was
+                                  # still coming. See test_no_branded_proxy_is_cut_off_*.
 
 
 # --- The same shape of declaration, for grok-proxy's '<xai:...>' UI cards. It
@@ -480,3 +486,63 @@ def test_a_provider_without_card_stripping_in_the_yaml_defaults_to_false(tmp_pat
         "    models_path: /models\n")
     p = load(str(yaml_no_cards), {})[0]
     assert p.strips_xai_cards is False
+
+
+# --- Experiment 2026-08-19: the branded proxies go first ----------------------
+#
+# The deployment reaches five "premium" model families (ChatGPT, Perplexity,
+# DeepSeek, Grok, Mistral) through self-hosted proxies, and one aggregator (Kilo)
+# that serves a broad free catalogue. All of them are `tier: free` -- none costs
+# money -- so `tier` cannot express the preference between them; `priority` is the
+# knob that can, and that is exactly what it is for.
+#
+# The intent: try the branded families FIRST, rotating among themselves by
+# measured quality and reliability (which is what the score does inside a single
+# priority band), and fall through to Kilo only when none of them can serve right
+# now. "Cannot serve" already means something precise and automatic here -- a
+# route in cooldown is filtered out before ordering even runs -- so the fallback
+# needs no new machinery.
+
+BRANDED = {"chatgpt", "perplexity", "deepseek", "grok", "mistral"}
+
+
+def _providers():
+    return {p.id: p for p in load(YAML, {})}
+
+
+def test_every_branded_proxy_sits_at_priority_zero():
+    for pid in BRANDED:
+        assert _providers()[pid].priority == 0, pid
+
+
+def test_kilo_sits_behind_all_of_them():
+    """Kilo is the safety net, not a competitor: it must lose to every branded
+    provider that is available, and win the moment none of them is."""
+    providers = _providers()
+    assert all(providers[pid].priority < providers["kilo"].priority
+               for pid in BRANDED)
+
+
+def test_the_paid_tier_is_untouched_by_the_experiment():
+    """The one invariant this must not dent: paid still goes last, and it gets
+    there through `tier`, never through `priority`."""
+    providers = _providers()
+    assert providers["minimax"].tier == "paid"
+    assert providers["minimax"].priority > providers["kilo"].priority
+
+
+def test_no_branded_proxy_is_cut_off_by_its_own_timeout_before_two_minutes():
+    """The point of the experiment is that the ONLY reason to skip a branded
+    provider is a temporary limit (a 429, a cooldown), never the gateway giving up
+    on a generation that was still coming.
+
+    Measured live 2026-08-19 on a realistic prompt (a 12-item history, asking for
+    7 grounded JSON objects): routes that answered took 46-90s, and deepseek
+    (timeout_s 60) and grok (no timeout_s, so the global 90) were cut off at
+    exactly their ceilings -- 60.1s and 90.1s. Those ceilings were the reason they
+    lost, not anything about the models.
+    """
+    for pid in BRANDED:
+        timeout = _providers()[pid].timeout_s
+        assert timeout is not None, f"{pid} must state its own ceiling"
+        assert timeout >= 120, f"{pid} is cut off at {timeout}s"
