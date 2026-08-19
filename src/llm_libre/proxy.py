@@ -11,7 +11,8 @@ import httpx
 from llm_libre import tool_emulator as _emu
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
 from llm_libre.client import build_image_request, build_request
-from llm_libre.models import Route
+from llm_libre.models import RequestTrace, Route
+from llm_libre.notify import Notifier
 from llm_libre.reasoning import CompositeStreamTrimmer, trim
 
 log = logging.getLogger(__name__)
@@ -442,10 +443,14 @@ class ProxyResponse:
 
 
 class Proxy:
-    def __init__(self, providers: dict, store, http_client: httpx.AsyncClient):
+    def __init__(self, providers: dict, store, http_client: httpx.AsyncClient,
+                 notifier=None):
         self.providers = providers
         self.store = store
         self.http = http_client
+        # Defaults to the silent no-op rather than None so no call site has to
+        # branch on whether alerting is configured -- see notify.Notifier.
+        self.notifier = notifier if notifier is not None else Notifier()
         self.cooldowns = Cooldowns()
         self._punishments: dict[str, int] = {}
         # Round 9: how many generations of cooldown/punishment this key has had
@@ -484,7 +489,8 @@ class Proxy:
 
     async def complete(self, routes: list[Route], body: dict, now: float,
                         raw: bool = False, is_probe: bool = False,
-                        on_billable_attempt: Callable[[Route], None] | None = None
+                        on_billable_attempt: Callable[[Route], None] | None = None,
+                        trace: RequestTrace | None = None
                         ) -> ProxyResponse:
         """`is_probe=True` is exclusively for INTERNAL use (periodic probing via
         `probing.probe_health`, and the on-demand probe in `_probe_on_demand` --
@@ -579,7 +585,8 @@ class Proxy:
             success = code == 200 and data is not None
             self.store.record_event(route.key, success, 0, code, now,
                                           latency_ms=latency_ms,
-                                          is_client_error=_is_client_error(code))
+                                          is_client_error=_is_client_error(code),
+                                          trace=trace, attempt=attempts)
 
             if success:
                 self._suspicions.pop(route.key, None)
@@ -625,7 +632,8 @@ class Proxy:
         }}, None, attempts, "", last_code)
 
     async def generate_images(self, routes: list[Route], body: dict, now: float,
-                              on_billable_attempt: Callable[[Route], None] | None = None
+                              on_billable_attempt: Callable[[Route], None] | None = None,
+                              trace: RequestTrace | None = None
                               ) -> ProxyResponse:
         """`POST /images/generations` with the SAME failover machinery as chat.
 
@@ -720,7 +728,8 @@ class Proxy:
             self.store.record_event(route.key, success, 0, code, now,
                                     latency_ms=latency_ms,
                                     is_client_error=_is_client_error(code),
-                                    capability=IMAGES)
+                                    capability=IMAGES,
+                                    trace=trace, attempt=attempts)
 
             if success:
                 self._suspicions.pop(route.key, None)
@@ -751,7 +760,8 @@ class Proxy:
     async def complete_stream(self, routes: list[Route], body: dict, now: float,
                                raw: bool = False,
                                on_route_committed: Callable[[Route], None] | None = None,
-                               on_billable_attempt: Callable[[Route], None] | None = None):
+                               on_billable_attempt: Callable[[Route], None] | None = None,
+                               trace: RequestTrace | None = None):
         """Emit already-trimmed SSE lines, always ending in `data: [DONE]`.
 
         It fails over only BEFORE the first useful byte: once content from a route
@@ -782,7 +792,7 @@ class Proxy:
         `_react_to_non_429_failure` alike -- the same single decision point
         complete() uses, so the two branches cannot drift apart again (that was
         precisely round 8's vector)."""
-        for route in routes:
+        for attempts, route in enumerate(routes, start=1):
             provider = self.providers[route.provider]
             url, headers, payload = build_request(provider, body, route.model_id)
             payload["stream"] = True
@@ -812,7 +822,8 @@ class Proxy:
                 if not event_recorded:
                     ttft = (measured_ttft_ms if measured_ttft_ms is not None
                             else int((time.monotonic() - t0) * 1000))
-                    self.store.record_event(route.key, True, ttft, 200, now)
+                    self.store.record_event(route.key, True, ttft, 200, now,
+                                            trace=trace, attempt=attempts)
                     event_recorded = True
                     self._clear_punishment(route.key)
                     self._suspicions.pop(route.key, None)
@@ -832,7 +843,8 @@ class Proxy:
                                 route, now, punish_at, is_probe=False)
                         self.store.record_event(
                             route.key, False, 0, resp.status_code, now,
-                            is_client_error=_is_client_error(resp.status_code))
+                            is_client_error=_is_client_error(resp.status_code),
+                            trace=trace, attempt=attempts)
                         continue
                     if route.tier == "paid" and on_billable_attempt is not None:
                         on_billable_attempt(route)
@@ -920,7 +932,8 @@ class Proxy:
                         # normal path -- a FAILED attempt and failover to the next
                         # route. Nothing was emitted, so it stays clean.
                         if not event_recorded:
-                            self.store.record_event(route.key, False, 0, 200, now)
+                            self.store.record_event(route.key, False, 0, 200, now,
+                                                     trace=trace, attempt=attempts)
                             event_recorded = True
                             self._react_to_non_429_failure(
                                 route, now, now + (time.monotonic() - t0), is_probe=False)
@@ -1025,7 +1038,8 @@ class Proxy:
                         # left with no answer -- it is recorded as a FAILED
                         # attempt and falls through to the next route.
                         if not event_recorded:
-                            self.store.record_event(route.key, False, 0, 200, now)
+                            self.store.record_event(route.key, False, 0, 200, now,
+                                                     trace=trace, attempt=attempts)
                             event_recorded = True
                             self._react_to_non_429_failure(
                                 route, now, now + (time.monotonic() - t0), is_probe=False)
@@ -1056,7 +1070,8 @@ class Proxy:
                     return
             except httpx.HTTPError:
                 if not event_recorded:
-                    self.store.record_event(route.key, False, 0, 0, now)
+                    self.store.record_event(route.key, False, 0, 0, now,
+                                            trace=trace, attempt=attempts)
                     self._react_to_non_429_failure(
                         route, now, now + (time.monotonic() - t0), is_probe=False)
                 if emitted:
@@ -1097,8 +1112,60 @@ class Proxy:
         # and nothing else -- see ALL_CAPABILITIES. `_punish` (a CONFIRMED probe
         # failure) and `_suspect_paid` keep punishing the whole route, because
         # those are evidence about the route itself.
+        # ALREADY excluded for this scope? Then this 429 changed nothing an
+        # operator needs to hear about. Without this check a route that is being
+        # hammered while exhausted sends one alert per request -- measured on
+        # 2026-08-19, z-ai/glm-5.2 took 55 refusals in a day across 11 actual
+        # exhaustions, so the naive version is a 5x flood of duplicates.
+        was_excluded = self.cooldowns.until(key, scope) > now
         self.cooldowns.punish(key, now + duration, scope=scope)
         self._cooldown_generation[key] = self._cooldown_generation.get(key, 0) + 1
+        if not was_excluded:
+            self._announce_exclusion(key, scope, duration, stated is not None, now)
+
+    def _announce_exclusion(self, key: str, scope: str, duration: float,
+                            stated: bool, now: float) -> None:
+        """Tell the operator a route just LEFT routing, and why.
+
+        This is the pairing the alert exists for: a rate limit and an exclusion
+        are the same event seen from two sides, and reporting only the 429 leaves
+        "so is my model being used or not" unanswered. The return time is stated
+        because it is the next thing anyone asks.
+
+        `stated` distinguishes the provider telling us when to come back
+        (Retry-After) from our own guess -- the same measured/assumed line drawn
+        everywhere else here, and it changes how much the reader should trust the
+        time. Wrapped whole: an alert must never be able to break serving.
+        """
+        try:
+            what = "chat and images" if scope == ALL_CAPABILITIES else scope
+            source = "the provider stated it" if stated else "estimated by us"
+            # Three units, because one of them always reads as nonsense: the
+            # default cooldown is tens of SECONDS (COOLDOWN_429_DEFAULT_S) and
+            # rendering that in minutes says "back in ~0 min", while a stated
+            # Retry-After of an hour in minutes says "~60 min" where "1.0 h" is
+            # what a reader actually wants.
+            if duration < 90:
+                back = "%.0f s" % duration
+            elif duration < 5400:
+                back = "%.0f min" % (duration / 60.0)
+            else:
+                back = "%.1f h" % (duration / 3600.0)
+            budget = self.store.rate_budgets(now, capability=(
+                scope if scope != ALL_CAPABILITIES else CHAT)).get(key)
+            allowance = ""
+            if budget is not None and budget.measured:
+                allowance = "\nMeasured allowance: %.0f/h" % budget.per_hour
+            elif budget is not None and budget.floor:
+                allowance = "\nNever measured; had sustained %d/h" % budget.floor
+            self.notifier.notify(
+                "<b>Rate limit</b>\n"
+                f"{key}\n"
+                f"Out of routing for: {what}\n"
+                f"Back in ~{back} ({source}){allowance}")
+        except Exception as e:            # noqa: BLE001
+            log.warning("alerts: could not build the rate-limit notice for %s "
+                        "(%s: %s)", key, type(e).__name__, e)
 
     @staticmethod
     def _retry_after_seconds(resp: httpx.Response | None) -> float | None:

@@ -2,13 +2,16 @@ import difflib
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from uuid import uuid4
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llm_libre.assets import content_disposition, localise
 from llm_libre.auth import RateLimiter, client_ip
-from llm_libre.models import NEUTRAL_METRICS, UNKNOWN_BUDGET, RouteRequest
+
+from llm_libre.models import (NEUTRAL_METRICS, UNKNOWN_BUDGET, RequestTrace,
+                              RouteRequest)
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
                                ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
                                USAGE_DOCS, VERSION, customise_openapi)
@@ -291,14 +294,20 @@ def create_app(state: State) -> FastAPI:
             state.store.add_paid_usage(
                 key, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
+        # One trace per CLIENT request, shared by every attempt it causes, so the
+        # failover chain stays reconstructable afterwards. `body["model"]` verbatim
+        # and not the resolved profile: the question this answers is what was asked
+        # against what was served, and resolving it here erases the asking side.
+        trace = RequestTrace(request_id=uuid4().hex, requested=body.get("model"))
         if body.get("stream"):
             return StreamingResponse(
                 state.proxy.complete_stream(
                     routes, body, now, raw,
-                    on_billable_attempt=_count_paid_usage),
+                    on_billable_attempt=_count_paid_usage, trace=trace),
                 media_type="text/event-stream")
         r = await state.proxy.complete(routes, body, now, raw,
-                                       on_billable_attempt=_count_paid_usage)
+                                       on_billable_attempt=_count_paid_usage,
+                                       trace=trace)
         if r.status == 503 and r.upstream_code == 404 and route_request.model is not None:
             # ALSO from the round 6 review -- literally the project's reason to
             # exist: `route_request.model` is STILL in our catalogue (it passed the
@@ -371,8 +380,9 @@ def create_app(state: State) -> FastAPI:
             state.store.add_paid_usage(
                 key, datetime.now(timezone.utc).strftime("%Y-%m-%d"))
 
-        r = await state.proxy.generate_images(routes, body, now,
-                                              on_billable_attempt=_count_paid_usage)
+        r = await state.proxy.generate_images(
+            routes, body, now, on_billable_attempt=_count_paid_usage,
+            trace=RequestTrace(request_id=uuid4().hex, requested=body.get("model")))
         if r.status == 200 and state.assets is not None:
             # The provider's URL never reaches the client: it expires, it may
             # need headers the client does not have, and it names who served --
@@ -425,6 +435,26 @@ def create_app(state: State) -> FastAPI:
                 for r in state.store.active_routes()]
         data += [{"id": a, "object": "model", "owned_by": "llm-libre"} for a in ALIASES]
         return {"object": "list", "data": data}
+
+    @app.get("/v1/traffic")
+    def traffic(request: Request, hours: float = 24.0,
+                x_api_key: str | None = Header(None),
+                authorization: str | None = Header(None)):
+        """Where client requests actually went, over the last `hours`.
+
+        A companion to /v1/ranking, and deliberately a different question.
+        /v1/ranking shows what the router BELIEVES about each route right now;
+        this shows what it DID. The two disagreeing is the interesting case --
+        a route ranked first that keeps appearing in `fell_away_from` is one the
+        scores like and reality does not.
+        """
+        require_api_key(x_api_key, authorization, request)
+        # Clamped: `hours` reaches this straight from the query string, and an
+        # absurd value would scan the whole table on a machine that is already
+        # saturated. 720h is the retention window (probing.RETENTION_DAYS), so
+        # anything above it can return nothing more anyway.
+        hours = max(0.0, min(float(hours), 720.0))
+        return state.store.traffic(since=time.time() - hours * 3600.0)
 
     @app.get("/v1/ranking", **RANKING_DOCS)
     def ranking(request: Request, x_api_key: str | None = Header(None),

@@ -3,7 +3,7 @@ import sqlite3
 from statistics import median
 
 from llm_libre.models import (NEUTRAL_QUALITY, NEUTRAL_RELIABILITY, NEUTRAL_TTFT_MS,
-                              Capabilities, Metrics, RateBudget, Route)
+                              Capabilities, Metrics, RateBudget, RequestTrace, Route)
 
 # The schema below is the CURRENT shape. A live database (the /datos volume, which
 # deliberately survives redeploys) may still carry the previous Spanish-named
@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS events (
     key TEXT NOT NULL, at REAL NOT NULL, ok INTEGER NOT NULL,
     ttft_ms INTEGER, http_code INTEGER, latency_ms INTEGER,
     is_client_error INTEGER NOT NULL DEFAULT 0,
-    capability TEXT NOT NULL DEFAULT 'chat');
+    capability TEXT NOT NULL DEFAULT 'chat',
+    requested TEXT, request_id TEXT, attempt INTEGER);
 CREATE INDEX IF NOT EXISTS ix_events ON events(key, at DESC);
 
 CREATE TABLE IF NOT EXISTS paid_usage (
@@ -268,6 +269,17 @@ class Storage:
             # under-count that would starve routing.
             self._con.execute(
                 "ALTER TABLE events ADD COLUMN capability TEXT NOT NULL DEFAULT 'chat'")
+        # NULL, not a default: these describe the CLIENT REQUEST an attempt served,
+        # and a row written before they existed has no such information. A default
+        # would invent one -- and every ratio computed off this table (failover
+        # rate, where a profile lands) would silently mix invented rows with
+        # measured ones. NULL is the only honest value for "not recorded", and it
+        # keeps old rows excludable with `WHERE request_id IS NOT NULL`.
+        for column, kind in (("requested", "TEXT"), ("request_id", "TEXT"),
+                             ("attempt", "INTEGER")):
+            if column not in event_columns:
+                self._con.execute(
+                    f"ALTER TABLE events ADD COLUMN {column} {kind}")
         route_columns = self._columns("routes")
         if "priority" not in route_columns:
             self._con.execute(
@@ -398,7 +410,9 @@ class Storage:
                      http_code: int, timestamp: float,
                      latency_ms: int | None = None,
                      is_client_error: bool = False,
-                     capability: str = "chat") -> None:
+                     capability: str = "chat",
+                     trace: RequestTrace | None = None,
+                     attempt: int | None = None) -> None:
         """`ttft_ms` is only written by whoever could measure a real
         time-to-first-token (the streaming path); everyone else passes 0 and sends
         their round-trip in `latency_ms`. See the comment at the top of the file.
@@ -419,10 +433,12 @@ class Storage:
         observations."""
         self._con.execute(
             """INSERT INTO events (key, at, ok, ttft_ms, http_code, latency_ms,
-                   is_client_error, capability)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                   is_client_error, capability, requested, request_id, attempt)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (key, timestamp, int(ok), ttft_ms, http_code, latency_ms,
-             int(is_client_error), capability))
+             int(is_client_error), capability,
+             trace.requested if trace else None,
+             trace.request_id if trace else None, attempt))
         self._con.commit()
 
     def metrics(self) -> dict[str, Metrics]:
@@ -505,6 +521,71 @@ class Storage:
         if not rows:
             return NEUTRAL_RELIABILITY
         return sum(f[0] for f in rows) / len(rows)
+
+    def traffic(self, since: float) -> dict:
+        """What the gateway DID with client requests, grouped the way an operator
+        asks about it.
+
+        The `events` table is keyed by route, which answers "is this route
+        healthy" and cannot answer "where does auto:strong actually land" -- five
+        rows against one route are five client requests or one request failing
+        over five times, and route-keyed rows cannot tell those apart. Since
+        `request_id` groups a chain and `requested` records what was asked, both
+        become countable.
+
+        Only rows carrying a `request_id` are considered. Probes have none by
+        design (they are the gateway asking, not a client) and rows written before
+        these columns existed have none either -- counting either as client
+        traffic would inflate exactly the ratios this exists to measure.
+
+        Three groupings, because they answer three different questions:
+          by_requested -- for each thing clients ask for, which routes served it
+                          and how often. This is the "is auto:strong really
+                          picking what I think" question.
+          failover     -- how many requests needed more than one attempt, and
+                          which routes they fell AWAY from. A route that
+                          frequently appears as a failed first attempt is costing
+                          latency on every request it heads.
+          served       -- final outcome per route, for the requests it closed.
+        """
+        rows = self._con.execute(
+            """SELECT request_id, requested, key, ok, attempt, at
+               FROM events
+               WHERE request_id IS NOT NULL AND at >= ?
+               ORDER BY request_id, attempt""", (since,)).fetchall()
+
+        chains: dict[str, list] = {}
+        for rid, requested, key, ok, attempt, at in rows:
+            chains.setdefault(rid, []).append((attempt or 0, requested, key, ok, at))
+
+        by_requested: dict[str, dict[str, int]] = {}
+        fell_away: dict[str, int] = {}
+        served: dict[str, dict[str, int]] = {}
+        needed_failover = 0
+        for attempts in chains.values():
+            attempts.sort()
+            # The chain's outcome is its LAST attempt: failover means earlier ones
+            # failed and a later one may have succeeded.
+            _, requested, winner, ok, _ = attempts[-1]
+            label = requested or "(unrecorded)"
+            by_requested.setdefault(label, {}).setdefault(winner, 0)
+            by_requested[label][winner] += 1
+            bucket = served.setdefault(winner, {"ok": 0, "failed": 0})
+            bucket["ok" if ok else "failed"] += 1
+            if len(attempts) > 1:
+                needed_failover += 1
+                for _, _, key, _, _ in attempts[:-1]:
+                    fell_away[key] = fell_away.get(key, 0) + 1
+
+        return {
+            "requests": len(chains),
+            "attempts": len(rows),
+            "needed_failover": needed_failover,
+            "by_requested": by_requested,
+            "fell_away_from": dict(sorted(fell_away.items(),
+                                          key=lambda kv: -kv[1])),
+            "served": served,
+        }
 
     def rate_budgets(self, now: float,
                      capability: str = "chat") -> dict[str, RateBudget]:

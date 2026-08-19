@@ -1494,3 +1494,44 @@ def test_in_raw_mode_there_is_no_x_reasoning_because_it_stays_in_the_content():
 #     y verificado end-to-end en test_health_is_ok_when_the_free_route_has_no_telemetry_yet
 #     and test_health_after_a_process_restart_stays_ok_with_no_telemetry
 #     arriba. ---
+
+
+# --- /v1/traffic: what the gateway did, end to end over the wire
+
+
+def test_a_real_request_is_traced_from_the_wire_to_the_report(state_client):
+    """The whole chain in one test: a client asks, the attempt is recorded with
+    what was asked, and /v1/traffic reports where it landed.
+
+    Route-keyed rows alone could never answer this -- see Storage.traffic.
+    """
+    state, c = state_client
+    r = c.post("/v1/chat/completions",
+               headers={"Authorization": "Bearer buena"},
+               json={"model": "auto:strong",
+                     "messages": [{"role": "user", "content": "hola"}]})
+    assert r.status_code == 200
+    assert r.headers["X-Route-Used"] == "kilo/a:free"
+
+    t = c.get("/v1/traffic", headers={"Authorization": "Bearer buena"}).json()
+    assert t["requests"] == 1
+    assert t["needed_failover"] == 0
+    # The client asked for auto:strong; the report says which route served it --
+    # the same pairing X-Route-Used gives at request time, but persisted.
+    assert t["by_requested"]["auto:strong"] == {"kilo/a:free": 1}
+    assert t["served"]["kilo/a:free"] == {"ok": 1, "failed": 0}
+
+
+def test_traffic_needs_an_api_key(state_client):
+    _, c = state_client
+    assert c.get("/v1/traffic").status_code == 401
+
+
+def test_traffic_window_is_clamped_not_trusted(state_client):
+    """`hours` arrives from the query string; an absurd value must not turn into
+    an unbounded scan on a machine that is already saturated."""
+    _, c = state_client
+    for hours in ("999999", "-5"):
+        r = c.get(f"/v1/traffic?hours={hours}",
+                  headers={"Authorization": "Bearer buena"})
+        assert r.status_code == 200

@@ -320,7 +320,15 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         # belongs to the resource it was spent on, so an image refusal must not be
         # counted against chat traffic. Old rows default to 'chat', which is what
         # they were -- image generation arrived later.
-        "capability"]
+        "capability",
+        # For Storage.traffic: these describe the CLIENT REQUEST an attempt was
+        # serving, which route-keyed rows alone cannot express -- five rows against
+        # one route are five requests or one request failing over five times, and
+        # nothing in the other columns tells those apart. They migrate to NULL, not
+        # to a default: a row written before they existed carries no such
+        # information, and inventing one would quietly mix fabricated rows into
+        # every ratio computed off this table.
+        "requested", "request_id", "attempt"]
     assert [f[1] for f in con.execute("PRAGMA table_info(paid_usage)")] == [
         "api_key", "day", "requests"]
 

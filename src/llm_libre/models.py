@@ -232,3 +232,30 @@ class RateBudget:
 
 
 UNKNOWN_BUDGET = RateBudget(per_hour=None, used=0, floor=0, episodes=0)
+
+
+@dataclass(frozen=True)
+class RequestTrace:
+    """What ONE client request was, carried down to every attempt it causes.
+
+    Without this the `events` table records outcomes per ROUTE and nothing else,
+    which answers "is this route healthy" and cannot answer any of the questions
+    an operator actually asks: what fraction of `auto:strong` ends up where, how
+    often a request fails over, whether five rows against one route were five
+    client requests or one request bouncing five times. Those are indistinguishable
+    from route-keyed rows alone.
+
+    `requested` is the client's own string, verbatim -- "auto:strong",
+    "deepseek-chat" -- and not the resolved profile. The whole point is to compare
+    what was ASKED against what was SERVED, so normalising it here would erase the
+    left-hand side of that comparison.
+
+    `request_id` groups the failover chain. It is what makes an attempt countable
+    as part of a request rather than as a request of its own.
+
+    Probes carry no trace (None): they are the gateway asking, not a client, and
+    counting them as client traffic would inflate exactly the ratios this exists
+    to measure.
+    """
+    request_id: str
+    requested: str | None = None

@@ -3,7 +3,7 @@ import sqlite3
 import pytest
 
 from llm_libre.storage import QUALITY_RUNS, Storage
-from llm_libre.models import Capabilities, RateBudget, Route
+from llm_libre.models import Capabilities, RateBudget, RequestTrace, Route
 
 
 def _route(model="a:free", provider="kilo", tools=True, priority=100):
@@ -783,3 +783,77 @@ def test_consumption_past_the_estimate_reports_none_left_not_a_negative():
     b = RateBudget(per_hour=5, used=9, floor=5, episodes=2)
     assert b.remaining == 0
     assert b.exhausts_in_s == 0
+
+
+# --- traffic: what the gateway DID with client requests, not what it believes
+
+
+def _attempt(store, rid, requested, key, ok, attempt, at):
+    store.record_event(key, ok, 50 if ok else 0, 200 if ok else 503, at,
+                       trace=RequestTrace(request_id=rid, requested=requested),
+                       attempt=attempt)
+
+
+def test_a_failover_chain_counts_as_one_request_not_as_three(tmp_path):
+    """The whole reason `request_id` exists.
+
+    Three rows land against three routes, but a client asked ONCE. Counting rows
+    would report three requests and a 33% success rate for a request that
+    succeeded. `attempt` orders the chain so the last one is the outcome.
+    """
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    _attempt(store, "r1", "auto:strong", "chatgpt/gpt-5:free", False, 1, 100.0)
+    _attempt(store, "r1", "auto:strong", "deepseek/deepseek-chat", False, 2, 101.0)
+    _attempt(store, "r1", "auto:strong", "kilo/a:free", True, 3, 102.0)
+
+    t = store.traffic(since=0.0)
+    assert t["requests"] == 1
+    assert t["attempts"] == 3
+    assert t["needed_failover"] == 1
+    # The chain is credited to the route that CLOSED it...
+    assert t["served"] == {"kilo/a:free": {"ok": 1, "failed": 0}}
+    # ...and the two it fell away from are named, which is the actionable half.
+    assert t["fell_away_from"] == {"chatgpt/gpt-5:free": 1,
+                                   "deepseek/deepseek-chat": 1}
+
+
+def test_traffic_maps_what_was_asked_to_what_actually_served_it(tmp_path):
+    """The question the whole feature exists for: is auto:strong landing where
+    you think it is?"""
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    for i in range(3):
+        _attempt(store, f"s{i}", "auto:strong", "chatgpt/gpt-5:free", True, 1, 100.0 + i)
+    _attempt(store, "s9", "auto:strong", "kilo/a:free", True, 1, 110.0)
+    _attempt(store, "f1", "auto:fast", "kilo/a:free", True, 1, 120.0)
+
+    t = store.traffic(since=0.0)
+    assert t["by_requested"]["auto:strong"] == {"chatgpt/gpt-5:free": 3,
+                                                 "kilo/a:free": 1}
+    assert t["by_requested"]["auto:fast"] == {"kilo/a:free": 1}
+    assert t["needed_failover"] == 0
+
+
+def test_probes_are_not_counted_as_client_traffic(tmp_path):
+    """Probes carry no trace by design -- they are the gateway asking, not a
+    client. Counting them would inflate exactly the ratios this measures."""
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    _attempt(store, "r1", "auto:strong", "kilo/a:free", True, 1, 100.0)
+    for i in range(20):                      # a probing pass, no trace
+        store.record_event("kilo/a:free", True, 50, 200, 101.0 + i)
+
+    t = store.traffic(since=0.0)
+    assert t["requests"] == 1
+    assert t["attempts"] == 1
+
+
+def test_traffic_honours_its_window(tmp_path):
+    store = Storage(str(tmp_path / "d.sqlite3"))
+    store.create_schema()
+    _attempt(store, "old", "auto:strong", "kilo/a:free", True, 1, 100.0)
+    _attempt(store, "new", "auto:strong", "kilo/a:free", True, 1, 900.0)
+
+    assert store.traffic(since=0.0)["requests"] == 2
+    assert store.traffic(since=500.0)["requests"] == 1
