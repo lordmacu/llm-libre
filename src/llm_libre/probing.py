@@ -9,7 +9,7 @@ from llm_libre.assets import RETENTION_S as ASSET_RETENTION_S
 from llm_libre.catalog import normalize
 from llm_libre.contract import parse_health
 from llm_libre.models import Route
-from llm_libre.providers import Provider, fixed_routes, join_path
+from llm_libre.providers import Provider, contract_url, fixed_routes, join_path
 from llm_libre.proxy import PING
 from llm_libre.quality_suite import CASES, evaluate
 
@@ -75,6 +75,10 @@ QUALITY_INTERVAL_S = QUALITY_EVERY_N_CYCLES * HEALTH_INTERVAL_S
 # debugging, the floor follows it down instead of overriding it.
 HEALTH_FLOOR_S = min(900.0, HEALTH_INTERVAL_S)
 
+# Returned by `_read_contract` when this provider must be left untouched for the
+# whole sweep: neither its /health nor its last stored contract could be used.
+_SKIP = object()
+
 
 async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
                          store, now: float, notifier=None) -> int:
@@ -98,18 +102,32 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
 
     A provider with `reads_capabilities` set (Provider.reads_capabilities) adds a
     FIFTH way to fail, ahead of all the others: its /health is fetched FIRST, before
-    anything else is written for that provider, and a failure there (network,
-    non-200, or a body that is not valid JSON) `continue`s the whole provider --
-    same discipline as a failing /models, for the same reason. Rewriting this
-    provider's fixed_models or discovered routes with fallback capability values
-    after /health failed would look exactly like a real measurement; skipping the
-    provider entirely keeps that distinction honest. A /health that answers but
-    does not speak the contract (`contract.parse_health` returns None) is NOT a
-    failure in this sense: it is the normal, permanent state for a provider that
-    has not adopted it, so the sync proceeds with `contract=None` and every
-    capability falls back to `default_capabilities`/`exceptions` exactly as
-    before. A provider without `reads_capabilities` makes no /health request at
-    all -- that is the default for every provider except the ones that opt in.
+    anything else is written for that provider. An unusable answer -- a network
+    failure, a non-200, a body that is not valid JSON, or a contract whose
+    `auth.mode` is "unknown" -- does NOT go straight to skipping the provider:
+    the LAST GOOD CONTRACT stored for it is tried first (design section 5.1,
+    "keep the previous sweep's capability values"), and when there is one the
+    sync proceeds normally with those values and a warning saying they are being
+    carried over. Only when there is no usable stored contract either is the
+    whole provider `continue`d -- same discipline as a failing /models, for the
+    same reason: rewriting this provider's fixed_models or discovered routes with
+    fallback capability values would look exactly like a real measurement.
+
+    `auth.mode: "unknown"` is grouped with the outright failures deliberately. It
+    means "the proxy could not resolve its account this cycle" (design section
+    3.1), and chatgpt-proxy reports it with every plan-gated capability false
+    after a restart whose first vendor resolve failed. Acting on that at face
+    value would drop dall-e-3, rewrite every chatgpt route to false and fire a
+    "lost images" alert over a condition that clears itself -- while a capability
+    boolean is only supposed to mean a DURABLE entitlement change (section 3.2).
+
+    A /health that answers but does not speak the contract
+    (`contract.parse_health` returns None) is NOT a failure in this sense: it is
+    the normal, permanent state for a provider that has not adopted it, so the
+    sync proceeds with `contract=None` and every capability falls back to
+    `default_capabilities`/`exceptions` exactly as before. A provider without
+    `reads_capabilities` makes no /health request at all -- that is the default
+    for every provider except the ones that opt in.
 
     Each of those five paths LEAVES A WARNING with the provider and the reason.
     Without that, keeping the old catalogue -- which is the right thing -- becomes
@@ -146,35 +164,14 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
         if p.api_key.strip():
             headers["Authorization"] = "Bearer " + p.api_key
         # The capability contract, BEFORE anything is written for this provider.
-        # A failure here skips the provider entirely -- exactly what a failing
-        # /models already does -- so the previous catalogue survives instead of
-        # being rewritten with fallback values that would look like a real
-        # measurement. Keeping what is known beats erasing it.
+        # `_SKIP` means neither this sweep's /health nor the stored one could be
+        # used, so the provider is left entirely alone and the previous
+        # catalogue survives -- exactly what a failing /models already does.
         contract = None
         if p.reads_capabilities:
-            try:
-                r = await http.get(join_path(p.base_url, "/health"),
-                                   headers=headers, timeout=15.0)
-                r.raise_for_status()
-                doc = r.json()
-            except (httpx.HTTPError, ValueError) as e:
-                log.warning(
-                    "capabilities of %s: could not read /health (%s: %s). "
-                    "Keeping the previous catalogue for this provider.",
-                    p.id, type(e).__name__, e)
+            contract = await _read_contract(http, p, headers, store, now, notifier)
+            if contract is _SKIP:
                 continue
-            contract = parse_health(p.id, doc)
-            if contract is None:
-                log.warning(
-                    "capabilities of %s: /health does not implement the "
-                    "capability contract; falling back to providers.yaml.", p.id)
-            else:
-                # `_announce_changes` compares against the STORED document, so
-                # it must run BEFORE the new one replaces it. What it returns is
-                # its own bookkeeping (see Task 12), merged in so a single write
-                # persists both the contract and the alert state.
-                extra = _announce_changes(store, p.id, contract, notifier)
-                store.put_contract(p.id, {**doc, **extra}, now)
         if p.fixed_models:
             routes = fixed_routes(p, contract=contract)
             store.upsert_routes(routes, now, deactivate_missing=True, provider=p.id)
@@ -228,6 +225,75 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
         store.upsert_routes(fresh, now, deactivate_missing=True, provider=p.id)
         total += len(fresh)
     return total
+
+
+async def _read_contract(http, p: Provider, headers: dict, store, now: float,
+                         notifier):
+    """This sweep's capability contract for `p`, or the last good one, or _SKIP.
+
+    Three outcomes, and each is a different statement:
+
+    - a `ProviderContract` -- either freshly read (and then persisted, with the
+      alerts fired) or CARRIED OVER from the last good sweep when this one could
+      not be read. Carrying over is design section 5.1: freezing what is known
+      beats erasing it, and it is what keeps one bad /health from freezing a
+      provider's whole catalogue instead of just its capability values.
+    - `None` -- the proxy answered but does not speak the contract. Normal and
+      permanent for a proxy that has not adopted it: the caller falls back to
+      `default_capabilities`/`exceptions`, exactly as before this existed.
+    - `_SKIP` -- unusable now AND nothing usable stored. The caller leaves the
+      provider entirely alone.
+
+    A contract whose `auth.mode` is "unknown" counts as unusable: the proxy is
+    saying it could not resolve its own account this cycle, so its plan-gated
+    booleans describe a lookup failure rather than a durable entitlement change
+    (design sections 3.1 and 3.2). Neither persisted nor alerted on -- a "lost
+    images" alert for a transient vendor blip is exactly the kind of noise that
+    gets an alert channel muted.
+    """
+    reason = ""
+    fresh = doc = None
+    try:
+        r = await http.get(contract_url(p.base_url), headers=headers, timeout=15.0)
+        r.raise_for_status()
+        doc = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        reason = f"could not read /health ({type(e).__name__}: {e})"
+    else:
+        fresh = parse_health(p.id, doc)
+        if fresh is None:
+            log.warning(
+                "capabilities of %s: /health does not implement the "
+                "capability contract; falling back to providers.yaml.", p.id)
+            return None
+        if fresh.auth.mode == "unknown":
+            reason = ("/health reports auth.mode='unknown', so the proxy could "
+                      "not resolve its account this cycle and its capability "
+                      "booleans state nothing durable")
+            fresh = None
+    if reason:
+        stored = parse_health(p.id, store.get_contract(p.id))
+        if stored is not None and stored.auth.mode == "unknown":
+            stored = None
+        if stored is None:
+            log.warning(
+                "capabilities of %s: %s, and no usable contract from an earlier "
+                "sweep is stored. Keeping the previous catalogue for this "
+                "provider.", p.id, reason)
+            return _SKIP
+        log.warning(
+            "capabilities of %s: %s. Carrying over the capability values from "
+            "the last good sweep; nothing is written to the contract, so "
+            "/health keeps showing when they were last confirmed.",
+            p.id, reason)
+        return stored
+    # `_announce_changes` compares against the STORED document, so it must run
+    # BEFORE the new one replaces it. What it returns is its own bookkeeping
+    # (see Task 12), merged in so a single write persists both the contract and
+    # the alert state.
+    extra = _announce_changes(store, p.id, fresh, notifier)
+    store.put_contract(p.id, {**doc, **extra}, now)
+    return fresh
 
 
 # How close to `expires_at` the operator is told. A week is enough to renew a

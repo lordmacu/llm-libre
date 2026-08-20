@@ -1023,12 +1023,38 @@ def _chatgpt(**kw):
                     "/models", {}, [], reads_capabilities=True, **kw)
 
 
-def _routed(health=None, models=None, health_status=200):
+def _routed(health=None, models=None, health_status=200, seen=None):
+    """The client the contract tests route through.
+
+    The health path is matched EXACTLY, never by suffix. A suffix match accepted
+    /v1/health as readily as /health, and that is exactly the bug it hid: the
+    live proxy answers 404 on /v1/health, so the gateway skipped chatgpt on
+    every sweep while this mock kept reporting success.
+    """
     def handler(req):
-        if req.url.path.endswith("/health"):
+        if seen is not None:
+            seen.append(str(req.url))
+        if req.url.path == "/health":
             return httpx.Response(health_status, json=health or _HEALTH)
         return httpx.Response(200, json=models or _MODELS)
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_the_contract_is_read_beside_the_api_prefix_not_inside_it():
+    """chatgpt's base_url ends in /v1 (mandatory -- see providers.yaml), but the
+    contract lives at the proxy's ROOT. Measured against the live deployment on
+    2026-08-20: /v1/health -> 404, /health -> 200. That 404 raised, was caught,
+    and `continue`d the whole provider BEFORE the fixed_models upsert and the
+    /models sync, so chatgpt's catalogue froze on every sweep, forever.
+
+    The /models URL is asserted here too: it KEEPS its /v1, and this is what
+    stops a future change to the derivation from taking it along.
+    """
+    store, seen = _store(), []
+    await sync_catalogue(_routed(seen=seen), [_chatgpt()], store, now=100.0)
+    assert "https://c.test/health" in seen
+    assert "https://c.test/v1/health" not in seen
+    assert "https://c.test/v1/models" in seen
 
 
 async def test_sync_applies_the_contract_to_the_discovered_routes():
@@ -1054,6 +1080,76 @@ async def test_a_failing_health_keeps_the_previous_catalogue(caplog):
         await sync_catalogue(_routed(health_status=500), [_chatgpt()], store, now=200.0)
     assert store.active_routes() == before
     assert "chatgpt" in caplog.text
+
+
+async def test_a_failing_health_carries_over_the_last_good_contract(caplog):
+    """Design 5.1 asks for the previous sweep's capability VALUES, not for the
+    provider to be skipped. The difference is the whole distance between C1
+    being cosmetic and being permanent: skipping put the /models sync behind the
+    /health request, so one unreachable endpoint froze the entire catalogue of
+    the gateway's priority-0 provider.
+
+    A model that appears in /models only on the second sweep is what proves the
+    sync ran: a skipped provider could never discover it.
+    """
+    store = _store()
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=100.0)
+    later = {"data": [{"id": "gpt-5-7", "context_window": 52815,
+                       "max_output_tokens": 8192}]}
+    with caplog.at_level(logging.WARNING):
+        await sync_catalogue(_routed(models=later, health_status=500), [_chatgpt()],
+                             store, now=200.0)
+    routes = {r.model_id: r for r in store.active_routes()}
+    assert "gpt-5-7" in routes, "the provider was skipped instead of carried over"
+    # From the STORED contract, not from providers.yaml: this provider declares
+    # no default_capabilities at all in the fixture.
+    assert routes["gpt-5-7"].capabilities.vision is True
+    assert "carrying over" in caplog.text.lower()
+
+
+async def test_a_failing_health_with_nothing_stored_still_skips_the_provider(caplog):
+    """The other half of the carry-over: with no last good sweep to fall back
+    on there is nothing to carry, and inventing capabilities from the YAML
+    fallback would look exactly like a measurement. Skipping stays the answer."""
+    store = _store()
+    with caplog.at_level(logging.WARNING):
+        await sync_catalogue(_routed(health_status=500), [_chatgpt()], store, now=100.0)
+    assert store.active_routes() == []
+    assert "chatgpt" in caplog.text
+
+
+_BLIND = {**_HEALTH, "auth": {"mode": "unknown", "plan": None,
+                              "subscription_active": False},
+          "capabilities": {**_CAPS, "chat": True, "streaming": True}}
+
+
+async def test_an_unknown_auth_mode_is_not_taken_at_face_value(caplog):
+    """`unknown` means "the proxy could not resolve it this cycle" (design 3.1),
+    and chatgpt-proxy answers exactly this -- unknown, with every plan-gated
+    boolean false -- when its first vendor resolve fails after a restart.
+
+    A capability boolean is only supposed to mean a DURABLE entitlement change
+    (design 3.2). Acting on this one would rewrite every chatgpt route to false
+    and fire a "lost ..." alert for a condition that clears itself, with
+    recovery costing a whole health interval.
+    """
+    store, spy = _store(), _Spy()
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=100.0, notifier=spy)
+    with caplog.at_level(logging.WARNING):
+        await sync_catalogue(_routed(health=_BLIND), [_chatgpt()], store, now=200.0,
+                             notifier=spy)
+    assert store.active_routes()[0].capabilities.vision is True
+    assert spy.sent == []
+    # Not persisted either: the stored document is still the last one that knew
+    # what account it was talking to, which is what /health reports to operators.
+    assert store.get_contract("chatgpt")["auth"]["mode"] == "account"
+    assert "unknown" in caplog.text
+
+
+async def test_an_unknown_auth_mode_with_nothing_stored_skips_the_provider():
+    store = _store()
+    await sync_catalogue(_routed(health=_BLIND), [_chatgpt()], store, now=100.0)
+    assert store.active_routes() == []
 
 
 async def test_a_provider_that_does_not_read_capabilities_never_requests_health():
@@ -1127,12 +1223,22 @@ async def test_the_first_sweep_ever_does_not_alert():
 
 
 async def test_a_subscription_expiring_soon_is_alerted_once_a_day():
+    """THREE sweeps, not two, and the third is the one that earns its place.
+
+    The suppressing sweep must CARRY the timestamp forward
+    (`{"_expiry_warned_at": warned_at}`), because the document it rides in is
+    rewritten wholesale on every sweep. Two sweeps never read what a SUPPRESSED
+    sweep stored, so they cannot tell a carried timestamp from one the suppress
+    branch dropped -- and dropping it turns "once a day" into re-alerting on
+    every sweep from the third one on, which is twice a day in production and
+    far more during a redeploy burst.
+    """
     store, spy = _store(), _Spy()
     soon = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                          time.gmtime(time.time() + 3 * 86400))
     doc = {**_HEALTH, "auth": {**_HEALTH["auth"], "expires_at": soon}}
-    await sync_catalogue(_routed(health=doc), [_chatgpt()], store,
-                         now=time.time(), notifier=spy)
-    await sync_catalogue(_routed(health=doc), [_chatgpt()], store,
-                         now=time.time() + 60, notifier=spy)
+    for offset in (0, 60, 120):
+        await sync_catalogue(_routed(health=doc), [_chatgpt()], store,
+                             now=time.time() + offset, notifier=spy)
     assert len([s for s in spy.sent if "expires" in s]) == 1
+    assert "_expiry_warned_at" in store.get_contract("chatgpt")
