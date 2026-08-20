@@ -1,5 +1,5 @@
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit, urlunsplit
 
 import yaml
@@ -200,11 +200,46 @@ def load(yaml_path: str, env: dict) -> list[Provider]:
     ) for p in data["providers"]]
 
 
-def fixed_routes(p: Provider) -> list[Route]:
-    return [Route(p.id, m["id"], p.tier,
-                 Capabilities(tools=True if p.emulates_tools else bool(m["tools"]),
-                             vision=bool(m["vision"]),
-                             context=int(m["context"]), max_output=int(m["max_output"]),
-                             images=bool(m.get("images", False))),
-                 priority=p.priority)
-            for m in p.fixed_models]
+def fixed_routes(p: Provider, contract=None) -> list[Route]:
+    """The routes declared by hand in `fixed_models`.
+
+    When the provider publishes the capability contract, a declaration here is
+    checked against it and the route is DROPPED -- not silently downgraded --
+    when the contract contradicts it. `chatgpt`'s `dall-e-3` is the case: it
+    declares `images: true` and can do nothing else, so on a lapsed plan
+    downgrading it to `images: false` would leave a route that looks like an
+    ordinary chat model, gets picked for chat, and answers nothing. Dropping it
+    is the honest outcome: the declaration asserted a shape the provider no
+    longer has.
+
+    `fixed_models` is not `exceptions`, and only `exceptions` outranks discovery.
+    This block exists to name ids a catalogue does not publish, not to overrule
+    live account state -- which is precisely what "the Go subscription expired"
+    is.
+    """
+    routes = []
+    for m in p.fixed_models:
+        capabilities = Capabilities(
+            tools=True if p.emulates_tools else bool(m["tools"]),
+            vision=bool(m["vision"]),
+            context=int(m["context"]), max_output=int(m["max_output"]),
+            images=bool(m.get("images", False)))
+        if contract is not None:
+            caps = contract.capabilities
+            contradicted = [name for name in ("tools", "vision", "images")
+                            if getattr(capabilities, name) and not caps[name]]
+            if contradicted:
+                log.warning(
+                    "%s: the fixed model %s declares %s, which this provider's "
+                    "/health reports it cannot do right now. The route is left "
+                    "out of the catalogue for this sweep.",
+                    p.id, m["id"], ", ".join(contradicted))
+                continue
+            capabilities = replace(
+                capabilities,
+                audio_speech=caps["audio_speech"],
+                audio_transcription=caps["audio_transcription"],
+                translate=caps["translate"],
+                search=caps["search"])
+        routes.append(Route(p.id, m["id"], p.tier, capabilities, priority=p.priority))
+    return routes

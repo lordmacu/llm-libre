@@ -1,7 +1,8 @@
 from pathlib import Path
 
+from llm_libre.contract import REQUIRED_CAPABILITIES, Auth, ProviderContract
 from llm_libre.models import Capabilities
-from llm_libre.providers import fixed_routes, load
+from llm_libre.providers import Provider, fixed_routes, load
 
 YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
@@ -583,3 +584,55 @@ def test_the_real_registry_only_lets_chatgpt_read_the_contract():
     # proxy publishes /health would cost it a sweep of skipped syncs.
     providers = load("providers.yaml", {})
     assert [p.id for p in providers if p.reads_capabilities] == ["chatgpt"]
+
+
+def _contract(**overrides):
+    caps = {k: False for k in REQUIRED_CAPABILITIES}
+    caps.update(chat=True, streaming=True, images=True)
+    caps.update(overrides)
+    return ProviderContract(version=1, provider="chatgpt",
+                            auth=Auth(mode="account"), capabilities=caps)
+
+
+def _chatgpt():
+    return Provider("chatgpt", "free", "openai", "https://c.test/v1", "", "/models",
+                    {}, [{"id": "dall-e-3", "tools": False, "vision": False,
+                          "images": True, "context": 128000, "max_output": 0}])
+
+
+def test_a_fixed_route_survives_when_the_contract_confirms_it():
+    routes = fixed_routes(_chatgpt(), contract=_contract(images=True))
+    assert [r.model_id for r in routes] == ["dall-e-3"]
+    assert routes[0].capabilities.images is True
+
+
+def test_a_fixed_route_is_dropped_when_the_contract_contradicts_it():
+    # The event the design exists for: the Go plan lapses, `images` goes false,
+    # and dall-e-3 -- which can do nothing else -- leaves the catalogue instead
+    # of staying on as a chat route that answers nothing.
+    assert fixed_routes(_chatgpt(), contract=_contract(images=False)) == []
+
+
+def test_without_a_contract_a_fixed_route_is_untouched():
+    routes = fixed_routes(_chatgpt())
+    assert [r.model_id for r in routes] == ["dall-e-3"]
+    assert routes[0].capabilities.images is True
+
+
+def test_a_fixed_route_gains_the_provider_level_axes():
+    routes = fixed_routes(_chatgpt(), contract=_contract(images=True, translate=True))
+    assert routes[0].capabilities.translate is True
+
+
+def test_a_fixed_route_gains_all_four_provider_level_axes_even_when_unclaimed():
+    # The brief's test above only proves `translate` comes through. The other
+    # three (audio_speech, audio_transcription, search) must be applied to
+    # EVERY surviving fixed route too, not only when the model itself declared
+    # something -- fixed_models never mentions them, so this is the only way
+    # they can reach a fixed route at all.
+    routes = fixed_routes(_chatgpt(), contract=_contract(
+        images=True, audio_speech=True, audio_transcription=True, search=True))
+    caps = routes[0].capabilities
+    assert caps.audio_speech is True
+    assert caps.audio_transcription is True
+    assert caps.search is True
