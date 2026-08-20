@@ -3,9 +3,16 @@ import re
 
 from dataclasses import replace
 
+from llm_libre.contract import ProviderContract
 from llm_libre.models import Capabilities, Route
 
 log = logging.getLogger(__name__)
+
+# The three capabilities that genuinely vary between models of the SAME
+# provider: grok publishes 31 ids of which the three imagine-agent-mode ones
+# draw but neither chat nor see, while the other 28 are the opposite. Everything
+# else in the contract is a property of the provider's account, not of a model.
+_PER_MODEL = ("tools", "vision", "images")
 
 # Signals that a model, however free and however much text it returns, is NOT a
 # general-purpose chat model and has no business in the `auto` rotation. They are
@@ -147,11 +154,70 @@ def _is_alias(m: dict) -> bool:
     return str(m.get("description") or "").startswith(_ALIAS_PREFIX)
 
 
+def capabilities_from_contract(c: ProviderContract,
+                               fallback: Capabilities | None) -> Capabilities:
+    """The provider-level capabilities a contract asserts.
+
+    The contract carries no sizes: `context` and `max_output` vary per model and
+    arrive from /v1/models (see `apply_model_metadata`). Until one does, the YAML
+    declaration is what there is -- and 0 when there is not even that, which is
+    the honest value: `x_min_context` filtering on 0 excludes the route from
+    requests that need a big window, rather than promising one it may not have.
+    """
+    caps = c.capabilities
+    return Capabilities(
+        tools=caps["tools"],
+        vision=caps["vision"],
+        context=fallback.context if fallback else 0,
+        max_output=fallback.max_output if fallback else 0,
+        images=caps["images"],
+        audio_speech=caps["audio_speech"],
+        audio_transcription=caps["audio_transcription"],
+        translate=caps["translate"],
+        search=caps["search"],
+    )
+
+
+def apply_model_metadata(base: Capabilities, m: dict, provider: str) -> Capabilities:
+    """Narrow `base` with what /v1/models says about THIS model.
+
+    A per-model value may only be NARROWER than the provider-level one. Widening
+    is a contradiction, not extra information: the provider-level block is
+    resolved against the ACCOUNT, so "this account cannot generate images" is a
+    fact about the whole proxy, and a model claiming otherwise is describing what
+    it could do on some other plan. It is logged and dropped, rather than
+    refusing the whole document, because one confused entry should not cost the
+    other twelve their real context windows.
+    """
+    fields = {}
+    context = m.get("context_window")
+    if isinstance(context, int) and not isinstance(context, bool) and context > 0:
+        fields["context"] = context
+    max_output = m.get("max_output_tokens")
+    if isinstance(max_output, int) and not isinstance(max_output, bool) and max_output >= 0:
+        fields["max_output"] = max_output
+    per_model = m.get("capabilities")
+    if isinstance(per_model, dict):
+        for name in _PER_MODEL:
+            value = per_model.get(name)
+            if not isinstance(value, bool):
+                continue
+            if value and not getattr(base, name):
+                log.warning(
+                    "catalog %s: model %s claims %s=true while the provider "
+                    "reports it false; the provider-level value wins.",
+                    provider, m.get("id"), name)
+                continue
+            fields[name] = value
+    return replace(base, **fields) if fields else base
+
+
 def normalize(provider: str, data: dict | list, priority: int = 100,
               default_capabilities: Capabilities | None = None,
               exceptions: dict | None = None,
               emulates_tools: bool = False,
-              measured_rates: dict[str, float] | None = None) -> list[Route]:
+              measured_rates: dict[str, float] | None = None,
+              contract: ProviderContract | None = None) -> list[Route]:
     """Turn a /models response into usable free chat routes.
 
     `priority` belongs to the PROVIDER (see Provider.priority), not to anything
@@ -170,6 +236,15 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
     report. This is still DISCOVERY in the sense that matters (design section 1):
     the IDS are read from /models, never hardcoded; only the capabilities come
     from the registry.
+
+    `contract` (Provider.reads_capabilities) is the /health contract, and when
+    present it takes over from `default_capabilities` as the provider-level
+    source -- PRECEDENCE, strongest first, and the order is the whole design:
+      1. `exceptions` (providers.yaml)  -- where a MEASURED lie is recorded
+      2. /v1/models per-model values    -- narrowing only
+      3. /health provider-level values  -- the contract
+      4. `default_capabilities` (YAML)  -- the fallback for a proxy that
+                                            has not adopted the contract
     """
     items = data.get("data", data) if isinstance(data, dict) else data
     routes: list[Route] = []
@@ -193,16 +268,18 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
             log.info("catalog %s: %s discarded, the provider does not describe it "
                      "as a general chat model", provider, m["id"])
             continue
-        if default_capabilities is not None:
+        # PRECEDENCE, strongest first -- and the order is the whole design:
+        #   1. `exceptions` (providers.yaml)  -- where a MEASURED lie is recorded
+        #   2. /v1/models per-model values    -- narrowing only
+        #   3. /health provider-level values  -- the contract
+        #   4. `default_capabilities` (YAML)  -- the fallback for a proxy that
+        #                                        has not adopted the contract
+        if contract is not None:
+            capabilities = apply_model_metadata(
+                capabilities_from_contract(contract, default_capabilities),
+                m, provider)
+        elif default_capabilities is not None:
             capabilities = default_capabilities
-            # A discovered catalogue need NOT be homogeneous: grok publishes 31
-            # ids of which 25 make tool calls and 6 do not. The exception
-            # overrides ONLY the declared fields; whatever is not named is
-            # inherited, so correcting one capability of one model does not force
-            # repeating the other three.
-            override = (exceptions or {}).get(m["id"])
-            if override:
-                capabilities = replace(capabilities, **override)
         else:
             if not _is_free(m):
                 continue
@@ -220,6 +297,17 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
                 context=int(m.get("context_length") or top.get("context_length") or 0),
                 max_output=int(top.get("max_completion_tokens") or 0),
             )
+        # `exceptions` applies to BOTH declared paths, and applies LAST: it is
+        # the hand-written override, and the only thing that may contradict a
+        # provider's own report of itself. A discovered catalogue need NOT be
+        # homogeneous -- grok publishes 31 ids of which 25 make tool calls and 6
+        # do not -- and the exception overrides ONLY the declared fields;
+        # whatever is not named is inherited, so correcting one capability of
+        # one model does not force repeating the other three.
+        if contract is not None or default_capabilities is not None:
+            override = (exceptions or {}).get(m["id"])
+            if override:
+                capabilities = replace(capabilities, **override)
         if emulates_tools:
             capabilities = replace(capabilities, tools=True)
         routes.append(Route(

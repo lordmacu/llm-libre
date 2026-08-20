@@ -429,3 +429,87 @@ def test_a_route_that_was_never_refused_is_never_demoted():
     routes = normalize("deepseek", _catalogue(), priority=0, measured_rates={})
     assert routes[0].priority == 0
     assert normalize("deepseek", _catalogue(), priority=0)[0].priority == 0
+
+
+from llm_libre.catalog import apply_model_metadata, capabilities_from_contract
+from llm_libre.contract import REQUIRED_CAPABILITIES, Auth, ProviderContract
+
+
+def _contract(**overrides):
+    caps = {k: False for k in REQUIRED_CAPABILITIES}
+    caps.update(chat=True, streaming=True, vision=True, images=True,
+                translate=True, search=True)
+    caps.update(overrides)
+    return ProviderContract(version=1, provider="chatgpt",
+                            auth=Auth(mode="account", plan="go",
+                                      subscription_active=True),
+                            capabilities=caps)
+
+
+def test_the_contract_supplies_the_provider_level_capabilities():
+    routes = normalize("chatgpt", {"data": [{"id": "gpt-5-6"}]},
+                       default_capabilities=_CHATGPT_DEFAULTS,
+                       contract=_contract())
+    c = routes[0].capabilities
+    assert c.vision is True
+    assert c.images is True
+    assert c.translate is True
+    assert c.search is True
+    assert c.tools is False
+
+
+def test_per_model_metadata_supplies_the_real_context_window():
+    # The whole reason this exists: 128000 declared, 52815 real.
+    routes = normalize("chatgpt",
+                       {"data": [{"id": "gpt-5-6", "context_window": 52815,
+                                  "max_output_tokens": 8192}]},
+                       default_capabilities=_CHATGPT_DEFAULTS,
+                       contract=_contract())
+    assert routes[0].capabilities.context == 52815
+    assert routes[0].capabilities.max_output == 8192
+
+
+def test_a_model_without_a_context_window_falls_back_to_the_yaml():
+    routes = normalize("chatgpt", {"data": [{"id": "gpt-5-6"}]},
+                       default_capabilities=_CHATGPT_DEFAULTS,
+                       contract=_contract())
+    assert routes[0].capabilities.context == _CHATGPT_DEFAULTS.context
+
+
+def test_a_per_model_capability_may_narrow_the_provider_level_one():
+    routes = normalize("chatgpt",
+                       {"data": [{"id": "gpt-image-1",
+                                  "capabilities": {"vision": False, "images": True}}]},
+                       default_capabilities=_CHATGPT_DEFAULTS,
+                       contract=_contract())
+    assert routes[0].capabilities.vision is False
+    assert routes[0].capabilities.images is True
+
+
+def test_a_per_model_capability_may_not_widen_the_provider_level_one(caplog):
+    with caplog.at_level(logging.WARNING):
+        routes = normalize("chatgpt",
+                           {"data": [{"id": "gpt-5-6",
+                                      "capabilities": {"images": True}}]},
+                           default_capabilities=_CHATGPT_DEFAULTS,
+                           contract=_contract(images=False))
+    assert routes[0].capabilities.images is False
+    assert "gpt-5-6" in caplog.text
+
+
+def test_exceptions_beat_the_contract():
+    # The strongest voice, and it must stay that way: `tools: false` for chatgpt
+    # is a MEASURED correction (0/3 tool_calls, twice) to what the proxy claims
+    # about itself. A discovery source that could overrule it would re-open the
+    # exact failure the declaration exists to prevent.
+    routes = normalize("chatgpt", {"data": [{"id": "gpt-5-6"}]},
+                       default_capabilities=_CHATGPT_DEFAULTS,
+                       exceptions={"gpt-5-6": {"vision": False}},
+                       contract=_contract(vision=True))
+    assert routes[0].capabilities.vision is False
+
+
+def test_without_a_contract_nothing_changes():
+    routes = normalize("chatgpt", {"data": [{"id": "gpt-5-6"}]},
+                       default_capabilities=_CHATGPT_DEFAULTS)
+    assert routes[0].capabilities == _CHATGPT_DEFAULTS
