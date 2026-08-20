@@ -309,7 +309,7 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         == {"routes", "probes", "events", "paid_usage",
             # Added later; a legacy database gains them from CREATE TABLE IF NOT
             # EXISTS like any other, since they hold no pre-existing data.
-            "assets", "sweeps"}
+            "assets", "sweeps", "provider_contracts"}
     # The old indexes are dropped rather than carried over: renaming a table keeps
     # its index NAMES, so leaving them would mean two identical indexes per table.
     assert {r[0] for r in con.execute(

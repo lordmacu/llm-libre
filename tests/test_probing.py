@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from llm_libre import probing
+from llm_libre.contract import REQUIRED_CAPABILITIES
 from llm_libre.storage import Storage
 from llm_libre.api import State
 from llm_libre.models import Capabilities, Route
@@ -1004,3 +1005,76 @@ async def test_a_sweep_that_dies_mid_catalogue_still_counts_against_the_floor(mo
     calls.clear()
     await cycle(state, counter=0)
     assert [u for u in calls if "chat/completions" in u] == []
+
+
+_CAPS = {k: False for k in REQUIRED_CAPABILITIES}
+_HEALTH = {"status": "ok", "contract": 1, "provider": "chatgpt",
+           "auth": {"mode": "account", "plan": "go", "subscription_active": True},
+           "capabilities": {**_CAPS, "chat": True, "streaming": True,
+                            "vision": True, "images": True}}
+_MODELS = {"data": [{"id": "gpt-5-6", "context_window": 52815,
+                     "max_output_tokens": 8192,
+                     "capabilities": {"tools": False, "vision": True,
+                                      "images": False}}]}
+
+
+def _chatgpt(**kw):
+    return Provider("chatgpt", "free", "openai", "https://c.test/v1", "",
+                    "/models", {}, [], reads_capabilities=True, **kw)
+
+
+def _routed(health=None, models=None, health_status=200):
+    def handler(req):
+        if req.url.path.endswith("/health"):
+            return httpx.Response(health_status, json=health or _HEALTH)
+        return httpx.Response(200, json=models or _MODELS)
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+async def test_sync_applies_the_contract_to_the_discovered_routes():
+    store = _store()
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=100.0)
+    caps = store.active_routes()[0].capabilities
+    assert caps.vision is True
+    assert caps.context == 52815          # not the 128000 anyone declared
+    assert caps.images is False           # narrowed per model
+
+
+async def test_sync_persists_the_contract_document():
+    store = _store()
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=100.0)
+    assert store.get_contract("chatgpt")["auth"]["plan"] == "go"
+
+
+async def test_a_failing_health_keeps_the_previous_catalogue(caplog):
+    store = _store()
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=100.0)
+    before = store.active_routes()
+    with caplog.at_level(logging.WARNING):
+        await sync_catalogue(_routed(health_status=500), [_chatgpt()], store, now=200.0)
+    assert store.active_routes() == before
+    assert "chatgpt" in caplog.text
+
+
+async def test_a_provider_that_does_not_read_capabilities_never_requests_health():
+    seen = []
+
+    def handler(req):
+        seen.append(req.url.path)
+        return httpx.Response(200, json=CATALOGUE)
+
+    store = _store()
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
+    await sync_catalogue(httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                         prov, store, now=100.0)
+    assert not any(p.endswith("/health") for p in seen)
+
+
+async def test_a_health_without_the_contract_falls_back_to_the_yaml():
+    store = _store()
+    defaults = Capabilities(tools=False, vision=False, context=128000, max_output=8192)
+    provider = Provider("chatgpt", "free", "openai", "https://c.test/v1", "",
+                        "/models", {}, [], reads_capabilities=True,
+                        default_capabilities=defaults)
+    await sync_catalogue(_routed(health={"status": "ok"}), [provider], store, now=100.0)
+    assert store.active_routes()[0].capabilities.context == 128000

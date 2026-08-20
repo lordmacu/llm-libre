@@ -1,4 +1,5 @@
 import bisect
+import json
 import sqlite3
 from statistics import median
 
@@ -56,6 +57,9 @@ CREATE TABLE IF NOT EXISTS assets (
     id TEXT PRIMARY KEY, content_type TEXT NOT NULL,
     bytes INTEGER NOT NULL, created_at REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_assets_age ON assets(created_at);
+
+CREATE TABLE IF NOT EXISTS provider_contracts (
+    provider TEXT PRIMARY KEY, doc TEXT NOT NULL, seen_at REAL NOT NULL);
 """
 
 # The previous Spanish-named shape, kept only so `_migrate` can recognise it and
@@ -884,6 +888,34 @@ class Storage:
         self._con.execute("DELETE FROM probes WHERE at < ?", (before,))
         self._con.execute("DELETE FROM events WHERE at < ?", (before,))
         self._con.commit()
+
+    def put_contract(self, provider: str, doc: dict, timestamp: float) -> None:
+        """Record the last /health document a provider published.
+
+        Persisted rather than kept in memory for two reasons, both real: the
+        gateway's own /health has to be able to report the contract without
+        waiting for a sweep after a restart, and the capability-off alert needs
+        the PREVIOUS document to detect a transition -- an in-memory copy would
+        make every restart look like a fresh start and either re-alert or go
+        silent.
+        """
+        self._con.execute(
+            """INSERT INTO provider_contracts (provider, doc, seen_at)
+               VALUES (?,?,?)
+               ON CONFLICT(provider) DO UPDATE SET
+                   doc=excluded.doc, seen_at=excluded.seen_at""",
+            (provider, json.dumps(doc), timestamp))
+        self._con.commit()
+
+    def get_contract(self, provider: str) -> dict | None:
+        row = self._con.execute(
+            "SELECT doc FROM provider_contracts WHERE provider = ?",
+            (provider,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def all_contracts(self) -> dict:
+        return {p: json.loads(d) for p, d in self._con.execute(
+            "SELECT provider, doc FROM provider_contracts")}
 
 
 def _budget(events, now: float) -> RateBudget:

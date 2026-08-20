@@ -6,6 +6,7 @@ import httpx
 
 from llm_libre.assets import RETENTION_S as ASSET_RETENTION_S
 from llm_libre.catalog import normalize
+from llm_libre.contract import parse_health
 from llm_libre.models import Route
 from llm_libre.providers import Provider, fixed_routes, join_path
 from llm_libre.proxy import PING
@@ -75,7 +76,7 @@ HEALTH_FLOOR_S = min(900.0, HEALTH_INTERVAL_S)
 
 
 async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
-                         store, now: float) -> int:
+                         store, now: float, notifier=None) -> int:
     """Refresh the catalogue, provider by provider.
 
     Removing routes that no longer appear is decided PER PROVIDER, not for the
@@ -94,7 +95,22 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     broken provider than a genuinely empty catalogue) is not touched at all:
     better to keep what was already known about IT than to erase it.
 
-    Each of those four paths LEAVES A WARNING with the provider and the reason.
+    A provider with `reads_capabilities` set (Provider.reads_capabilities) adds a
+    FIFTH way to fail, ahead of all the others: its /health is fetched FIRST, before
+    anything else is written for that provider, and a failure there (network,
+    non-200, or a body that is not valid JSON) `continue`s the whole provider --
+    same discipline as a failing /models, for the same reason. Rewriting this
+    provider's fixed_models or discovered routes with fallback capability values
+    after /health failed would look exactly like a real measurement; skipping the
+    provider entirely keeps that distinction honest. A /health that answers but
+    does not speak the contract (`contract.parse_health` returns None) is NOT a
+    failure in this sense: it is the normal, permanent state for a provider that
+    has not adopted it, so the sync proceeds with `contract=None` and every
+    capability falls back to `default_capabilities`/`exceptions` exactly as
+    before. A provider without `reads_capabilities` makes no /health request at
+    all -- that is the default for every provider except the ones that opt in.
+
+    Each of those five paths LEAVES A WARNING with the provider and the reason.
     Without that, keeping the old catalogue -- which is the right thing -- becomes
     indistinguishable from everything working: that provider's catalogue freezes
     forever and nobody finds out. This is exactly the layer that exists so a
@@ -125,8 +141,41 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
             "used to detect renames, see Storage.upsert_routes)", deactivated)
     total = 0
     for p in providers:
+        headers = dict(p.extra_headers)
+        if p.api_key.strip():
+            headers["Authorization"] = "Bearer " + p.api_key
+        # The capability contract, BEFORE anything is written for this provider.
+        # A failure here skips the provider entirely -- exactly what a failing
+        # /models already does -- so the previous catalogue survives instead of
+        # being rewritten with fallback values that would look like a real
+        # measurement. Keeping what is known beats erasing it.
+        contract = None
+        if p.reads_capabilities:
+            try:
+                r = await http.get(join_path(p.base_url, "/health"),
+                                   headers=headers, timeout=15.0)
+                r.raise_for_status()
+                doc = r.json()
+            except (httpx.HTTPError, ValueError) as e:
+                log.warning(
+                    "capabilities of %s: could not read /health (%s: %s). "
+                    "Keeping the previous catalogue for this provider.",
+                    p.id, type(e).__name__, e)
+                continue
+            contract = parse_health(p.id, doc)
+            if contract is None:
+                log.warning(
+                    "capabilities of %s: /health does not implement the "
+                    "capability contract; falling back to providers.yaml.", p.id)
+            else:
+                # `_announce_changes` compares against the STORED document, so
+                # it must run BEFORE the new one replaces it. What it returns is
+                # its own bookkeeping (see Task 12), merged in so a single write
+                # persists both the contract and the alert state.
+                extra = _announce_changes(store, p.id, contract, notifier)
+                store.put_contract(p.id, {**doc, **extra}, now)
         if p.fixed_models:
-            routes = fixed_routes(p)
+            routes = fixed_routes(p, contract=contract)
             store.upsert_routes(routes, now, deactivate_missing=True, provider=p.id)
             total += len(routes)
             # No `continue` here: a provider may declare fixed routes (e.g. a
@@ -136,9 +185,6 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
             # `deactivate_missing` sweep (which removes last_seen < now only).
         if not p.models_path:
             continue
-        headers = dict(p.extra_headers)
-        if p.api_key.strip():
-            headers["Authorization"] = "Bearer " + p.api_key
         try:
             # join_path parses and rebuilds, it does not concatenate raw text:
             # see its docstring in providers.py for the bug that avoids.
@@ -157,7 +203,7 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
         try:
             fresh = normalize(p.id, r.json(), p.priority, p.default_capabilities,
                               p.exceptions, emulates_tools=p.emulates_tools,
-                              measured_rates=measured_rates)
+                              measured_rates=measured_rates, contract=contract)
         except (ValueError, TypeError, AttributeError, KeyError) as e:
             # A non-JSON body (ValueError/JSONDecodeError) or JSON of an
             # unexpected shape -- e.g. an auth error disguised as a 200, which
@@ -181,6 +227,12 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
         store.upsert_routes(fresh, now, deactivate_missing=True, provider=p.id)
         total += len(fresh)
     return total
+
+
+def _announce_changes(store, provider: str, contract, notifier) -> dict:
+    """Alert on capability transitions, and return any bookkeeping to persist
+    alongside the contract document. Filled in by Task 12."""
+    return {}
 
 
 async def probe_health(proxy, store, routes: list[Route], now: float) -> set[str]:
@@ -317,7 +369,8 @@ async def cycle(state, counter: int) -> None:
     # discovery costs no chat quota (one /models per provider) and new routes only
     # ever appear when the process restarts, which is precisely the case the floor
     # is about to short-circuit.
-    await sync_catalogue(state.http, state.providers, state.store, now)
+    await sync_catalogue(state.http, state.providers, state.store, now,
+                         notifier=state.proxy.notifier)
     routes = state.store.active_routes()
     # Has the catalogue been swept too recently to sweep it again? See
     # HEALTH_FLOOR_S: a burst of redeploys never reaches the scheduler's sleep, so

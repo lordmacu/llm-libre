@@ -930,3 +930,24 @@ def test_an_old_database_migrates_the_new_columns_to_false(store):
     route = [r for r in store.active_routes() if r.model_id == "old"][0]
     assert route.capabilities.audio_speech is False
     assert route.capabilities.search is False
+
+
+def test_a_contract_document_round_trips(store):
+    doc = {"contract": 1, "capabilities": {"images": True}}
+    store.put_contract("chatgpt", doc, 100.0)
+    assert store.get_contract("chatgpt") == doc
+
+
+def test_putting_a_contract_twice_keeps_the_latest(store):
+    store.put_contract("chatgpt", {"contract": 1, "n": 1}, 100.0)
+    store.put_contract("chatgpt", {"contract": 1, "n": 2}, 200.0)
+    assert store.get_contract("chatgpt")["n"] == 2
+
+
+def test_an_unknown_provider_has_no_contract(store):
+    assert store.get_contract("nobody") is None
+
+
+# NOTE: `store` is the fixture at tests/test_storage.py:15. `tests/test_probing.py`
+# separately defines a plain `_store()` helper -- the probing tests below use that
+# one. Two files, two conventions; follow whichever file you are editing.
