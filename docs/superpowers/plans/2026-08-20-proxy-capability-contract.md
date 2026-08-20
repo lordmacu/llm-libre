@@ -21,7 +21,7 @@
 - **A capability boolean tracks entitlement, not the meter.** Spent daily quota stays a `429` + cooldown; it must not flip a boolean.
 - **Two repos.** Tasks 1 and 6–12 are in `/Users/cristian/llm-libre`. Tasks 2–5 are in `/Users/cristian/chatgpt-proxy`. Each task's `Files:` block states which.
 - **Run llm-libre tests with** `.venv/bin/python -m pytest` from `/Users/cristian/llm-libre`.
-- **Run chatgpt-proxy tests with** `python3 -m pytest` from `/Users/cristian/chatgpt-proxy`.
+- **Run chatgpt-proxy tests with** `.venv/bin/python -m pytest` from `/Users/cristian/chatgpt-proxy`. Task 2 created that virtualenv on Homebrew python3.12: the macOS system interpreter refuses `pip install` under PEP 668, and the repo pins `cryptography==49.0.0`, which has no wheel for 3.9.
 
 ---
 
@@ -486,7 +486,7 @@ def test_a_failing_resolve_with_no_previous_state_reports_unknown():
 
 ```bash
 cd /Users/cristian/chatgpt-proxy
-python3 -m pip install -r requirements-dev.txt
+python3.12 -m venv .venv && .venv/bin/python -m pip install -r requirements-dev.txt
 python3 -m pytest tests/test_capabilities.py -v
 ```
 Expected: FAIL — `ModuleNotFoundError: No module named 'capabilities'`
@@ -663,7 +663,7 @@ def _resolve_from_vendor() -> AccountState:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `python3 -m pytest tests/test_capabilities.py -v`
+Run: `.venv/bin/python -m pytest tests/test_capabilities.py -v`
 Expected: PASS, 10 tests.
 
 - [ ] **Step 5: Commit**
@@ -750,7 +750,7 @@ def test_the_legacy_status_and_version_fields_survive(monkeypatch):
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m pytest tests/test_health_contract.py -v`
+Run: `.venv/bin/python -m pytest tests/test_health_contract.py -v`
 Expected: FAIL — `KeyError: 'contract'`
 
 - [ ] **Step 3: Write the implementation**
@@ -832,7 +832,7 @@ Add `import capabilities` to `main.py`'s import block, next to `import auth`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `python3 -m pytest tests/ -v`
+Run: `.venv/bin/python -m pytest tests/ -v`
 Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Commit**
@@ -933,7 +933,7 @@ def test_an_image_model_reports_no_output_ceiling(monkeypatch):
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python3 -m pytest tests/test_models_metadata.py -v`
+Run: `.venv/bin/python -m pytest tests/test_models_metadata.py -v`
 Expected: FAIL — `KeyError: 'context_window'` on the entries that lack it.
 
 - [ ] **Step 3: Write the implementation**
@@ -978,7 +978,7 @@ entry of the `data` list the handler has just assembled:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `python3 -m pytest tests/ -v`
+Run: `.venv/bin/python -m pytest tests/ -v`
 Expected: PASS, 20 tests.
 
 - [ ] **Step 5: Commit**
@@ -1117,7 +1117,7 @@ def test_the_native_endpoint_still_returns_the_json_form(synthesized):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `python3 -m pytest tests/test_capability_gate.py tests/test_audio_speech_bytes.py -v`
+Run: `.venv/bin/python -m pytest tests/test_capability_gate.py tests/test_audio_speech_bytes.py -v`
 Expected: FAIL — the image endpoint answers `401`/`503` rather than `501`, and
 `main` has no `Synthesized` / `_synthesize`.
 
@@ -1265,7 +1265,7 @@ máquinas, y es la que no se desactualiza.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `python3 -m pytest tests/ -v`
+Run: `.venv/bin/python -m pytest tests/ -v`
 Expected: PASS, 27 tests.
 
 - [ ] **Step 5: Commit**
