@@ -244,12 +244,21 @@ async def _read_contract(http, p: Provider, headers: dict, store, now: float,
     - `_SKIP` -- unusable now AND nothing usable stored. The caller leaves the
       provider entirely alone.
 
-    A contract whose `auth.mode` is "unknown" counts as unusable: the proxy is
-    saying it could not resolve its own account this cycle, so its plan-gated
-    booleans describe a lookup failure rather than a durable entitlement change
-    (design sections 3.1 and 3.2). Neither persisted nor alerted on -- a "lost
-    images" alert for a transient vendor blip is exactly the kind of noise that
-    gets an alert channel muted.
+    A contract whose `auth.mode` is "unknown" AND was actually reported by the
+    proxy (`auth.resolved` is True) counts as unusable: the proxy is saying it
+    could not resolve its own account this cycle, so its plan-gated booleans
+    describe a lookup failure rather than a durable entitlement change (design
+    sections 3.1 and 3.2). Neither persisted nor alerted on -- a "lost images"
+    alert for a transient vendor blip is exactly the kind of noise that gets an
+    alert channel muted.
+
+    An absent or malformed `auth` block also parses to `mode="unknown"`, but
+    with `auth.resolved` False -- that is a proxy with nothing to say about
+    accounts at all (grok has no plan tiers and no account concept), not one
+    that asked its vendor and failed. Treating it the same as the resolved case
+    would refuse a perfect eleven-boolean `capabilities` block over silence and,
+    with nothing stored yet, freeze that provider's catalogue forever: the exact
+    failure this contract exists to prevent, arriving by a different route.
     """
     reason = ""
     fresh = doc = None
@@ -266,7 +275,7 @@ async def _read_contract(http, p: Provider, headers: dict, store, now: float,
                 "capabilities of %s: /health does not implement the "
                 "capability contract; falling back to providers.yaml.", p.id)
             return None
-        if fresh.auth.mode == "unknown":
+        if fresh.auth.mode == "unknown" and fresh.auth.resolved:
             reason = ("/health reports auth.mode='unknown', so the proxy could "
                       "not resolve its account this cycle and its capability "
                       "booleans state nothing durable")

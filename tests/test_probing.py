@@ -1242,3 +1242,21 @@ async def test_a_subscription_expiring_soon_is_alerted_once_a_day():
                              now=time.time() + offset, notifier=spy)
     assert len([s for s in spy.sent if "expires" in s]) == 1
     assert "_expiry_warned_at" in store.get_contract("chatgpt")
+
+
+async def test_a_contract_with_no_auth_block_is_still_usable():
+    # grok's shape: eleven honest booleans, nothing to say about an account.
+    store = _store()
+    doc = {k: v for k, v in _HEALTH.items() if k != "auth"}
+    await sync_catalogue(_routed(health=doc), [_chatgpt()], store, now=100.0)
+    assert [r.key for r in store.active_routes()] == ["chatgpt/gpt-5-6"]
+    assert store.get_contract("chatgpt") is not None
+
+
+async def test_a_proxy_reporting_unknown_is_still_refused(caplog):
+    store = _store()
+    doc = {**_HEALTH, "auth": {**_HEALTH["auth"], "mode": "unknown"}}
+    with caplog.at_level(logging.WARNING):
+        await sync_catalogue(_routed(health=doc), [_chatgpt()], store, now=100.0)
+    assert store.get_contract("chatgpt") is None
+    assert "could not resolve" in caplog.text

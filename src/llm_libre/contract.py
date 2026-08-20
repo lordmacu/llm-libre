@@ -56,6 +56,14 @@ class Auth:
     plan: str | None = None
     subscription_active: bool = False
     expires_at: str | None = None        # ISO 8601 UTC, or None
+    # Whether the proxy actually TOLD us this, or whether `_auth` supplied
+    # `mode="unknown"` because the block was absent or malformed. Two different
+    # facts used to arrive identically: "I asked my vendor and could not tell"
+    # (a transient condition worth refusing a sweep over) and "I have no account
+    # concept and said nothing" (perfectly normal -- grok has no plan tiers).
+    # Refusing the second freezes that provider's catalogue forever, which is the
+    # failure this whole contract exists to prevent.
+    resolved: bool = False
 
 
 @dataclass(frozen=True)
@@ -134,6 +142,13 @@ def _auth(provider: str, data: object) -> Auth:
     `capabilities`: nothing routes on `auth`. Losing it costs an operator a line
     in /health and one alert; losing the capabilities would cost correct routing.
     The two are treated differently because they are worth different amounts.
+
+    `Auth.resolved` distinguishes WHY `mode` ended up "unknown". An absent or
+    malformed block leaves it at the dataclass default (`False`): the proxy said
+    nothing, which is the normal, permanent shape for one with no account
+    concept at all (grok has no plan tiers). A well-formed dict sets it `True`
+    even when `mode` itself was unrecognised and downgraded below -- the proxy
+    DID speak, it just used a string this contract version does not know.
     """
     if not isinstance(data, dict):
         return Auth(mode="unknown")
@@ -150,4 +165,5 @@ def _auth(provider: str, data: object) -> Auth:
         plan=plan if isinstance(plan, str) and plan else None,
         subscription_active=bool(data.get("subscription_active", False)),
         expires_at=expires_at if isinstance(expires_at, str) and expires_at else None,
+        resolved=True,
     )

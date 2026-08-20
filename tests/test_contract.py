@@ -31,7 +31,7 @@ def test_a_compliant_document_is_parsed():
     assert c.version == VERSION
     assert c.provider == "chatgpt"
     assert c.auth == Auth(mode="account", plan="go", subscription_active=True,
-                          expires_at="2026-09-06T00:28:46Z")
+                          expires_at="2026-09-06T00:28:46Z", resolved=True)
     assert c.capabilities["images"] is True
     assert c.capabilities["translate"] is False
 
@@ -92,3 +92,29 @@ def test_an_unrecognised_auth_mode_degrades_to_unknown(caplog):
 def test_a_body_that_is_not_an_object_is_not_a_contract():
     assert parse_health("chatgpt", ["ok"]) is None
     assert parse_health("chatgpt", None) is None
+
+
+def test_a_reported_unknown_is_distinguished_from_an_absent_auth_block():
+    # Two very different facts that both used to arrive as mode="unknown":
+    # "the proxy asked its vendor and could not tell" (act on it) versus
+    # "this proxy has no account concept and said nothing" (do not).
+    said = parse_health("p", _doc(auth={"mode": "unknown"}))
+    assert said.auth.mode == "unknown"
+    assert said.auth.resolved is True
+
+    absent = _doc()
+    del absent["auth"]
+    silent = parse_health("p", absent)
+    assert silent.auth.mode == "unknown"
+    assert silent.auth.resolved is False
+
+
+def test_a_malformed_auth_block_is_not_resolved():
+    c = parse_health("p", _doc(auth="pending"))
+    assert c.auth.mode == "unknown"
+    assert c.auth.resolved is False
+
+
+def test_a_well_formed_auth_block_is_resolved():
+    c = parse_health("p", _doc())
+    assert c.auth.resolved is True
