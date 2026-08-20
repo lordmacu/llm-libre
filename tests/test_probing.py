@@ -1260,3 +1260,31 @@ async def test_a_proxy_reporting_unknown_is_still_refused(caplog):
         await sync_catalogue(_routed(health=doc), [_chatgpt()], store, now=100.0)
     assert store.get_contract("chatgpt") is None
     assert "could not resolve" in caplog.text
+
+
+async def test_a_stored_no_auth_contract_survives_a_failing_health_sweep(caplog):
+    """The sibling of the fresh-path fix (probing.py:278): the STORED-contract
+    fallback re-parses the last good document and used to discard it under the
+    same too-broad check. Once a no-auth proxy like grok has a good contract
+    stored, a LATER sweep that fails for an unrelated reason (a /health
+    timeout, a non-JSON body -- anything that sets `reason`) must not
+    re-derive "unknown, so unusable" from that stored no-auth document: doing
+    so discards `stored`, returns `_SKIP`, and `sync_catalogue` skips the
+    WHOLE provider for this sweep -- including the /models refresh, which has
+    nothing to do with the failure.
+    """
+    store = _store()
+    doc = {k: v for k, v in _HEALTH.items() if k != "auth"}
+    await sync_catalogue(_routed(health=doc), [_chatgpt()], store, now=100.0)
+    before = store.active_routes()
+    assert before, "sanity: the first sweep must have stored something"
+
+    seen = []
+    with caplog.at_level(logging.WARNING):
+        await sync_catalogue(_routed(health_status=503, seen=seen), [_chatgpt()],
+                             store, now=200.0)
+    assert "https://c.test/v1/models" in seen, (
+        "the provider was skipped instead of carrying over the stored contract")
+    assert store.active_routes() == before
+    assert store.get_contract("chatgpt") is not None
+    assert "carrying over" in caplog.text.lower()

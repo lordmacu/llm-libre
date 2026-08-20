@@ -282,7 +282,12 @@ async def _read_contract(http, p: Provider, headers: dict, store, now: float,
             fresh = None
     if reason:
         stored = parse_health(p.id, store.get_contract(p.id))
-        if stored is not None and stored.auth.mode == "unknown":
+        # Same distinction as the fresh path above, applied to the STORED
+        # document: a no-auth proxy's own last good contract also parses to
+        # `mode="unknown"` with `resolved=False`, and discarding it here for
+        # an unrelated failure (this /health request, not that stored one)
+        # would `_SKIP` the whole provider -- including its /models refresh.
+        if stored is not None and stored.auth.mode == "unknown" and stored.auth.resolved:
             stored = None
         if stored is None:
             log.warning(

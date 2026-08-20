@@ -87,6 +87,9 @@ def test_an_unrecognised_auth_mode_degrades_to_unknown(caplog):
         c = parse_health("chatgpt", _doc(auth={"mode": "subscriber"}))
     assert c.auth.mode == "unknown"
     assert "subscriber" in caplog.text
+    # The proxy DID speak -- it just used a string this contract version does
+    # not know -- so this is resolved, unlike an absent/malformed block.
+    assert c.auth.resolved is True
 
 
 def test_a_body_that_is_not_an_object_is_not_a_contract():
