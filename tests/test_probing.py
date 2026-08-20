@@ -73,6 +73,28 @@ async def test_sync_adds_the_paid_fixed_models():
     assert routes[0].tier == "paid"
 
 
+async def test_sync_supports_fixed_models_and_dynamic_discovery_together():
+    """A provider may declare fixed routes (e.g. dall-e-3) AND discover chat
+    models via models_path. Both sets must be active after a single sync pass."""
+    store = _store()
+    bare_catalogue = {"data": [
+        {"id": "gpt-5-3-mini", "object": "model", "description": "GPT-5.3 Mini"},
+    ]}
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json=bare_catalogue)))
+    prov = [Provider("chatgpt", "free", "openai", "https://cg.test", "", "/models",
+                     {}, [{"id": "dall-e-3", "tools": False, "vision": False,
+                           "images": True, "context": 128000, "max_output": 0}],
+                     priority=0,
+                     default_capabilities=Capabilities(False, False, 128000, 8192))]
+    await sync_catalogue(http, prov, store, now=100.0)
+    routes = {r.model_id: r for r in store.active_routes()}
+    assert "dall-e-3" in routes, "fixed image route missing"
+    assert "gpt-5-3-mini" in routes, "dynamically discovered chat route missing"
+    assert routes["dall-e-3"].capabilities.images is True
+    assert routes["gpt-5-3-mini"].capabilities.images is False
+
+
 async def test_sync_propagates_the_providers_priority_to_discovered_routes():
     store = _store()
     http = httpx.AsyncClient(transport=httpx.MockTransport(

@@ -105,7 +105,11 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
             routes = fixed_routes(p)
             store.upsert_routes(routes, now, deactivate_missing=True, provider=p.id)
             total += len(routes)
-            continue
+            # No `continue` here: a provider may declare fixed routes (e.g. a
+            # stable image-generation model) AND also discover its chat models
+            # dynamically via models_path. Both passes use the same `now`, so
+            # fixed routes (last_seen=now) survive the dynamic pass's
+            # `deactivate_missing` sweep (which removes last_seen < now only).
         if not p.models_path:
             continue
         headers = dict(p.extra_headers)

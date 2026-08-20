@@ -262,8 +262,17 @@ def test_the_registry_declares_exactly_the_measured_generators():
     caps = fixed_routes(mistral)[0].capabilities
     assert caps.images is True
     assert caps.vision is True
+    # chatgpt: default_capabilities has images:false (all discovered chat models
+    # cannot generate), but dall-e-3 is declared as a fixed_model with images:true.
+    # The proxy exposes POST /v1/images/generations and uses its internal DALL-E 3
+    # tool via a conversation with force_use_tools=True.
+    chatgpt = next(p for p in provs if p.id == "chatgpt")
+    assert not (chatgpt.default_capabilities and chatgpt.default_capabilities.images)
+    dalle = next(r for r in fixed_routes(chatgpt) if r.model_id == "dall-e-3")
+    assert dalle.capabilities.images is True
+    assert dalle.capabilities.tools is False
     # Everyone else: no claim. A provider gains the capability by claiming it.
-    for pid in ("chatgpt", "perplexity", "deepseek", "kilo", "minimax"):
+    for pid in ("perplexity", "deepseek", "kilo", "minimax"):
         p = next(x for x in provs if x.id == pid)
         assert not (p.default_capabilities and p.default_capabilities.images), pid
         assert all(not r.capabilities.images for r in fixed_routes(p)), pid

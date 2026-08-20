@@ -112,6 +112,26 @@ providers:
     # reserved id (colliding with parse_request's "auto" alias), and
     # catalog.normalize discards them at discovery time -- see RESERVED_IDS and
     # _is_alias in catalog.py.
+    #
+    # DALL-E 3 is declared as a fixed_model so it is ALWAYS present alongside the
+    # dynamically discovered chat models. probing.sync_catalogue processes fixed
+    # routes first, then (because `continue` was removed -- see that file) also
+    # runs the models_path pass for the same provider: the two sets coexist
+    # because both use the same `now` timestamp and the deactivate_missing sweep
+    # is `last_seen < now` (strict), so the fixed route survives the dynamic pass.
+    #
+    # `images: true` MEASURED: chatgpt-proxy /v1/images/generations sends the
+    # prompt as a conversation with force_use_tools=True; the backend calls its
+    # internal DALL-E 3 tool and returns an image asset pointer; the proxy
+    # resolves it to a pre-signed download URL. Confirmed 2026-08-19 after fixing
+    # the Format-1 SSE delta handler that was silently missing the tool message.
+    fixed_models:
+      - id: dall-e-3
+        tools: false
+        vision: false
+        images: true
+        context: 128000
+        max_output: 0
 
   - id: perplexity
     tier: free

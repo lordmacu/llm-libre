@@ -167,12 +167,18 @@ def test_a_provider_without_base_url_env_is_unaffected(tmp_path):
 #     /v1/models is now dynamic), but it still carries no capability metadata --
 #     which is why it declares `default_capabilities` instead of
 #     `fixed_models`. It is a GENERAL mechanism: any provider whose catalogue is
-#     equally bare can use it, it is not special to chatgpt. ---
+#     equally bare can use it, it is not special to chatgpt.
+#
+#     dall-e-3 is a SINGLE fixed_model added on top: the proxy exposes
+#     /v1/images/generations and needs one declared image-capable route. It
+#     coexists with dynamic discovery because probing.sync_catalogue no longer
+#     `continue`s after the fixed-models pass (see that file). ---
 
 def test_chatgpt_is_discovered_via_models_path_not_via_fixed_models():
     chatgpt = next(p for p in load(YAML, {}) if p.id == "chatgpt")
     assert chatgpt.models_path == "/models"
-    assert chatgpt.fixed_models == []
+    # dall-e-3 is the one fixed image-generation route; chat models are discovered.
+    assert [m["id"] for m in chatgpt.fixed_models] == ["dall-e-3"]
 
 
 def test_chatgpt_declares_default_capabilities_with_tools_false():
