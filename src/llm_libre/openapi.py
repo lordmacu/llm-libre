@@ -777,7 +777,16 @@ HEALTH_DOCS = {
         "fact that a client's own traffic can indirectly trigger on-demand "
         "probes) flipping this to `down` and restarting the container over "
         "nothing. A real outage still fails its second probe just as fast as "
-        "its first, so genuine detection is not slowed down."
+        "its first, so genuine detection is not slowed down.\n\n"
+        "**With a valid API key** the body also carries `providers`: the last "
+        "capability contract each in-house proxy published on its own "
+        "`/health` -- contract version, `auth_mode`, `plan`, `expires_at`, the "
+        "reported capability booleans and when they were last confirmed "
+        "(`seen_at`). It is behind a key because it names the operator's "
+        "account tier and renewal date; a keyless caller gets exactly the four "
+        "fields above, which is what a health check reads. The booleans there "
+        "are what the PROXY claims -- the effective per-route values, after "
+        "`exceptions` and `emulates_tools`, are in `GET /v1/ranking`."
     ),
     "responses": {
         200: {"description": "At least one free route is alive.",

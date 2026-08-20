@@ -1537,26 +1537,94 @@ def test_traffic_window_is_clamped_not_trusted(state_client):
         assert r.status_code == 200
 
 
+def _register(state, provider_id):
+    """Put `provider_id` in the process's registry.
+
+    The /health provider block is filtered to the providers this process loaded
+    from providers.yaml: a contract row is never deleted (the history is worth
+    keeping, exactly as it is for routes), so an entry for a provider that has
+    since been taken out of the YAML would keep reporting its last plan as
+    though it were still being swept.
+    """
+    state.providers.append(Provider(provider_id, "free", "openai",
+                                    "https://p.test/v1", "", "/models", {}, []))
+
+
 def test_health_reports_each_providers_contract(state_client):
     state, client = state_client
+    _register(state, "chatgpt")
     state.store.put_contract("chatgpt", {
         "contract": 1,
         "auth": {"mode": "account", "plan": "go", "subscription_active": True,
                  "expires_at": "2026-09-06T00:28:46Z"},
         "capabilities": {"images": True, "vision": True},
     }, 100.0)
-    body = client.get("/health").json()
+    body = client.get("/health", headers={"X-API-Key": "buena"}).json()
     entry = body["providers"]["chatgpt"]
     assert entry["contract"] == 1
     assert entry["auth_mode"] == "account"
     assert entry["plan"] == "go"
     assert entry["expires_at"] == "2026-09-06T00:28:46Z"
-    assert entry["capabilities"]["images"] is True
+    assert entry["reported_capabilities"]["images"] is True
+    assert entry["seen_at"] == 100.0
+
+
+def test_health_calls_them_reported_capabilities_not_effective_ones(state_client):
+    """Design 4.4 asked for "the effective capability set" and this endpoint
+    cannot honestly give one: it echoes the stored document, while what a route
+    is actually served with has been through `exceptions` and `emulates_tools`
+    since. Naming the key for what it holds is the fix; the effective per-route
+    values are in `GET /v1/ranking`, and this key must not read like them.
+    """
+    state, client = state_client
+    _register(state, "chatgpt")
+    state.store.put_contract(
+        "chatgpt", {"contract": 1, "capabilities": {"tools": True}}, 100.0)
+    body = client.get("/health", headers={"X-API-Key": "buena"}).json()
+    entry = body["providers"]["chatgpt"]
+    assert "capabilities" not in entry
+    assert entry["reported_capabilities"] == {"tools": True}
+
+
+def test_health_hides_the_provider_block_from_a_keyless_caller(state_client):
+    """`plan` and `expires_at` are the operator's ChatGPT tier and renewal date,
+    and this gateway faces the internet. The container health check needs the
+    status, not the subscription."""
+    state, client = state_client
+    _register(state, "chatgpt")
+    state.store.put_contract(
+        "chatgpt", {"contract": 1,
+                    "auth": {"mode": "account", "plan": "go",
+                             "expires_at": "2026-09-06T00:28:46Z"}}, 100.0)
+    r = client.get("/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert "providers" not in body
+    # ...and everything the health check and the dashboards read is still there.
+    assert set(body) == {"status", "active_routes", "available_routes",
+                         "free_available"}
+    assert "go" not in r.text
+
+
+def test_health_hides_the_provider_block_from_a_wrong_key(state_client):
+    state, client = state_client
+    _register(state, "chatgpt")
+    state.store.put_contract("chatgpt", {"contract": 1}, 100.0)
+    r = client.get("/health", headers={"X-API-Key": "mala"})
+    assert r.status_code == 200
+    assert "providers" not in r.json()
+
+
+def test_health_does_not_report_a_provider_that_left_the_registry(state_client):
+    state, client = state_client
+    state.store.put_contract("openrouter", {"contract": 1}, 100.0)
+    body = client.get("/health", headers={"X-API-Key": "buena"}).json()
+    assert body["providers"] == {}
 
 
 def test_health_reports_a_provider_without_a_contract_as_null(state_client):
     _, client = state_client
-    body = client.get("/health").json()
+    body = client.get("/health", headers={"X-API-Key": "buena"}).json()
     assert body["providers"] == {}
 
 
@@ -1577,12 +1645,14 @@ def test_health_reports_a_contract_with_no_auth_or_capabilities_block(state_clie
     """A minimal document -- just the version -- must not blow up the field
     lookups: every field degrades to None/empty rather than raising."""
     state, client = state_client
+    _register(state, "x")
     state.store.put_contract("x", {"contract": 1}, 100.0)
-    entry = client.get("/health").json()["providers"]["x"]
+    body = client.get("/health", headers={"X-API-Key": "buena"}).json()
+    entry = body["providers"]["x"]
     assert entry["auth_mode"] is None
     assert entry["plan"] is None
     assert entry["expires_at"] is None
-    assert entry["capabilities"] == {}
+    assert entry["reported_capabilities"] == {}
 
 
 def test_health_degrades_a_malformed_auth_block_instead_of_raising(state_client):
@@ -1591,10 +1661,11 @@ def test_health_degrades_a_malformed_auth_block_instead_of_raising(state_client)
     reach this endpoint. /health is the container health check: a 500 here
     restarts the process, which re-reads the same row and 500s again."""
     state, client = state_client
+    _register(state, "x")
     state.store.put_contract(
         "x", {"contract": 1, "auth": "pending", "capabilities": []}, 100.0)
-    r = client.get("/health")
+    r = client.get("/health", headers={"X-API-Key": "buena"})
     assert r.status_code == 200
     entry = r.json()["providers"]["x"]
     assert entry["auth_mode"] is None
-    assert entry["capabilities"] == {}
+    assert entry["reported_capabilities"] == {}

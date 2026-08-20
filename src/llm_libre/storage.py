@@ -914,8 +914,18 @@ class Storage:
         return json.loads(row[0]) if row else None
 
     def all_contracts(self) -> dict:
-        return {p: json.loads(d) for p, d in self._con.execute(
-            "SELECT provider, doc FROM provider_contracts")}
+        """Every stored contract as `{provider: (document, seen_at)}`.
+
+        `seen_at` travels with the document because a stale contract is
+        indistinguishable from a current one otherwise: a proxy rolled back to a
+        build that no longer publishes the contract makes `parse_health` return
+        None, and this row is never invalidated -- nothing deletes it and nothing
+        rewrites it -- so the gateway's /health would keep reporting a lapsed
+        plan as if it were today's. The column was already here; carrying it out
+        is what makes the staleness visible.
+        """
+        return {p: (json.loads(d), at) for p, d, at in self._con.execute(
+            "SELECT provider, doc, seen_at FROM provider_contracts")}
 
 
 def _budget(events, now: float) -> RateBudget:

@@ -75,14 +75,47 @@ def test_the_image_generation_endpoint_exists_at_the_openai_path(client):
 # --- response bodies ---
 
 def test_health_body_keys(client):
+    """What a KEYLESS caller gets, which is what the container health check and
+    any dashboard wired to this endpoint read. Frozen at four fields: the
+    per-provider block below is not part of the public shape."""
     body = client.get("/health").json()
-    assert set(body) == {"status", "active_routes", "available_routes", "free_available",
-                         # The last /health contract each in-house proxy published,
-                         # keyed by provider id. Added when the gateway started
-                         # reading capability contracts (Task 11) so an operator
-                         # can see plan/expiry/capabilities without a shell.
-                         "providers"}
+    assert set(body) == {"status", "active_routes", "available_routes",
+                         "free_available"}
     assert body["status"] in {"ok", "degraded", "down"}
+
+
+def test_health_body_keys_with_a_key(client):
+    """A valid key adds the last /health contract each in-house proxy published,
+    keyed by provider id. Behind a key because it carries the operator's account
+    mode, plan name and renewal date, and this gateway faces the internet."""
+    body = client.get("/health", headers=AUTH).json()
+    assert set(body) == {"status", "active_routes", "available_routes",
+                         "free_available", "providers"}
+
+
+def test_health_provider_entry_keys():
+    store = Storage(":memory:")
+    store.create_schema()
+    store.put_contract("kilo", {"contract": 1,
+                                "auth": {"mode": "account", "plan": "go",
+                                         "expires_at": "2026-09-06T00:28:46Z"},
+                                "capabilities": {"images": True}}, 100.0)
+    prov = Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(200, json={})))
+    state = State(store=store, proxy=Proxy({"kilo": prov}, store, http),
+                  api_keys={"buena"}, daily_paid_cap=200, providers=[prov])
+    entry = TestClient(create_app(state)).get(
+        "/health", headers=AUTH).json()["providers"]["kilo"]
+    assert set(entry) == {
+        "contract", "auth_mode", "plan", "expires_at",
+        # REPORTED, not effective: these are the proxy's own claims. The values
+        # a route is served with have been through `exceptions` and
+        # `emulates_tools` since, and live per route in `GET /v1/ranking`.
+        "reported_capabilities",
+        # When the document was last confirmed. A proxy rolled back to a build
+        # that no longer publishes the contract just stops updating this row.
+        "seen_at"}
 
 
 def test_ranking_row_keys(client):

@@ -297,6 +297,18 @@ def create_app(state: State) -> FastAPI:
             raise HTTPException(429, "too many requests for this key")
         return key
 
+    def _has_valid_key(x_api_key: str | None, authorization: str | None) -> bool:
+        """`require_api_key` without the raising, for a public endpoint that
+        shows MORE to an authenticated caller instead of refusing an anonymous
+        one. Only /health needs it: it is the container health check, so a 401
+        there restarts the container.
+
+        Deliberately not rate-limited per key: the caller has already passed the
+        per-IP limit above, and spending a key's minute budget on a health check
+        would punish the operator for looking."""
+        key = _resolve_api_key(x_api_key, authorization)
+        return bool(key) and key in state.api_keys
+
     def _routes_for(body: dict, key: str, needs_images: bool = False) -> tuple[list, object]:
         request = parse_request(body)
         if needs_images:
@@ -639,7 +651,8 @@ def create_app(state: State) -> FastAPI:
                 "cap": state.daily_paid_cap}
 
     @app.get("/health", **HEALTH_DOCS)
-    def health(request: Request):
+    def health(request: Request, x_api_key: str | None = Header(None),
+               authorization: str | None = Header(None)):
         # Bounded by source address: no key is required here (Coolify uses it as
         # the container health check) and it is the MOST EXPENSIVE endpoint in
         # the service -- it recalculates every route's metrics on every call,
@@ -694,12 +707,36 @@ def create_app(state: State) -> FastAPI:
         else:
             status = "down"
         code = 200 if status == "ok" else 503
+        body = {"status": status, "active_routes": len(active),
+                "available_routes": len(available), "free_available": len(free)}
+        # Everything above is what the CONTAINER HEALTH CHECK reads, and it is
+        # served to anyone. The per-provider block below is not: it carries the
+        # operator's own account mode, plan name and renewal date, and this
+        # gateway faces the internet. A key buys the diagnosis; a keyless caller
+        # gets the same four fields and the same status code it always got, with
+        # no `providers` key at all.
+        #
+        # Checked, not required: `require_api_key` raises 401, which would make
+        # the health check fail and restart the container. Same resolution as
+        # every other endpoint (`_resolve_api_key`: X-API-Key or a Bearer
+        # token), only the failure is silence instead of an error.
+        if not _has_valid_key(x_api_key, authorization):
+            return JSONResponse(body, status_code=code)
         # What each in-house proxy says about itself, so an operator can see
         # "chatgpt: account/go, images on, expires 2026-09-06" without opening a
         # shell. Read from the database, not from memory: after a restart this
         # has to answer before the first sweep has run.
+        #
+        # Filtered to the providers this process actually loaded, for the same
+        # reason `Storage.deactivate_unregistered_providers` exists for routes:
+        # a row is never deleted (the history is worth keeping), so a provider
+        # taken out of providers.yaml would otherwise keep reporting its last
+        # plan here forever, as though it were still being swept.
+        registered = {p.id for p in state.providers}
         contracts = {}
-        for provider, doc in state.store.all_contracts().items():
+        for provider, (doc, seen_at) in state.store.all_contracts().items():
+            if provider not in registered:
+                continue
             # isinstance, not `or {}`: parse_health DELIBERATELY accepts a
             # document whose `auth` is malformed -- it degrades that block to
             # "unknown" rather than discarding capabilities nothing routes on --
@@ -713,16 +750,26 @@ def create_app(state: State) -> FastAPI:
             capabilities = doc.get("capabilities")
             capabilities = capabilities if isinstance(capabilities, dict) else {}
             contracts[provider] = {
-                "contract":     doc.get("contract"),
-                "auth_mode":    auth.get("mode"),
-                "plan":         auth.get("plan"),
-                "expires_at":   auth.get("expires_at"),
-                "capabilities": capabilities,
+                "contract":   doc.get("contract"),
+                "auth_mode":  auth.get("mode"),
+                "plan":       auth.get("plan"),
+                "expires_at": auth.get("expires_at"),
+                # REPORTED, not effective, and the name says so. These are the
+                # booleans the PROXY published about itself; the values a route
+                # is actually served with go through `exceptions` and
+                # `emulates_tools` afterwards and can differ from every one of
+                # them. Those live per route in `GET /v1/ranking`, which is
+                # where "why did my image request 503" gets answered.
+                "reported_capabilities": capabilities,
+                # When that document was last confirmed. A proxy rolled back to
+                # a build that no longer publishes the contract simply stops
+                # updating this row -- nothing invalidates it -- so without the
+                # timestamp a plan that lapsed months ago reads exactly like
+                # today's.
+                "seen_at": seen_at,
             }
-        return JSONResponse({"status": status, "active_routes": len(active),
-                             "available_routes": len(available),
-                             "free_available": len(free),
-                             "providers": contracts}, status_code=code)
+        body["providers"] = contracts
+        return JSONResponse(body, status_code=code)
 
     return app
 

@@ -948,6 +948,17 @@ def test_an_unknown_provider_has_no_contract(store):
     assert store.get_contract("nobody") is None
 
 
+def test_all_contracts_carries_when_each_one_was_last_seen(store):
+    """Nothing ever invalidates one of these rows: a proxy rolled back to a
+    build that no longer publishes the contract simply stops updating it. Without
+    the timestamp travelling alongside, the gateway's /health cannot tell a plan
+    confirmed minutes ago from one confirmed months ago."""
+    store.put_contract("chatgpt", {"contract": 1}, 100.0)
+    store.put_contract("grok", {"contract": 1}, 250.0)
+    assert store.all_contracts() == {"chatgpt": ({"contract": 1}, 100.0),
+                                     "grok": ({"contract": 1}, 250.0)}
+
+
 # NOTE: `store` is the fixture at tests/test_storage.py:15. `tests/test_probing.py`
 # separately defines a plain `_store()` helper -- the probing tests below use that
 # one. Two files, two conventions; follow whichever file you are editing.
