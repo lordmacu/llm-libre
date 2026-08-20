@@ -68,6 +68,13 @@ class Provider:
     # and proxy.py detects JSON tool-call responses and converts them to the
     # OpenAI tool_calls format. See tool_emulator.py.
     emulates_tools: bool = False
+    # Whether this provider's /health publishes the capability contract (spec
+    # 2026-08-20). False -- the default -- is today's behaviour exactly:
+    # capabilities come from default_capabilities/fixed_models and nothing extra
+    # is requested. It is opt-in per provider precisely so the five in-house
+    # proxies can adopt the contract one at a time, in any order, with no flag
+    # day: a provider that has not adopted it must not have its sync skipped.
+    reads_capabilities: bool = False
 
 
 def join_path(base_url: str, suffix: str) -> str:
@@ -189,6 +196,7 @@ def load(yaml_path: str, env: dict) -> list[Provider]:
         strips_xai_cards=bool(p.get("strips_xai_cards", False)),
         timeout_s=(float(p["timeout_s"]) if p.get("timeout_s") is not None else None),
         emulates_tools=bool(p.get("emulates_tools", False)),
+        reads_capabilities=bool(p.get("reads_capabilities", False)),
     ) for p in data["providers"]]
 
 

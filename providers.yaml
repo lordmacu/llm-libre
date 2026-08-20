@@ -68,6 +68,19 @@ providers:
     # in the typical range, not in the worst case of a full generation. No other
     # provider's timeout is touched.
     timeout_s: 150
+    # Its /health publishes the capability contract (spec 2026-08-20): eleven
+    # booleans already resolved against the account's plan, plus context_window
+    # per model in /v1/models. That replaces guessing here -- `context: 128000`
+    # below was 2.4x the real 52815 -- and it is what makes `images` turn itself
+    # off when the Go subscription lapses (2026-09-06) instead of sending every
+    # image request to a route that answers 503.
+    #
+    # The declarations below STAY, and they are not dead weight: they are the
+    # fallback for a sweep where /health could not be read, and `exceptions`
+    # remains the strongest voice of all -- see the precedence note in
+    # catalog.normalize. `tools: false` in particular is a MEASURED correction
+    # to what this proxy says about itself, and no discovery may overrule it.
+    reads_capabilities: true
     unwraps_canvas: true   # see finding 1 of the review in catalog.py/reasoning.py:
                                 # it is the ONLY provider that genuinely leaks canvas mode into
                                 # content -- ':::nota{...}' is also legitimate Docusaurus/MDX

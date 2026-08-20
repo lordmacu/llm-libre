@@ -557,3 +557,28 @@ def test_no_branded_proxy_is_cut_off_by_its_own_timeout_before_two_minutes():
         timeout = _providers()[pid].timeout_s
         assert timeout is not None, f"{pid} must state its own ceiling"
         assert timeout >= 120, f"{pid} is cut off at {timeout}s"
+
+def test_reads_capabilities_defaults_to_false(tmp_path):
+    yaml_path = tmp_path / "p.yaml"
+    yaml_path.write_text(
+        "providers:\n"
+        "  - id: kilo\n    tier: free\n    dialect: openai\n"
+        "    base_url: https://k.test\n    models_path: /models\n")
+    assert load(str(yaml_path), {})[0].reads_capabilities is False
+
+
+def test_reads_capabilities_is_read_from_the_yaml(tmp_path):
+    yaml_path = tmp_path / "p.yaml"
+    yaml_path.write_text(
+        "providers:\n"
+        "  - id: chatgpt\n    tier: free\n    dialect: openai\n"
+        "    base_url: https://c.test/v1\n    models_path: /models\n"
+        "    reads_capabilities: true\n")
+    assert load(str(yaml_path), {})[0].reads_capabilities is True
+
+
+def test_the_real_registry_only_lets_chatgpt_read_the_contract():
+    # The rollout is per proxy. Any other provider turning this on before its
+    # proxy publishes /health would cost it a sweep of skipped syncs.
+    providers = load("providers.yaml", {})
+    assert [p.id for p in providers if p.reads_capabilities] == ["chatgpt"]
