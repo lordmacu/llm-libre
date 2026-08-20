@@ -331,15 +331,22 @@ async def cycle(state, counter: int) -> None:
         log.info("health: sweep skipped, the catalogue was swept %.0f min ago "
                  "(floor %.0f min)", (now - swept_at) / 60, HEALTH_FLOOR_S / 60)
     else:
+        # Marked BEFORE the sweep, not after. What the floor bounds is request
+        # VOLUME against the providers, so what it has to record is the attempt.
+        # The 2026-08-19 burst opened with a sweep the container was killed
+        # inside -- the telemetry stops at grok-*, short of kilo -- and marking on
+        # completion would have left that one uncounted and the next restart free
+        # to sweep the whole catalogue again, which is what actually happened.
+        #
+        # The cost of marking early is bounded and small: a sweep that dies at
+        # route 3 of 42 leaves the other 39 on the previous cycle's telemetry for
+        # up to HEALTH_FLOOR_S. Reliability and liveness are both read over a
+        # window, so that is staleness, not blindness.
+        state.store.mark_health_sweep(now)
         # The health probe runs FIRST, and what it learned gates the battery: one
         # request has just established which routes are reachable, so the five-request
         # battery is only spent on those. See probe_quality.
         answered = await probe_health(state.proxy, state.store, routes, now)
-        # Marked only after the sweep actually happened. If probe_health raises,
-        # the marker keeps the previous value and the next cycle sweeps -- the
-        # failure mode of a missing guard (one extra sweep) is far cheaper than
-        # that of a lying one (a catalogue nobody measures).
-        state.store.mark_health_sweep(now)
         # Two gates, and they answer different questions. `counter` is the schedule
         # this loop was written around; `last_quality_probe_at` is what actually
         # happened, and it is the one that survives a restart -- see

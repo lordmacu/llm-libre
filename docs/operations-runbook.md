@@ -34,7 +34,10 @@ back there for the mechanics.
   evidence stored in the volume, so the "runs immediately" above is only
   unconditional when there is nothing in the file to consult:
   - the **health sweep** is skipped if the catalog was swept less than
-    `probing.HEALTH_FLOOR_S` (15 min, capped at `HEALTH_PROBE_HOURS`) ago,
+    `probing.HEALTH_FLOOR_S` (15 min, capped at `HEALTH_PROBE_HOURS`) ago --
+    counted from when the sweep STARTED, so one the container was killed in
+    the middle of still counts (it spent quota, which is what the floor
+    bounds),
   - the **quality battery** is skipped if it last ran less than
     `QUALITY_PROBE_EVERY_N_CYCLES x HEALTH_PROBE_HOURS` ago.
 

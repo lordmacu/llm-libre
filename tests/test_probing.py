@@ -3,7 +3,9 @@ import logging
 import time
 
 import httpx
+import pytest
 
+from llm_libre import probing
 from llm_libre.storage import Storage
 from llm_libre.api import State
 from llm_libre.models import Capabilities, Route
@@ -976,3 +978,29 @@ async def test_an_on_demand_probe_does_not_suppress_the_sweep():
     state.store.record_probe("kilo/x:free", "health", True, 10, 0, 200, 0, 0, time.time())
     await cycle(state, counter=0)
     assert [u for u in calls if "chat/completions" in u] != []
+
+
+async def test_a_sweep_that_dies_mid_catalogue_still_counts_against_the_floor(monkeypatch):
+    """The 2026-08-19 burst OPENED with a sweep the container was killed inside:
+    the telemetry stops at grok-*, alphabetically short of kilo. If only a
+    COMPLETED sweep armed the floor, that one would have spent 19 routes' worth of
+    quota and left the next restart free to sweep the whole catalogue again --
+    which is exactly what happened, three times over, before Kilo refused.
+
+    What the floor bounds is REQUEST VOLUME, so what it must record is the
+    attempt, not the success.
+    """
+    calls = []
+    state = await _state_over(_answering(calls))
+
+    async def killed(*args, **kwargs):
+        raise RuntimeError("the container was killed mid-sweep")
+
+    monkeypatch.setattr(probing, "probe_health", killed)
+    with pytest.raises(RuntimeError):
+        await cycle(state, counter=0)
+    monkeypatch.undo()
+
+    calls.clear()
+    await cycle(state, counter=0)
+    assert [u for u in calls if "chat/completions" in u] == []
