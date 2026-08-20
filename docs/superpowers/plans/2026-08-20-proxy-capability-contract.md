@@ -1311,8 +1311,7 @@ def test_the_new_capability_axes_default_to_false():
 Append to `tests/test_storage.py`:
 
 ```python
-def test_the_new_capability_axes_survive_a_round_trip():
-    store = _store()
+def test_the_new_capability_axes_survive_a_round_trip(store):
     caps = Capabilities(tools=False, vision=True, context=52815, max_output=8192,
                         images=True, audio_speech=True, audio_transcription=True,
                         translate=True, search=True)
@@ -1320,11 +1319,10 @@ def test_the_new_capability_axes_survive_a_round_trip():
     assert store.active_routes()[0].capabilities == caps
 
 
-def test_an_old_database_migrates_the_new_columns_to_false():
+def test_an_old_database_migrates_the_new_columns_to_false(store):
     # A row written before these columns existed predates anyone measuring the
     # capability, so it migrates to "cannot", never to a guess. The next sweep
     # overwrites it with what the provider actually reports.
-    store = _store()
     store._con.execute("ALTER TABLE routes DROP COLUMN audio_speech")
     store._con.execute("ALTER TABLE routes DROP COLUMN audio_transcription")
     store._con.execute("ALTER TABLE routes DROP COLUMN translate")
@@ -1340,9 +1338,9 @@ def test_an_old_database_migrates_the_new_columns_to_false():
     assert route.capabilities.search is False
 ```
 
-> `tests/test_storage.py` already defines `_store()`; reuse it. Add
-> `Capabilities` and `Route` to that file's imports from `llm_libre.models` if
-> they are not there yet.
+> `tests/test_storage.py` provides a **`store` pytest fixture** (line 15), not a
+> `_store()` helper -- take it as an argument, as above. It already imports
+> `Capabilities` and `Route` from `llm_libre.models`.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -1944,22 +1942,25 @@ git commit -m "feat(providers): a fixed route the contract contradicts leaves th
 Append to `tests/test_storage.py`:
 
 ```python
-def test_a_contract_document_round_trips():
-    store = _store()
+def test_a_contract_document_round_trips(store):
     doc = {"contract": 1, "capabilities": {"images": True}}
     store.put_contract("chatgpt", doc, 100.0)
     assert store.get_contract("chatgpt") == doc
 
 
-def test_putting_a_contract_twice_keeps_the_latest():
-    store = _store()
+def test_putting_a_contract_twice_keeps_the_latest(store):
     store.put_contract("chatgpt", {"contract": 1, "n": 1}, 100.0)
     store.put_contract("chatgpt", {"contract": 1, "n": 2}, 200.0)
     assert store.get_contract("chatgpt")["n"] == 2
 
 
-def test_an_unknown_provider_has_no_contract():
-    assert _store().get_contract("nobody") is None
+def test_an_unknown_provider_has_no_contract(store):
+    assert store.get_contract("nobody") is None
+
+
+# NOTE: `store` is the fixture at tests/test_storage.py:15. `tests/test_probing.py`
+# separately defines a plain `_store()` helper -- the probing tests below use that
+# one. Two files, two conventions; follow whichever file you are editing.
 ```
 
 Append to `tests/test_probing.py`:
@@ -2210,7 +2211,8 @@ git commit -m "feat(probing): read each proxy's capability contract, keep the ca
 Append to `tests/test_api.py`:
 
 ```python
-def test_health_reports_each_providers_contract(client, state):
+def test_health_reports_each_providers_contract(state_client):
+    state, client = state_client
     state.store.put_contract("chatgpt", {
         "contract": 1,
         "auth": {"mode": "account", "plan": "go", "subscription_active": True,
@@ -2226,27 +2228,36 @@ def test_health_reports_each_providers_contract(client, state):
     assert entry["capabilities"]["images"] is True
 
 
-def test_health_reports_a_provider_without_a_contract_as_null(client, state):
+def test_health_reports_a_provider_without_a_contract_as_null(state_client):
+    _, client = state_client
     body = client.get("/health").json()
     assert body["providers"] == {}
 ```
 
 ```python
-def test_ranking_rows_carry_the_new_capability_axes(client, state):
+def test_ranking_rows_carry_the_new_capability_axes(state_client):
+    state, client = state_client
     caps = Capabilities(tools=False, vision=True, context=52815, max_output=8192,
                         audio_speech=True, translate=True, search=True)
     state.store.upsert_routes([Route("chatgpt", "gpt-5-6", "free", caps)], time.time())
-    row = client.get("/v1/ranking", headers=_KEY).json()["routes"][0]
+    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"]
+    row = [r for r in rows if r["key"] == "chatgpt/gpt-5-6"][0]
     assert row["audio_speech"] is True
     assert row["audio_transcription"] is False
     assert row["translate"] is True
     assert row["search"] is True
 ```
 
-> `tests/test_api.py` already builds a `client`/`state` pair and already has a
-> header constant for the API key; reuse the existing fixtures and constant
-> rather than adding new ones. Add `Capabilities`/`Route` to its imports from
-> `llm_libre.models` if they are not there yet.
+> `tests/test_api.py` provides two fixtures: `client` (line 169, the TestClient
+> alone) and `state_client` (line 184, a `(state, client)` tuple). Use
+> `state_client` wherever the test needs to write to the store. Its `State` is
+> built with `api_keys={"buena"}`, so authenticated calls carry
+> `headers={"X-API-Key": "buena"}` -- there is no shared header constant. The
+> file already imports `Capabilities`, `Route` and `time`.
+>
+> The ranking fixture already seeds `kilo/a:free`, so the assertion above picks
+> its row by `key` (`"<provider>/<model_id>"`, the identity field the row
+> actually carries) rather than assuming an order.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
