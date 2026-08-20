@@ -409,11 +409,15 @@ def auth_block(state: SessionState) -> dict:
 def effective(state: SessionState) -> dict:
     """The eleven booleans. Every value below was measured, not assumed.
 
-      - `tools` is TRUE and this is the unusual one: grok returns real
-        tool_calls natively, measured 6/6 across three cases. Its own gateway
-        entry records the measurement.
+      - `tools` is TRUE and the finding behind it is subtler than a pass
+        rate: grok returns real tool_calls natively, but its 31 ids are ALIASES
+        OVER A SHARED POOL, so measuring one id once is measuring the roulette
+        rather than a model -- grok-420 reported tools=YES in one sweep and 0/3
+        when the same measurement was repeated. The gateway's own entry records
+        this; the imagine family is the exception, at 0/3 repeated.
       - `vision` is TRUE, served inside /v1/chat/completions: image_url content
         parts are uploaded and the request is steered to a vision-capable model.
+        Measured: 30 of 31 routes read a 4-digit code out of an image.
       - `images` is TRUE via the imagine-agent-mode family, the only grok models
         that generate.
       - `search`, `files`, `conversations`, `audio_speech` and
