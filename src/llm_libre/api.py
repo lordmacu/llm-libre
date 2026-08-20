@@ -700,13 +700,24 @@ def create_app(state: State) -> FastAPI:
         # has to answer before the first sweep has run.
         contracts = {}
         for provider, doc in state.store.all_contracts().items():
-            auth = doc.get("auth") or {}
+            # isinstance, not `or {}`: parse_health DELIBERATELY accepts a
+            # document whose `auth` is malformed -- it degrades that block to
+            # "unknown" rather than discarding capabilities nothing routes on --
+            # so a non-dict `auth` really can reach the stored document. A
+            # truthy non-dict would pass `or {}` and raise AttributeError here,
+            # and this endpoint is the container health check: a 500 restarts
+            # the process, which re-reads the same row from the persistent
+            # database and 500s again.
+            auth = doc.get("auth")
+            auth = auth if isinstance(auth, dict) else {}
+            capabilities = doc.get("capabilities")
+            capabilities = capabilities if isinstance(capabilities, dict) else {}
             contracts[provider] = {
                 "contract":     doc.get("contract"),
                 "auth_mode":    auth.get("mode"),
                 "plan":         auth.get("plan"),
                 "expires_at":   auth.get("expires_at"),
-                "capabilities": doc.get("capabilities") or {},
+                "capabilities": capabilities,
             }
         return JSONResponse({"status": status, "active_routes": len(active),
                              "available_routes": len(available),

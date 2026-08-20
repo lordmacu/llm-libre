@@ -1571,3 +1571,30 @@ def test_ranking_rows_carry_the_new_capability_axes(state_client):
     assert row["audio_transcription"] is False
     assert row["translate"] is True
     assert row["search"] is True
+
+
+def test_health_reports_a_contract_with_no_auth_or_capabilities_block(state_client):
+    """A minimal document -- just the version -- must not blow up the field
+    lookups: every field degrades to None/empty rather than raising."""
+    state, client = state_client
+    state.store.put_contract("x", {"contract": 1}, 100.0)
+    entry = client.get("/health").json()["providers"]["x"]
+    assert entry["auth_mode"] is None
+    assert entry["plan"] is None
+    assert entry["expires_at"] is None
+    assert entry["capabilities"] == {}
+
+
+def test_health_degrades_a_malformed_auth_block_instead_of_raising(state_client):
+    """`parse_health` deliberately tolerates a non-dict `auth` (nothing routes
+    on it) and still persists the document, so a truthy non-dict really can
+    reach this endpoint. /health is the container health check: a 500 here
+    restarts the process, which re-reads the same row and 500s again."""
+    state, client = state_client
+    state.store.put_contract(
+        "x", {"contract": 1, "auth": "pending", "capabilities": []}, 100.0)
+    r = client.get("/health")
+    assert r.status_code == 200
+    entry = r.json()["providers"]["x"]
+    assert entry["auth_mode"] is None
+    assert entry["capabilities"] == {}
