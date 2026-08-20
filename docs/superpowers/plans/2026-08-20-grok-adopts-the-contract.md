@@ -245,6 +245,16 @@ git commit -m "fix(probing): a carried-over contract adds fixed routes, it does 
 
 **Files:**
 - Create: `docker-api/capabilities.py`, `docker-api/requirements-dev.txt`, `docker-api/pytest.ini`, `docker-api/tests/__init__.py`, `docker-api/tests/test_capabilities.py`
+- Modify: `docker-api/Dockerfile` (the `COPY` manifest)
+
+> **The Dockerfile copies modules BY NAME, and this is the third time it matters.**
+> `docker-api/Dockerfile` lists each local module explicitly (line 28 onward) rather
+> than `COPY . .`. A new module that is not on that list produces a container
+> that crash-loops on `ModuleNotFoundError` with port 8893 dark — which is
+> exactly what happened to `chatgpt-proxy` twice, once with `auth.py` and once
+> with `capabilities.py` and `tool_calls.py` together. **Add `capabilities.py`
+> to the manifest in this same commit**, and put a comment on the line saying
+> that adding a module to the codebase does not add it to the image.
 
 **Interfaces:**
 - Consumes: `os.environ["GROK_SESSION_TOKEN"]`.
@@ -1548,7 +1558,29 @@ git commit -m "feat(grok): read its contract, and retire the exceptions it made 
 
 Both repos deploy by push to `main`; Coolify builds on the push.
 
-**grok-proxy first**, so the gateway never reads a contract from a proxy that cannot yet honour it. Its Dockerfile is at `/Users/cristian/per/grok/docker-api/Dockerfile` — **check whether it copies modules by name**, as `chatgpt-proxy`'s does. `capabilities.py` is new, and a `COPY` manifest that does not list it produces a container that crash-loops on `ModuleNotFoundError` with the port dark. That has happened twice in this codebase's history.
+**grok-proxy first**, so the gateway never reads a contract from a proxy that
+cannot yet honour it. Its Dockerfile copies modules by name — Task 3 adds
+`capabilities.py` to that manifest, and this check confirms nothing else was
+missed:
+
+```bash
+cd /Users/cristian/per/grok/docker-api && python3 - <<'CHECK'
+import ast, pathlib
+local = {p.stem for p in pathlib.Path(".").glob("*.py")}
+manifest = pathlib.Path("Dockerfile").read_text()
+missing = []
+for entry in ("main.py", "grok_backend.py"):
+    for node in ast.walk(ast.parse(pathlib.Path(entry).read_text())):
+        names = ([a.name.split(".")[0] for a in node.names]
+                 if isinstance(node, ast.Import) else
+                 [node.module.split(".")[0]]
+                 if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module
+                 else [])
+        missing += [f"{entry} imports {n} -> {n}.py NOT in Dockerfile"
+                    for n in names if n in local and f"{n}.py" not in manifest]
+print("\n".join(sorted(set(missing))) or "OK: every locally-imported module is on the COPY manifest")
+CHECK
+```
 
 Then llm-libre. `providers.yaml` is read once at startup, so Task 11 needs a restart, not a sweep.
 
