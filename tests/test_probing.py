@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -1288,3 +1289,68 @@ async def test_a_stored_no_auth_contract_survives_a_failing_health_sweep(caplog)
     assert store.active_routes() == before
     assert store.get_contract("chatgpt") is not None
     assert "carrying over" in caplog.text.lower()
+
+
+async def test_a_total_outage_does_not_deactivate_the_discovered_routes():
+    # /health carried over from the stored contract AND /models failing is the
+    # shape of a proxy that is simply down. Keeping what is known beats erasing
+    # it -- the routes are unusable during the outage either way, but they must
+    # come back the moment it ends, not a sweep interval later.
+    #
+    # `_chatgpt()` alone has no `fixed_models`, so the fixed-models pass never
+    # runs and the regression this test targets cannot show up -- it lives in
+    # `if p.fixed_models: ... deactivate_missing=True`. A fixed entry (matching
+    # the contract's `images: true`, so it is not itself dropped as
+    # contradicted) is what puts that pass on the critical path.
+    fixed = [{"id": "dall-e-3", "tools": False, "vision": False,
+              "context": 0, "max_output": 0, "images": True}]
+    provider = replace(_chatgpt(), fixed_models=fixed)
+    store = _store()
+    await sync_catalogue(_routed(), [provider], store, now=100.0)
+    before = [r.key for r in store.active_routes()]
+    assert before, "the first sweep must have discovered something to lose"
+
+    def dead(req):
+        return httpx.Response(503)
+
+    await sync_catalogue(httpx.AsyncClient(transport=httpx.MockTransport(dead)),
+                         [provider], store, now=200.0)
+    assert [r.key for r in store.active_routes()] == before
+
+
+async def test_a_fixed_route_withdrawn_from_the_yaml_is_still_deactivated_on_a_healthy_sweep():
+    # The regression guard above must not become "the fixed pass never
+    # deactivates": `carried_over` is only True when /health itself could not
+    # be read this sweep. On a HEALTHY sweep -- /health answers fine, fresh
+    # contract, no carry-over -- a fixed route no longer declared in
+    # providers.yaml must still be switched off right there, exactly as before
+    # the carry-over path existed.
+    #
+    # Two facts shape this fixture:
+    # - `models_path=""`: with a models_path set, /models' OWN
+    #   `deactivate_missing=True` pass (same `now`, same provider scope) would
+    #   clean up a stale fixed route regardless of what the fixed pass just
+    #   did, which would let `deactivate_missing=False` unconditionally slip
+    #   through this test undetected. A provider with fixed_models and no
+    #   models_path (like minimax) has only the fixed pass to rely on.
+    # - TWO fixed entries, only one withdrawn: `if p.fixed_models:` is falsy
+    #   (and the whole upsert -- deactivation included -- skipped) when the
+    #   list empties out entirely, which would test that guard rather than
+    #   the deactivate_missing flag this fix actually touches.
+    fixed = [{"id": "dall-e-3", "tools": False, "vision": False,
+              "context": 0, "max_output": 0, "images": True},
+             {"id": "vision-cam", "tools": False, "vision": True,
+              "context": 1000, "max_output": 100, "images": False}]
+    provider = replace(_chatgpt(), fixed_models=fixed, models_path="")
+    store = _store()
+    await sync_catalogue(_routed(), [provider], store, now=100.0)
+    assert [r.key for r in store.active_routes()] == [
+        "chatgpt/dall-e-3", "chatgpt/vision-cam"], (
+        "sanity: the first sweep must have added both fixed routes")
+
+    # vision-cam withdrawn from fixed_models; /health is untouched and still
+    # answers 200, so this contract is fresh, not carried over.
+    await sync_catalogue(_routed(), [replace(provider, fixed_models=fixed[:1])],
+                         store, now=200.0)
+    assert [r.key for r in store.active_routes()] == ["chatgpt/dall-e-3"], (
+        "a withdrawn fixed route must still be deactivated on a healthy sweep")

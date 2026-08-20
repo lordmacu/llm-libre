@@ -2,12 +2,13 @@ import calendar
 import logging
 import os
 import time
+from typing import NamedTuple
 
 import httpx
 
 from llm_libre.assets import RETENTION_S as ASSET_RETENTION_S
 from llm_libre.catalog import normalize
-from llm_libre.contract import parse_health
+from llm_libre.contract import ProviderContract, parse_health
 from llm_libre.models import Route
 from llm_libre.providers import Provider, contract_url, fixed_routes, join_path
 from llm_libre.proxy import PING
@@ -80,6 +81,22 @@ HEALTH_FLOOR_S = min(900.0, HEALTH_INTERVAL_S)
 _SKIP = object()
 
 
+class ContractRead(NamedTuple):
+    """`_read_contract`'s answer, with WHERE it came from attached.
+
+    `contract` is a `ProviderContract`, or `None` for a proxy that does not
+    speak the contract at all (the normal, permanent case for one that has not
+    adopted it). `carried_over` is only ever True alongside a `ProviderContract`
+    -- it says THIS sweep's /health could not be used and `contract` is the
+    last good one instead, which the fixed-models pass in `sync_catalogue`
+    needs to know: it must add to the catalogue on a carried-over contract, but
+    must not conclude from it that every discovered route just vanished (see
+    that pass's comment).
+    """
+    contract: ProviderContract | None
+    carried_over: bool
+
+
 async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
                          store, now: float, notifier=None) -> int:
     """Refresh the catalogue, provider by provider.
@@ -112,6 +129,27 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     whole provider `continue`d -- same discipline as a failing /models, for the
     same reason: rewriting this provider's fixed_models or discovered routes with
     fallback capability values would look exactly like a real measurement.
+
+    The carried-over branch of that fifth way to fail has a consequence purely
+    for the fixed-models pass, not for /health itself: `_read_contract` reports
+    back, via `ContractRead.carried_over`, that THIS sweep could not confirm the
+    provider's capabilities -- and the fixed-models pass runs before /models,
+    so at that point it has not seen a single discovered route yet either. If
+    it deactivated what it did not see (its normal behaviour), a provider whose
+    fixed-models pass runs on a carried-over contract would have every
+    discovered route switched off right there, restored moments later by
+    /models -- UNLESS /models fails too, which is exactly what a total outage
+    looks like (`/health` and `/models` both down). Then nothing restores them,
+    and the catalogue sits empty of everything but the fixed entries for a full
+    `HEALTH_PROBE_HOURS` interval, which is precisely the erasure design
+    section 5.1 asks the carry-over to prevent. So `deactivate_missing` is
+    `not carried_over`: on a carried-over contract the fixed-models pass only
+    ADDS, and a fixed route genuinely withdrawn from the YAML during the outage
+    keeps showing until a sweep confirms the contract again. A provider whose
+    /health is healthy, or that does not read the contract at all, sees no
+    change here: `carried_over` is False in both cases, `deactivate_missing`
+    stays True, and the fixed pass still switches off its OWN withdrawn entry
+    right there, exactly as before this existed.
 
     `auth.mode: "unknown"` is grouped with the outright failures deliberately. It
     means "the proxy could not resolve its account this cycle" (design section
@@ -168,13 +206,23 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
         # used, so the provider is left entirely alone and the previous
         # catalogue survives -- exactly what a failing /models already does.
         contract = None
+        carried_over = False
         if p.reads_capabilities:
-            contract = await _read_contract(http, p, headers, store, now, notifier)
-            if contract is _SKIP:
+            result = await _read_contract(http, p, headers, store, now, notifier)
+            if result is _SKIP:
                 continue
+            contract, carried_over = result
         if p.fixed_models:
             routes = fixed_routes(p, contract=contract)
-            store.upsert_routes(routes, now, deactivate_missing=True, provider=p.id)
+            # `deactivate_missing` is what switches off routes this pass did not
+            # see -- and on a carried-over contract this pass has not yet seen
+            # ANY discovered route, because /models has not run. If /models then
+            # fails too (the whole proxy is down, the common case), the sweep
+            # would leave the catalogue emptied of everything except the fixed
+            # entries, for a full interval. Deactivation is the /models pass's
+            # job; the fixed pass only ever adds.
+            store.upsert_routes(routes, now, deactivate_missing=not carried_over,
+                                provider=p.id)
             total += len(routes)
             # No `continue` here: a provider may declare fixed routes (e.g. a
             # stable image-generation model) AND also discover its chat models
@@ -229,18 +277,23 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
 
 async def _read_contract(http, p: Provider, headers: dict, store, now: float,
                          notifier):
-    """This sweep's capability contract for `p`, or the last good one, or _SKIP.
+    """This sweep's capability contract for `p`, as a `ContractRead`, or _SKIP.
 
     Three outcomes, and each is a different statement:
 
-    - a `ProviderContract` -- either freshly read (and then persisted, with the
-      alerts fired) or CARRIED OVER from the last good sweep when this one could
-      not be read. Carrying over is design section 5.1: freezing what is known
-      beats erasing it, and it is what keeps one bad /health from freezing a
-      provider's whole catalogue instead of just its capability values.
-    - `None` -- the proxy answered but does not speak the contract. Normal and
-      permanent for a proxy that has not adopted it: the caller falls back to
-      `default_capabilities`/`exceptions`, exactly as before this existed.
+    - `ContractRead(contract, carried_over=False)` -- freshly read (and then
+      persisted, with the alerts fired).
+    - `ContractRead(contract, carried_over=True)` -- CARRIED OVER from the last
+      good sweep because this one could not be read. Carrying over is design
+      section 5.1: freezing what is known beats erasing it, and it is what
+      keeps one bad /health from freezing a provider's whole catalogue instead
+      of just its capability values. `carried_over` is what tells the caller
+      this pass has not actually SEEN this provider's routes this sweep -- see
+      the fixed-models pass in `sync_catalogue`, the one place that matters.
+    - `ContractRead(None, carried_over=False)` -- the proxy answered but does
+      not speak the contract. Normal and permanent for a proxy that has not
+      adopted it: the caller falls back to `default_capabilities`/`exceptions`,
+      exactly as before this existed.
     - `_SKIP` -- unusable now AND nothing usable stored. The caller leaves the
       provider entirely alone.
 
@@ -274,7 +327,7 @@ async def _read_contract(http, p: Provider, headers: dict, store, now: float,
             log.warning(
                 "capabilities of %s: /health does not implement the "
                 "capability contract; falling back to providers.yaml.", p.id)
-            return None
+            return ContractRead(None, False)
         if fresh.auth.mode == "unknown" and fresh.auth.resolved:
             reason = ("/health reports auth.mode='unknown', so the proxy could "
                       "not resolve its account this cycle and its capability "
@@ -300,14 +353,14 @@ async def _read_contract(http, p: Provider, headers: dict, store, now: float,
             "the last good sweep; nothing is written to the contract, so "
             "/health keeps showing when they were last confirmed.",
             p.id, reason)
-        return stored
+        return ContractRead(stored, True)
     # `_announce_changes` compares against the STORED document, so it must run
     # BEFORE the new one replaces it. What it returns is its own bookkeeping
     # (see Task 12), merged in so a single write persists both the contract and
     # the alert state.
     extra = _announce_changes(store, p.id, fresh, notifier)
     store.put_contract(p.id, {**doc, **extra}, now)
-    return fresh
+    return ContractRead(fresh, False)
 
 
 # How close to `expires_at` the operator is told. A week is enough to renew a
