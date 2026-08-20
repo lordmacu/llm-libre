@@ -617,7 +617,17 @@ def create_app(state: State) -> FastAPI:
                          # "why did my prompt 503?" needs to see which routes
                          # POST /v1/images/generations could even consider.
                          "images": r.capabilities.images,
-                         "context": r.capabilities.context})
+                         "context": r.capabilities.context,
+                         # The provider-level axes. They do not vary between a
+                         # provider's routes, and they are here anyway for the
+                         # same reason `images` is: the question this table
+                         # answers is "which routes could even be considered for
+                         # X", and an operator should not have to cross-reference
+                         # /health to answer it for audio or translation.
+                         "audio_speech": r.capabilities.audio_speech,
+                         "audio_transcription": r.capabilities.audio_transcription,
+                         "translate": r.capabilities.translate,
+                         "search": r.capabilities.search})
         return {"routes": rows}
 
     @app.get("/v1/usage", **USAGE_DOCS)
@@ -684,9 +694,24 @@ def create_app(state: State) -> FastAPI:
         else:
             status = "down"
         code = 200 if status == "ok" else 503
+        # What each in-house proxy says about itself, so an operator can see
+        # "chatgpt: account/go, images on, expires 2026-09-06" without opening a
+        # shell. Read from the database, not from memory: after a restart this
+        # has to answer before the first sweep has run.
+        contracts = {}
+        for provider, doc in state.store.all_contracts().items():
+            auth = doc.get("auth") or {}
+            contracts[provider] = {
+                "contract":     doc.get("contract"),
+                "auth_mode":    auth.get("mode"),
+                "plan":         auth.get("plan"),
+                "expires_at":   auth.get("expires_at"),
+                "capabilities": doc.get("capabilities") or {},
+            }
         return JSONResponse({"status": status, "active_routes": len(active),
                              "available_routes": len(available),
-                             "free_available": len(free)}, status_code=code)
+                             "free_available": len(free),
+                             "providers": contracts}, status_code=code)
 
     return app
 

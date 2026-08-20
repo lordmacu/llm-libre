@@ -1535,3 +1535,39 @@ def test_traffic_window_is_clamped_not_trusted(state_client):
         r = c.get(f"/v1/traffic?hours={hours}",
                   headers={"Authorization": "Bearer buena"})
         assert r.status_code == 200
+
+
+def test_health_reports_each_providers_contract(state_client):
+    state, client = state_client
+    state.store.put_contract("chatgpt", {
+        "contract": 1,
+        "auth": {"mode": "account", "plan": "go", "subscription_active": True,
+                 "expires_at": "2026-09-06T00:28:46Z"},
+        "capabilities": {"images": True, "vision": True},
+    }, 100.0)
+    body = client.get("/health").json()
+    entry = body["providers"]["chatgpt"]
+    assert entry["contract"] == 1
+    assert entry["auth_mode"] == "account"
+    assert entry["plan"] == "go"
+    assert entry["expires_at"] == "2026-09-06T00:28:46Z"
+    assert entry["capabilities"]["images"] is True
+
+
+def test_health_reports_a_provider_without_a_contract_as_null(state_client):
+    _, client = state_client
+    body = client.get("/health").json()
+    assert body["providers"] == {}
+
+
+def test_ranking_rows_carry_the_new_capability_axes(state_client):
+    state, client = state_client
+    caps = Capabilities(tools=False, vision=True, context=52815, max_output=8192,
+                        audio_speech=True, translate=True, search=True)
+    state.store.upsert_routes([Route("chatgpt", "gpt-5-6", "free", caps)], time.time())
+    rows = client.get("/v1/ranking", headers={"X-API-Key": "buena"}).json()["routes"]
+    row = [r for r in rows if r["key"] == "chatgpt/gpt-5-6"][0]
+    assert row["audio_speech"] is True
+    assert row["audio_transcription"] is False
+    assert row["translate"] is True
+    assert row["search"] is True

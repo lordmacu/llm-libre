@@ -76,7 +76,12 @@ def test_the_image_generation_endpoint_exists_at_the_openai_path(client):
 
 def test_health_body_keys(client):
     body = client.get("/health").json()
-    assert set(body) == {"status", "active_routes", "available_routes", "free_available"}
+    assert set(body) == {"status", "active_routes", "available_routes", "free_available",
+                         # The last /health contract each in-house proxy published,
+                         # keyed by provider id. Added when the gateway started
+                         # reading capability contracts (Task 11) so an operator
+                         # can see plan/expiry/capabilities without a shell.
+                         "providers"}
     assert body["status"] in {"ok", "degraded", "down"}
 
 
@@ -110,6 +115,11 @@ def test_ranking_row_keys(client):
         # image OUTPUT -- a separate axis from `vision`, which is image input
         "images",
         "context",
+        # Provider-level axes surfaced next to `images` for the same reason:
+        # "which routes could even be considered for X" should not require a
+        # cross-reference to /health. Added with the capability contract
+        # (Task 11).
+        "audio_speech", "audio_transcription", "translate", "search",
     }
 
 
