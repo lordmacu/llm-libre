@@ -132,6 +132,13 @@ providers:
         images: true
         context: 128000
         max_output: 0
+    # gpt-image-1 routes to /v1/chat/completions (not /v1/images/generations):
+    # the proxy intercepts requests for this model id and runs the image
+    # generation flow, returning content: [{type: "image_url", ...}].
+    # Declared via exceptions so it is picked up when the proxy exposes it
+    # in /v1/models. tools:false, vision:false — it only draws, not chats.
+    exceptions:
+      gpt-image-1: {tools: false, vision: false, images: true}
 
   - id: perplexity
     tier: free
