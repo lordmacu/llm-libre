@@ -1,4 +1,5 @@
 import difflib
+import json
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -7,7 +8,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from llm_libre.assets import content_disposition, localise
+from llm_libre.assets import content_disposition, localise, localise_completion
 from llm_libre.auth import RateLimiter, client_ip
 
 from llm_libre.models import (NEUTRAL_METRICS, UNKNOWN_BUDGET, RequestTrace,
@@ -21,6 +22,61 @@ from llm_libre.router import compatible_routes, order_routes, sort_key
 
 PROFILES = {"fast", "balanced", "strong"}
 ALIASES = ["auto", "auto:fast", "auto:strong", "auto:tools", "auto:vision"]
+
+
+async def _rehost_stream_images(source, assets, http, public_base: str):
+    """Pass-through async generator that rehosts image_url delta parts on-the-fly.
+
+    Intercepts SSE chunks where delta.content is a list containing image_url
+    items, downloads each URL and replaces it with a stable asset URL.
+    All other chunks pass through unchanged.
+    """
+    from llm_libre.assets import _download  # local import avoids circular dep
+    async for chunk in source:
+        if not isinstance(chunk, str) or not chunk.startswith("data:"):
+            yield chunk
+            continue
+        payload = chunk[5:].strip()
+        if payload == "[DONE]":
+            yield chunk
+            continue
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            yield chunk
+            continue
+        modified = False
+        for choice in obj.get("choices") or []:
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            content = delta.get("content")
+            if not isinstance(content, list):
+                continue
+            new_parts = []
+            for part in content:
+                if (not isinstance(part, dict) or part.get("type") != "image_url"
+                        or not assets or not public_base):
+                    new_parts.append(part)
+                    continue
+                img_obj = part.get("image_url") or {}
+                url = img_obj.get("url", "")
+                if not url:
+                    new_parts.append(part)
+                    continue
+                data, ct = await _download(http, url)
+                if data is None:
+                    new_parts.append(part)
+                    continue
+                asset_id = assets.put(data, ct, time.time())
+                if not asset_id:
+                    new_parts.append(part)
+                    continue
+                new_url = f"{public_base.rstrip('/')}/v1/assets/{asset_id}"
+                new_parts.append({**part, "image_url": {**img_obj, "url": new_url}})
+                modified = True
+            delta["content"] = new_parts
+        yield (f"data: {json.dumps(obj)}\n\n" if modified else chunk)
 
 
 def _read_field(field_name: str, raw_value, message: str, interpret):
@@ -300,11 +356,13 @@ def create_app(state: State) -> FastAPI:
         # against what was served, and resolving it here erases the asking side.
         trace = RequestTrace(request_id=uuid4().hex, requested=body.get("model"))
         if body.get("stream"):
-            return StreamingResponse(
-                state.proxy.complete_stream(
-                    routes, body, now, raw,
-                    on_billable_attempt=_count_paid_usage, trace=trace),
-                media_type="text/event-stream")
+            stream = state.proxy.complete_stream(
+                routes, body, now, raw,
+                on_billable_attempt=_count_paid_usage, trace=trace)
+            if state.assets and state.public_base_url:
+                stream = _rehost_stream_images(
+                    stream, state.assets, state.proxy.http, state.public_base_url)
+            return StreamingResponse(stream, media_type="text/event-stream")
         r = await state.proxy.complete(routes, body, now, raw,
                                        on_billable_attempt=_count_paid_usage,
                                        trace=trace)
@@ -350,10 +408,14 @@ def create_app(state: State) -> FastAPI:
             # A KNOWN, deliberate LIMITATION: it is NOT returned when streaming.
             # Putting it there would require emitting a non-standard SSE event,
             # which is exactly what section 6 rules out for risking the parsing
-            # of the SDKs this contract exists to please. A client that streams
+            # of the SDKs this project exists to please. A client that streams
             # and wants the reasoning asks for `x_raw: true` and receives it
             # inside `content`, exactly as the provider sent it.
             response_body = {**response_body, "x_reasoning": r.reasoning}
+        if (r.status == 200 and state.assets is not None and state.public_base_url
+                and isinstance(response_body, dict)):
+            response_body = await localise_completion(
+                response_body, state.assets, state.proxy.http, state.public_base_url)
         return JSONResponse(response_body, status_code=r.status, headers=headers)
 
     @app.post("/v1/images/generations", **IMAGES_DOCS)

@@ -416,6 +416,8 @@ def has_answer(data: dict) -> bool:
         content = msg.get("content")
         if isinstance(content, str) and content.strip():
             return True
+        if isinstance(content, list) and content:
+            return True
         if msg.get("tool_calls"):
             return True
     return False
@@ -987,8 +989,10 @@ class Proxy:
                         #    even a lone " "? Deltas arrive heavily split and
                         #    those spaces are part of the sentence: they cannot be
                         #    thrown away.
-                        has_text = isinstance(content, str) and bool(content.strip())
-                        has_content = isinstance(content, str) and content != ""
+                        has_text = (isinstance(content, str) and bool(content.strip())
+                                    or isinstance(content, list) and bool(content))
+                        has_content = (isinstance(content, str) and content != ""
+                                       or isinstance(content, list) and bool(content))
                         piece = f"data: {json.dumps(obj)}\n\n"
                         if not has_text and "tool_calls" not in delta:
                             # Nothing useful YET. The structural bits (role,

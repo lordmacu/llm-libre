@@ -227,6 +227,68 @@ async def localise(payload: dict, store: AssetStore, http, public_base: str,
     return {**payload, "data": out}
 
 
+async def localise_completion(payload: dict, store, http, public_base: str,
+                              now: float | None = None) -> dict:
+    """Rehost image_url parts found in choices[*].message.content arrays.
+
+    Mirrors localise() but for chat-completion responses: scans content arrays
+    for {"type": "image_url", "image_url": {"url": "..."}} parts, downloads
+    each URL, stores it, and replaces with a stable public URL.
+
+    Degrades gracefully — if a download fails the original URL is kept.
+    """
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return payload
+    now = time.time() if now is None else now
+    new_choices = []
+    changed = False
+    for choice in choices:
+        if not isinstance(choice, dict):
+            new_choices.append(choice)
+            continue
+        msg = choice.get("message")
+        if not isinstance(msg, dict):
+            new_choices.append(choice)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            new_choices.append(choice)
+            continue
+        new_parts = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                new_parts.append(part)
+                continue
+            img_obj = part.get("image_url") or {}
+            url = img_obj.get("url", "")
+            if not url or not str(url).lower().startswith(("http://", "https://")):
+                new_parts.append(part)
+                continue
+            data, content_type = await _download(http, url)
+            if data is None:
+                log.warning("assets: could not host completion image %.80s -- "
+                            "provider URL passed through as-is and WILL expire", url)
+                new_parts.append(part)
+                continue
+            asset_id = store.put(data, content_type, now)
+            if asset_id is None or not public_base:
+                log.warning("assets: %s -- completion image provider URL passed through",
+                            "PUBLIC_BASE_URL is not configured" if not public_base
+                            else "store refused the asset")
+                new_parts.append(part)
+                continue
+            new_url = f"{public_base.rstrip('/')}/v1/assets/{asset_id}"
+            log.info("assets: hosted %d bytes (%s) as %s from completion, replacing %.60s",
+                     len(data), content_type or "unknown", asset_id, url)
+            new_parts.append({**part, "image_url": {**img_obj, "url": new_url}})
+            changed = True
+        new_choices.append({**choice, "message": {**msg, "content": new_parts}})
+    if not changed:
+        return payload
+    return {**payload, "choices": new_choices}
+
+
 async def _download(http, url: str) -> tuple[bytes | None, str | None]:
     """Fetch a provider asset. Returns (None, None) on ANY failure.
 
