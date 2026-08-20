@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 import httpx
 
@@ -10,8 +11,8 @@ from llm_libre.providers import Provider
 from llm_libre.quality_suite import CASES
 from llm_libre.proxy import Proxy
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
-from llm_libre.probing import (PING, QUALITY_INTERVAL_S, cycle, probe_health,
-                               probe_quality, sync_catalogue)
+from llm_libre.probing import (HEALTH_FLOOR_S, PING, QUALITY_INTERVAL_S, cycle,
+                               probe_health, probe_quality, sync_catalogue)
 
 CATALOGUE = {"data": [
     {"id": "x:free", "pricing": {"prompt": "0"}, "context_length": 1000,
@@ -870,6 +871,10 @@ async def test_the_battery_is_skipped_when_it_ran_recently(monkeypatch):
                   api_keys=set(), daily_paid_cap=200, providers=prov, http=http)
     await cycle(state, counter=0)
     first = len([u for u in calls if "chat/completions" in u])
+    # Let the health sweep through. This test is about the BATTERY's interval,
+    # and the sweep now has a floor of its own (HEALTH_FLOOR_S) that would
+    # short-circuit the whole cycle before the battery is even considered.
+    store.mark_health_sweep(time.time() - HEALTH_FLOOR_S - 60)
     calls.clear()
     await cycle(state, counter=0)          # a restart: counter is 0 again
     second = len([u for u in calls if "chat/completions" in u])
@@ -896,6 +901,78 @@ async def test_the_battery_runs_again_once_the_interval_has_passed(monkeypatch):
     store._con.execute("UPDATE probes SET at = at - ? WHERE kind='quality'",
                        (QUALITY_INTERVAL_S + 60,))
     store._con.commit()
+    # ... and let the health sweep through too, for the same reason as the test
+    # above: the floor is a separate gate that runs before the battery's.
+    store.mark_health_sweep(time.time() - HEALTH_FLOOR_S - 60)
     calls.clear()
     await cycle(state, counter=0)
     assert len([u for u in calls if "chat/completions" in u]) > 1
+
+
+# --- The health sweep paces itself on evidence too ---------------------------
+#
+# The battery got this guard (above); the health sweep did not, and ran
+# unconditionally on every process start. Measured 2026-08-19 on the live
+# deployment: four deployments between 22:34 and 22:41 produced four full sweeps
+# in twelve minutes, Kilo's free tier took 33 requests in eight and a half of
+# them, and kilo/poolside/laguna-xs-2.1:free answered the fourth with a 429 and
+# left routing. See probing.HEALTH_FLOOR_S.
+#
+# The interval cannot fix this: a burst of redeploys never reaches a sleep.
+
+
+async def _state_over(handler):
+    store = _store()
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    prov = [Provider("kilo", "free", "openai", "https://k.test", "", "/models", {}, [])]
+    return State(store=store, proxy=Proxy({"kilo": prov[0]}, store, http),
+                 api_keys=set(), daily_paid_cap=200, providers=prov, http=http)
+
+
+def _answering(calls):
+    def handler(req):
+        calls.append(str(req.url))
+        if req.url.path.endswith("/models"):
+            return httpx.Response(200, json=CATALOGUE)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "12"}}]})
+    return handler
+
+
+async def test_a_restart_does_not_repeat_the_health_sweep():
+    calls = []
+    state = await _state_over(_answering(calls))
+    await cycle(state, counter=0)
+    calls.clear()
+    await cycle(state, counter=0)          # a redeploy, minutes later
+    assert [u for u in calls if "chat/completions" in u] == []
+
+
+async def test_the_catalogue_is_still_synced_on_a_restart():
+    """Skipping the sweep must not skip discovery: new routes only appear when the
+    process restarts, and /models costs no chat quota."""
+    calls = []
+    state = await _state_over(_answering(calls))
+    await cycle(state, counter=0)
+    calls.clear()
+    await cycle(state, counter=0)
+    assert [u for u in calls if u.endswith("/models")] != []
+
+
+async def test_the_health_sweep_runs_again_once_the_floor_has_passed():
+    calls = []
+    state = await _state_over(_answering(calls))
+    await cycle(state, counter=0)
+    state.store.mark_health_sweep(time.time() - HEALTH_FLOOR_S - 60)
+    calls.clear()
+    await cycle(state, counter=0)
+    assert [u for u in calls if "chat/completions" in u] != []
+
+
+async def test_an_on_demand_probe_does_not_suppress_the_sweep():
+    """The proxy's own suspicion probes write `kind='health'` rows. If the guard
+    read those, one of them would pass for a sweep of the whole catalogue."""
+    calls = []
+    state = await _state_over(_answering(calls))
+    state.store.record_probe("kilo/x:free", "health", True, 10, 0, 200, 0, 0, time.time())
+    await cycle(state, counter=0)
+    assert [u for u in calls if "chat/completions" in u] != []

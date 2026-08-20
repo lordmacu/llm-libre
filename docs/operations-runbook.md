@@ -19,21 +19,34 @@ back there for the mechanics.
   live in `Proxy`'s process memory and reset on every restart regardless of
   the volume.
 - **What losing it costs**: less than it sounds like, and faster to earn
-  back than "up to `HEALTH_PROBE_HOURS`" would suggest -- **the planificador
-  runs its first full probing cycle immediately on startup, before its first
-  sleep**, not after `HEALTH_PROBE_HOURS`. Concretely: `planificador`'s
-  loop counter starts at `0`, and `cycle(state, 0)` -- catalog sync, a
-  health probe against every free route, AND (because `0 %
-  QUALITY_PROBE_EVERY_N_CYCLES == 0` for any sane value of that setting)
-  the FULL quality battery against every free route -- runs right away,
-  concurrently with the process becoming ready to serve traffic, on every
-  single restart. Verified directly: a fresh `Storage`/`Proxy` pair running
-  `probing.cycle(state, 0)` once produces both `probes.kind='health'` AND
-  `probes.kind='quality'` rows for every free route in that one pass. So
-  after losing the file (or after ANY restart, empty database or not): the
-  catalog and a first quality measurement for every free route are both
-  back within roughly one probing pass -- seconds to low minutes, bounded by
-  how long that many HTTP round-trips take, not by `HEALTH_PROBE_HOURS`.
+  back than "up to `HEALTH_PROBE_HOURS`" would suggest -- **the scheduler
+  runs its first probing cycle immediately on startup, before its first
+  sleep**, not after `HEALTH_PROBE_HOURS`. Concretely: the loop counter
+  starts at `0`, and `cycle(state, 0)` -- catalog sync, a health probe
+  against every free route, and the quality battery -- runs right away,
+  concurrently with the process becoming ready to serve traffic. So after
+  losing the file: the catalog and a first quality measurement for every
+  free route are both back within roughly one probing pass -- seconds to
+  low minutes, bounded by how long that many HTTP round-trips take, not by
+  `HEALTH_PROBE_HOURS`.
+- **An ordinary restart is NOT the same as an empty database**, and this
+  matters more than it reads. Both halves of that first cycle are gated on
+  evidence stored in the volume, so the "runs immediately" above is only
+  unconditional when there is nothing in the file to consult:
+  - the **health sweep** is skipped if the catalog was swept less than
+    `probing.HEALTH_FLOOR_S` (15 min, capped at `HEALTH_PROBE_HOURS`) ago,
+  - the **quality battery** is skipped if it last ran less than
+    `QUALITY_PROBE_EVERY_N_CYCLES x HEALTH_PROBE_HOURS` ago.
+
+  Without the first gate, N redeploys meant N full sweeps of the catalog,
+  however close together they landed. Measured 2026-08-19: four deployments
+  between 22:34 and 22:41 produced four sweeps in twelve minutes, Kilo's
+  free tier took 33 requests in eight and a half of them, and
+  `kilo/poolside/laguna-xs-2.1:free` answered the fourth with a 429 and left
+  routing. `HEALTH_PROBE_HOURS` cannot bound that -- a burst of redeploys
+  never reaches a sleep. The skip is logged (`health: sweep skipped, the
+  catalogue was swept N min ago`), so a deploy that appears not to probe is
+  the guard working, not a broken scheduler.
   What genuinely takes longer to rebuild is the **history**: `reliability`
   and `ttft_p50_ms` are computed over a rolling window of past probes and
   real traffic (see the routing doc), so a fresh database starts every
@@ -192,5 +205,9 @@ gateway's normal free-tier usage; it draws from the exact same pool real
 traffic does. On a catalog the size of the reference deployment, periodic
 probing alone works out to on the order of 100 requests/day (see the
 design spec's known risks) -- factor that in before turning the probing
-cadence up, and remember that a provider-side rate limit hit by a probe
+cadence up. Note that **redeploys used to multiply this without changing
+any setting**: every process start ran a full sweep. Both the sweep and the
+battery now consult the volume before spending anything (see the storage
+bullet above), so a burst of deployments costs one sweep, not one per
+deployment. And remember that a provider-side rate limit hit by a probe
 looks, and is handled, exactly like one hit by a client.

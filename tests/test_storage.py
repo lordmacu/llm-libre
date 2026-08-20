@@ -884,3 +884,22 @@ def test_traffic_honours_its_window(tmp_path):
 
     assert store.traffic(since=0.0)["requests"] == 2
     assert store.traffic(since=500.0)["requests"] == 1
+
+
+def test_the_store_knows_when_the_catalogue_was_last_swept(store):
+    """`cycle` needs a marker for the SWEEP, not for any individual probe.
+
+    The proxy fires its own on-demand health probes (proxy._probe_on_demand) and
+    those land in the same table with the same `kind`. Reading MAX(at) would let
+    one suspicion probe against one route pass for "the whole catalogue was just
+    swept", and suppress the periodic sweep for a full interval.
+    """
+    store.upsert_routes([_route()], timestamp=100.0)
+    assert store.last_health_sweep_at() is None
+    store.record_probe("kilo/a:free", "health", True, 10, 0, 200, 0, 0, 500.0)
+    assert store.last_health_sweep_at() is None, \
+        "one route's probe is not a sweep of the catalogue"
+    store.mark_health_sweep(900.0)
+    assert store.last_health_sweep_at() == 900.0
+    store.mark_health_sweep(1800.0)
+    assert store.last_health_sweep_at() == 1800.0, "the marker moves forward, it does not pile up"

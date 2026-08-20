@@ -46,8 +46,32 @@ RETENTION_DAYS = 30
 # across restarts, crashes and redeploys, none of which an in-memory counter
 # survives. `counter` still gates the cycle for callers that pass it, so the
 # existing semantics are unchanged for anyone who never restarts.
-QUALITY_INTERVAL_S = QUALITY_EVERY_N_CYCLES * float(
+HEALTH_INTERVAL_S = float(
     os.getenv("HEALTH_PROBE_HOURS") or os.getenv("SONDEO_SALUD_HORAS") or "5") * 3600
+QUALITY_INTERVAL_S = QUALITY_EVERY_N_CYCLES * HEALTH_INTERVAL_S
+
+# The same lesson as QUALITY_INTERVAL_S above, one level down: the HEALTH sweep
+# had no equivalent guard, so it ran unconditionally on every process start.
+#
+# Measured 2026-08-19 against the live deployment. Four deployments landed
+# between 22:34 and 22:41 (two commits, two deployments each), and the telemetry
+# shows four full sweeps at 22:36:04 (truncated mid-catalogue, the container was
+# killed while probing), 22:37:55, 22:42:48 and 22:46:21. Kilo's free tier took
+# 33 requests in eight and a half minutes -- 11 free routes, three complete
+# sweeps -- and refused the fourth: `kilo/poolside/laguna-xs-2.1:free` returned
+# 429 and left routing, which is what the operator saw on Telegram at 22:46.
+#
+# `HEALTH_PROBE_HOURS` cannot fix that: it governs the interval BETWEEN sleeps,
+# and a burst of redeploys never reaches a sleep. What bounds a burst is a floor
+# on how recently the catalogue was swept, read from the database so it survives
+# the restart that caused the problem.
+#
+# Fifteen minutes: long enough to absorb a deploy burst (the four above fit in
+# twelve), short enough that a single unlucky deploy does not leave the ranking
+# blind for long. Capped at the interval itself so it can never suppress a sweep
+# that is legitimately due -- with HEALTH_PROBE_HOURS set to minutes for
+# debugging, the floor follows it down instead of overriding it.
+HEALTH_FLOOR_S = min(900.0, HEALTH_INTERVAL_S)
 
 
 async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
@@ -271,36 +295,62 @@ async def probe_quality(proxy, store, routes: list[Route], now: float,
 
 async def cycle(state, counter: int) -> None:
     """One complete probing pass, for the scheduler (Task 12) to invoke in its
-    loop: it syncs the catalogue, probes health always, probes quality only every
-    QUALITY_EVERY_N_CYCLES passes (the same free quota as real traffic) and prunes
-    old telemetry at the end.
+    loop: it syncs the catalogue, sweeps health unless one was swept less than
+    HEALTH_FLOOR_S ago, probes quality only every QUALITY_EVERY_N_CYCLES passes
+    AND at most once per QUALITY_INTERVAL_S (the same free quota as real traffic),
+    and prunes old telemetry at the end.
+
+    Both spends are gated on the DATABASE, not on `counter`: the scheduler starts
+    at zero on every process start, so a redeploy would otherwise re-run the whole
+    pass no matter how recently the previous one ran. See HEALTH_FLOOR_S.
 
     It does not catch exceptions: that is the responsibility of the scheduler
     calling this in an infinite loop, which must not die because one particular
     cycle failed.
 
-    `state` is any object with `.http`, `.proveedores`, `.almacen` and `.proxy`
+    `state` is any object with `.http`, `.providers`, `.store` and `.proxy`
     (e.g. `llm_libre.api.State`); that type is not imported here so as not to
     create a dependency from probing to api.
     """
     now = time.time()
+    # The catalogue is synced BEFORE the floor is consulted, and unconditionally:
+    # discovery costs no chat quota (one /models per provider) and new routes only
+    # ever appear when the process restarts, which is precisely the case the floor
+    # is about to short-circuit.
     await sync_catalogue(state.http, state.providers, state.store, now)
     routes = state.store.active_routes()
-    # The health probe runs FIRST, and what it learned gates the battery: one
-    # request has just established which routes are reachable, so the five-request
-    # battery is only spent on those. See probe_quality.
-    answered = await probe_health(state.proxy, state.store, routes, now)
-    # Two gates, and they answer different questions. `counter` is the schedule
-    # this loop was written around; `last_quality_probe_at` is what actually
-    # happened, and it is the one that survives a restart -- see
-    # QUALITY_INTERVAL_S.
-    last = state.store.last_quality_probe_at()
-    due = last is None or (now - last) >= QUALITY_INTERVAL_S
-    if counter % QUALITY_EVERY_N_CYCLES == 0 and due:
-        await probe_quality(state.proxy, state.store, routes, now, answered)
-    elif not due:
-        log.info("quality: battery skipped, it last ran %.1f h ago (interval %.1f h)",
-                 (now - last) / 3600, QUALITY_INTERVAL_S / 3600)
+    # Has the catalogue been swept too recently to sweep it again? See
+    # HEALTH_FLOOR_S: a burst of redeploys never reaches the scheduler's sleep, so
+    # the interval alone does not bound how often this runs.
+    swept_at = state.store.last_health_sweep_at()
+    if swept_at is not None and (now - swept_at) < HEALTH_FLOOR_S:
+        # The battery goes with it, and not merely to save more quota: it is
+        # gated on `answered` -- the routes THIS cycle's health probe reached --
+        # and without a sweep there is nothing to gate it on. Running it blind
+        # right after a redeploy is the flood this whole guard exists to stop.
+        log.info("health: sweep skipped, the catalogue was swept %.0f min ago "
+                 "(floor %.0f min)", (now - swept_at) / 60, HEALTH_FLOOR_S / 60)
+    else:
+        # The health probe runs FIRST, and what it learned gates the battery: one
+        # request has just established which routes are reachable, so the five-request
+        # battery is only spent on those. See probe_quality.
+        answered = await probe_health(state.proxy, state.store, routes, now)
+        # Marked only after the sweep actually happened. If probe_health raises,
+        # the marker keeps the previous value and the next cycle sweeps -- the
+        # failure mode of a missing guard (one extra sweep) is far cheaper than
+        # that of a lying one (a catalogue nobody measures).
+        state.store.mark_health_sweep(now)
+        # Two gates, and they answer different questions. `counter` is the schedule
+        # this loop was written around; `last_quality_probe_at` is what actually
+        # happened, and it is the one that survives a restart -- see
+        # QUALITY_INTERVAL_S.
+        last = state.store.last_quality_probe_at()
+        due = last is None or (now - last) >= QUALITY_INTERVAL_S
+        if counter % QUALITY_EVERY_N_CYCLES == 0 and due:
+            await probe_quality(state.proxy, state.store, routes, now, answered)
+        elif not due:
+            log.info("quality: battery skipped, it last ran %.1f h ago (interval %.1f h)",
+                     (now - last) / 3600, QUALITY_INTERVAL_S / 3600)
     state.store.prune(now - RETENTION_DAYS * 86400)
     # Generated assets age out on their own schedule (assets.RETENTION_S, 30
     # days): they are bytes on a finite volume, and without this the disk grows

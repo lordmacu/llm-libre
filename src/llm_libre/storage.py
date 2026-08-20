@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS events (
     requested TEXT, request_id TEXT, attempt INTEGER);
 CREATE INDEX IF NOT EXISTS ix_events ON events(key, at DESC);
 
+-- When the periodic sweep last covered the WHOLE catalogue. One row, rewritten
+-- in place. It cannot be derived from `probes`: the proxy fires its own
+-- on-demand health probes (proxy._probe_on_demand) that land in that table with
+-- the same `kind`, so MAX(at) answers "when was ANY route probed" -- and one
+-- suspicion probe would then pass for a sweep and suppress the real one for a
+-- whole interval. See probing.HEALTH_FLOOR_S for what this guards against.
+CREATE TABLE IF NOT EXISTS sweeps (
+    name TEXT PRIMARY KEY, at REAL NOT NULL);
+
 CREATE TABLE IF NOT EXISTS paid_usage (
     api_key TEXT NOT NULL, day TEXT NOT NULL, requests INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (api_key, day));
@@ -484,6 +493,29 @@ class Storage:
         row = self._con.execute(
             "SELECT MAX(at) FROM probes WHERE kind = 'quality'").fetchone()
         return row[0] if row and row[0] is not None else None
+
+    def mark_health_sweep(self, at: float) -> None:
+        """Record that the periodic sweep just covered the whole catalogue.
+
+        Written by `probing.cycle` and read back by the next one -- including the
+        next one in a DIFFERENT PROCESS, which is the entire point: a redeploy
+        starts the scheduler at zero and it sweeps before its first sleep.
+        """
+        self._con.execute(
+            "INSERT INTO sweeps VALUES ('health', ?) "
+            "ON CONFLICT(name) DO UPDATE SET at = excluded.at", (at,))
+        self._con.commit()
+
+    def last_health_sweep_at(self) -> float | None:
+        """When the catalogue was last swept, or None if it never was.
+
+        Deliberately NOT `MAX(at) FROM probes WHERE kind='health'`: that is any
+        route's last probe, and the proxy writes on-demand probes there too --
+        see the `sweeps` table's comment in SCHEMA.
+        """
+        row = self._con.execute(
+            "SELECT at FROM sweeps WHERE name = 'health'").fetchone()
+        return row[0] if row else None
 
     def _quality(self, key: str) -> tuple[float, float | None]:
         """(quality, time of the most recent measurement). The time is None if it
