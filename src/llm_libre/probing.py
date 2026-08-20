@@ -1,3 +1,4 @@
+import calendar
 import logging
 import os
 import time
@@ -229,10 +230,89 @@ async def sync_catalogue(http: httpx.AsyncClient, providers: list[Provider],
     return total
 
 
+# How close to `expires_at` the operator is told. A week is enough to renew a
+# subscription deliberately, and short enough that the warning still means
+# something when it arrives.
+EXPIRY_WARNING_S = 7 * 86400
+
+
 def _announce_changes(store, provider: str, contract, notifier) -> dict:
-    """Alert on capability transitions, and return any bookkeeping to persist
-    alongside the contract document. Filled in by Task 12."""
-    return {}
+    """Alert on the two transitions worth waking someone for.
+
+    Returns the bookkeeping `sync_catalogue` merges into the document it is
+    about to store. Nothing is written here: one writer per document is what
+    keeps "the alert fired" and "the contract we saw" from racing each other
+    within a single sweep.
+
+    A capability turning OFF is the event this whole design exists for: a plan
+    lapsed, a token was revoked, an account was downgraded. Left undetected it
+    shows up as a route that fails every request until somebody notices.
+
+    A capability turning ON is logged, not alerted. It is good news, and good
+    news does not need a notification.
+
+    The comparison is against the PREVIOUS stored document, so it detects a
+    transition rather than a state -- without that, a provider sitting at
+    `images: false` would alert on every sweep, twice a day, until it was muted
+    and stopped being read at all. The first sweep for a provider alerts on
+    nothing: having nothing to compare against is not the same as something
+    having turned off.
+    """
+    if notifier is None:
+        return {}
+    previous = store.get_contract(provider)
+    if previous is not None:
+        was = previous.get("capabilities") or {}
+        lost = sorted(name for name, value in contract.capabilities.items()
+                      if was.get(name) is True and value is False)
+        gained = sorted(name for name, value in contract.capabilities.items()
+                        if was.get(name) is False and value is True)
+        if gained:
+            log.info("capabilities of %s: gained %s", provider, ", ".join(gained))
+        if lost:
+            plan = f" on plan {contract.auth.plan}" if contract.auth.plan else ""
+            notifier.notify(
+                f"⚠️ {provider}: lost {', '.join(lost)}. The account is "
+                f"{contract.auth.mode}{plan}. Routes that needed it have left "
+                f"the catalogue.")
+    return _expiry_warning(previous, provider, contract, notifier)
+
+
+def _expiry_warning(previous, provider: str, contract, notifier) -> dict:
+    """One warning per provider per day while the subscription is nearly up.
+
+    Per day, not per sweep: the sweep interval is configurable and a burst of
+    redeploys runs several of them within minutes, so "once per sweep" is not a
+    rate anybody chose. The timestamp rides inside the stored contract document
+    rather than in a table of its own -- it is one float per provider whose only
+    reader is this function, and `contract.parse_health` ignores unknown
+    top-level keys, so it never reaches the contract itself.
+    """
+    expires_at = contract.auth.expires_at
+    if not expires_at:
+        return {}
+    try:
+        # timegm, not mktime: `expires_at` is UTC by the contract, and mktime
+        # would read it as local time -- five hours of silent drift here.
+        deadline = calendar.timegm(time.strptime(expires_at[:19], "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        log.warning("capabilities of %s: auth.expires_at=%r is not ISO 8601; "
+                    "no expiry warning will be sent.", provider, expires_at)
+        return {}
+    remaining = deadline - time.time()
+    if not 0 < remaining <= EXPIRY_WARNING_S:
+        return {}
+    now = time.time()
+    warned_at = (previous or {}).get("_expiry_warned_at")
+    if warned_at is not None and (now - warned_at) < 86400:
+        # Carry the old timestamp forward: dropping it would restart the
+        # once-a-day clock on the very next sweep.
+        return {"_expiry_warned_at": warned_at}
+    notifier.notify(
+        f"⏳ {provider}: the {contract.auth.plan or 'current'} subscription "
+        f"expires in {int(remaining // 86400)} day(s), on {expires_at}. When it "
+        f"does, its plan-gated capabilities turn themselves off.")
+    return {"_expiry_warned_at": now}
 
 
 async def probe_health(proxy, store, routes: list[Route], now: float) -> set[str]:

@@ -1078,3 +1078,61 @@ async def test_a_health_without_the_contract_falls_back_to_the_yaml():
                         default_capabilities=defaults)
     await sync_catalogue(_routed(health={"status": "ok"}), [provider], store, now=100.0)
     assert store.active_routes()[0].capabilities.context == 128000
+
+
+class _Spy:
+    def __init__(self):
+        self.sent = []
+
+    def notify(self, text):
+        self.sent.append(text)
+
+
+async def test_a_capability_turning_off_is_alerted():
+    store, spy = _store(), _Spy()
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=100.0, notifier=spy)
+    off = {**_HEALTH, "capabilities": {**_HEALTH["capabilities"], "images": False}}
+    await sync_catalogue(_routed(health=off), [_chatgpt()], store, now=200.0,
+                         notifier=spy)
+    assert len(spy.sent) == 1
+    assert "images" in spy.sent[0]
+    assert "chatgpt" in spy.sent[0]
+
+
+async def test_a_capability_turning_on_is_not_alerted():
+    store, spy = _store(), _Spy()
+    off = {**_HEALTH, "capabilities": {**_HEALTH["capabilities"], "images": False}}
+    await sync_catalogue(_routed(health=off), [_chatgpt()], store, now=100.0,
+                         notifier=spy)
+    await sync_catalogue(_routed(), [_chatgpt()], store, now=200.0, notifier=spy)
+    assert spy.sent == []
+
+
+async def test_an_unchanged_capability_set_is_not_re_alerted():
+    store, spy = _store(), _Spy()
+    off = {**_HEALTH, "capabilities": {**_HEALTH["capabilities"], "images": False}}
+    for at in (100.0, 200.0, 300.0):
+        await sync_catalogue(_routed(health=off), [_chatgpt()], store, now=at,
+                             notifier=spy)
+    assert spy.sent == []
+
+
+async def test_the_first_sweep_ever_does_not_alert():
+    # Nothing to compare against is not the same as "it just turned off".
+    store, spy = _store(), _Spy()
+    off = {**_HEALTH, "capabilities": {**_HEALTH["capabilities"], "images": False}}
+    await sync_catalogue(_routed(health=off), [_chatgpt()], store, now=100.0,
+                         notifier=spy)
+    assert spy.sent == []
+
+
+async def test_a_subscription_expiring_soon_is_alerted_once_a_day():
+    store, spy = _store(), _Spy()
+    soon = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                         time.gmtime(time.time() + 3 * 86400))
+    doc = {**_HEALTH, "auth": {**_HEALTH["auth"], "expires_at": soon}}
+    await sync_catalogue(_routed(health=doc), [_chatgpt()], store,
+                         now=time.time(), notifier=spy)
+    await sync_catalogue(_routed(health=doc), [_chatgpt()], store,
+                         now=time.time() + 60, notifier=spy)
+    assert len([s for s in spy.sent if "expires" in s]) == 1
