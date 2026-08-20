@@ -903,3 +903,30 @@ def test_the_store_knows_when_the_catalogue_was_last_swept(store):
     assert store.last_health_sweep_at() == 900.0
     store.mark_health_sweep(1800.0)
     assert store.last_health_sweep_at() == 1800.0, "the marker moves forward, it does not pile up"
+
+
+def test_the_new_capability_axes_survive_a_round_trip(store):
+    caps = Capabilities(tools=False, vision=True, context=52815, max_output=8192,
+                        images=True, audio_speech=True, audio_transcription=True,
+                        translate=True, search=True)
+    store.upsert_routes([Route("chatgpt", "gpt-5-6", "free", caps)], 100.0)
+    assert store.active_routes()[0].capabilities == caps
+
+
+def test_an_old_database_migrates_the_new_columns_to_false(store):
+    # A row written before these columns existed predates anyone measuring the
+    # capability, so it migrates to "cannot", never to a guess. The next sweep
+    # overwrites it with what the provider actually reports.
+    store._con.execute("ALTER TABLE routes DROP COLUMN audio_speech")
+    store._con.execute("ALTER TABLE routes DROP COLUMN audio_transcription")
+    store._con.execute("ALTER TABLE routes DROP COLUMN translate")
+    store._con.execute("ALTER TABLE routes DROP COLUMN search")
+    store._con.execute(
+        "INSERT INTO routes (key, provider, model_id, tier, tools, vision, "
+        "context, max_output, last_seen) VALUES "
+        "('chatgpt/old', 'chatgpt', 'old', 'free', 0, 0, 1000, 100, 50.0)")
+    store._con.commit()
+    store.create_schema()
+    route = [r for r in store.active_routes() if r.model_id == "old"][0]
+    assert route.capabilities.audio_speech is False
+    assert route.capabilities.search is False

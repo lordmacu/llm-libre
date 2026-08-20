@@ -318,7 +318,11 @@ def test_a_spanish_database_migrates_without_losing_a_single_row():
         # Added after the rename: an old database gains it through the
         # add-column migration, defaulting to 0 -- "cannot generate" is the safe
         # direction for a row written before anyone measured it.
-        "images"]
+        "images",
+        # Four more provider-level axes added the same way, for the same
+        # reason: TTS, STT, translation and web search. A row written before
+        # they existed migrates to 0 ("cannot"), not to a guess.
+        "audio_speech", "audio_transcription", "translate", "search"]
     assert [f[1] for f in con.execute("PRAGMA table_info(probes)")] == [
         "key", "kind", "at", "ok", "latency_ms", "ttft_ms", "http_code",
         "cases_passed", "cases_total"]

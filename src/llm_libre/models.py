@@ -33,6 +33,20 @@ class Capabilities:
     # catalogue normalisation, the fixed-model YAML entries) keeps working
     # unchanged and a provider has to CLAIM the capability to get it.
     images: bool = False
+    # PROVIDER-LEVEL capabilities, stamped identically onto every route of a
+    # provider: unlike tools/vision/images they do not vary per model, because
+    # the endpoints behind them take no model. They live on Capabilities anyway
+    # so a future /v1/audio/speech can filter routes with the same
+    # `compatible_routes` machinery as everything else, instead of growing a
+    # second, parallel notion of what a provider can do.
+    #
+    # All four default to False, exactly as `images` did: every existing
+    # construction site keeps working unchanged, and a provider gains a
+    # capability by claiming it, never by omission.
+    audio_speech: bool = False           # POST /v1/audio/speech      (TTS)
+    audio_transcription: bool = False    # POST /v1/audio/transcriptions (STT)
+    translate: bool = False              # POST /v1/translate
+    search: bool = False                 # web_search on chat completions
 
 
 @dataclass(frozen=True)

@@ -41,3 +41,13 @@ def test_as_wire_emits_the_spanish_keys_the_error_bodies_use():
     assert wire["model"] == "x"
     assert wire["needs_tools"] is True
     assert wire["min_context"] == 1000
+
+
+def test_the_new_capability_axes_default_to_false():
+    # Same shape `images` took: every existing construction site keeps working
+    # unchanged, and a provider has to CLAIM a capability to get it.
+    c = Capabilities(tools=True, vision=False, context=1000, max_output=100)
+    assert c.audio_speech is False
+    assert c.audio_transcription is False
+    assert c.translate is False
+    assert c.search is False

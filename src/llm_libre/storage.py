@@ -16,7 +16,11 @@ CREATE TABLE IF NOT EXISTS routes (
     context INTEGER NOT NULL, max_output INTEGER NOT NULL,
     last_seen REAL NOT NULL, active INTEGER NOT NULL DEFAULT 1,
     priority INTEGER NOT NULL DEFAULT 100,
-    images INTEGER NOT NULL DEFAULT 0);
+    images INTEGER NOT NULL DEFAULT 0,
+    audio_speech INTEGER NOT NULL DEFAULT 0,
+    audio_transcription INTEGER NOT NULL DEFAULT 0,
+    translate INTEGER NOT NULL DEFAULT 0,
+    search INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE IF NOT EXISTS probes (
     key TEXT NOT NULL, kind TEXT NOT NULL, at REAL NOT NULL,
@@ -317,6 +321,14 @@ class Storage:
             # failure declaring capabilities exists to prevent.
             self._con.execute(
                 "ALTER TABLE routes ADD COLUMN images INTEGER NOT NULL DEFAULT 0")
+        # Same DEFAULT 0 reasoning as `images` above: a row that predates these
+        # columns predates anyone measuring the capability, so it migrates to
+        # "cannot" rather than to a guess. The next catalogue sync overwrites it
+        # with what the provider reports.
+        for column in ("audio_speech", "audio_transcription", "translate", "search"):
+            if column not in route_columns:
+                self._con.execute(
+                    f"ALTER TABLE routes ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
 
     def upsert_routes(self, routes: list[Route], timestamp: float,
                       deactivate_missing: bool = True,
@@ -325,15 +337,21 @@ class Storage:
             c = r.capabilities
             self._con.execute(
                 """INSERT INTO routes (key, provider, model_id, tier, tools, vision,
-                       context, max_output, last_seen, active, priority, images)
-                   VALUES (?,?,?,?,?,?,?,?,?,1,?,?)
+                       context, max_output, last_seen, active, priority, images,
+                       audio_speech, audio_transcription, translate, search)
+                   VALUES (?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,?)
                    ON CONFLICT(key) DO UPDATE SET
                        tools=excluded.tools, vision=excluded.vision,
                        context=excluded.context, max_output=excluded.max_output,
                        last_seen=excluded.last_seen, active=1,
-                       priority=excluded.priority, images=excluded.images""",
+                       priority=excluded.priority, images=excluded.images,
+                       audio_speech=excluded.audio_speech,
+                       audio_transcription=excluded.audio_transcription,
+                       translate=excluded.translate, search=excluded.search""",
                 (r.key, r.provider, r.model_id, r.tier, int(c.tools), int(c.vision),
-                 c.context, c.max_output, timestamp, r.priority, int(c.images)))
+                 c.context, c.max_output, timestamp, r.priority, int(c.images),
+                 int(c.audio_speech), int(c.audio_transcription),
+                 int(c.translate), int(c.search)))
         # What was not seen in this pass is deactivated, not deleted: the history
         # is what makes it possible to detect a model rename. This step can be
         # skipped when the caller only brings a subset (e.g. syncing a single
@@ -415,11 +433,15 @@ class Storage:
     def active_routes(self) -> list[Route]:
         rows = self._con.execute(
             """SELECT provider, model_id, tier, tools, vision, context, max_output,
-                      priority, images
+                      priority, images, audio_speech, audio_transcription,
+                      translate, search
                FROM routes WHERE active = 1 ORDER BY key""").fetchall()
-        return [Route(p, m, t, Capabilities(bool(to), bool(vi), cx, ms, images=bool(im)),
+        return [Route(p, m, t,
+                      Capabilities(bool(to), bool(vi), cx, ms, images=bool(im),
+                                   audio_speech=bool(sp), audio_transcription=bool(tr),
+                                   translate=bool(tl), search=bool(se)),
                       priority=pr)
-                for p, m, t, to, vi, cx, ms, pr, im in rows]
+                for p, m, t, to, vi, cx, ms, pr, im, sp, tr, tl, se in rows]
 
     def record_probe(self, key: str, kind: str, ok: bool, latency_ms: int,
                      ttft_ms: int, http_code: int, cases_passed: int,
