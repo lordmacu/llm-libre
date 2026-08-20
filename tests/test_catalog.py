@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 
 from llm_libre.catalog import SUSTAINED_RATE_FLOOR, normalize
+from llm_libre.contract import REQUIRED_CAPABILITIES, Auth, ProviderContract
 from llm_libre.models import Capabilities
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -431,10 +432,6 @@ def test_a_route_that_was_never_refused_is_never_demoted():
     assert normalize("deepseek", _catalogue(), priority=0)[0].priority == 0
 
 
-from llm_libre.catalog import apply_model_metadata, capabilities_from_contract
-from llm_libre.contract import REQUIRED_CAPABILITIES, Auth, ProviderContract
-
-
 def _contract(**overrides):
     caps = {k: False for k in REQUIRED_CAPABILITIES}
     caps.update(chat=True, streaming=True, vision=True, images=True,
@@ -498,15 +495,48 @@ def test_a_per_model_capability_may_not_widen_the_provider_level_one(caplog):
 
 
 def test_exceptions_beat_the_contract():
-    # The strongest voice, and it must stay that way: `tools: false` for chatgpt
-    # is a MEASURED correction (0/3 tool_calls, twice) to what the proxy claims
-    # about itself. A discovery source that could overrule it would re-open the
-    # exact failure the declaration exists to prevent.
+    # Level 1 against level 3. `exceptions` is the strongest voice, and it must
+    # stay that way: it is where a measurement that contradicts what a proxy
+    # says about itself gets recorded, per model id.
     routes = normalize("chatgpt", {"data": [{"id": "gpt-5-6"}]},
                        default_capabilities=_CHATGPT_DEFAULTS,
                        exceptions={"gpt-5-6": {"vision": False}},
                        contract=_contract(vision=True))
     assert routes[0].capabilities.vision is False
+
+
+def test_exceptions_beat_a_per_model_value():
+    """Level 1 against level 2 -- the rung of the precedence chain nothing was
+    asserting, and the one that decides whether an exception can be trusted at
+    all: /v1/models is the source most likely to disagree with a hand-written
+    correction, because it is the one the proxy regenerates on its own.
+    """
+    routes = normalize("chatgpt",
+                       {"data": [{"id": "gpt-5-6",
+                                  "capabilities": {"vision": True}}]},
+                       default_capabilities=_CHATGPT_DEFAULTS,
+                       exceptions={"gpt-5-6": {"vision": False}},
+                       contract=_contract(vision=True))
+    assert routes[0].capabilities.vision is False
+
+
+def test_an_exception_that_stays_silent_lets_the_contract_decide():
+    """Being applied LAST cuts both ways: an exception that names a capability
+    pins it past every plan change. chatgpt's `gpt-image-1` therefore declares
+    only `tools` and `vision` -- had it kept `images: true`, the one image route
+    the proxy actually publishes would still be advertised at `priority: 0`
+    after the Go plan lapses, absorbing every image request into a 503.
+    """
+    catalogue = {"data": [{"id": "gpt-image-1"}]}
+    exceptions = {"gpt-image-1": {"tools": False, "vision": False}}
+    lapsed = normalize("chatgpt", catalogue, default_capabilities=_CHATGPT_DEFAULTS,
+                       exceptions=exceptions, contract=_contract(images=False))
+    assert lapsed[0].capabilities.images is False
+    # ...and nothing is lost while the plan holds: the contract says true.
+    paid = normalize("chatgpt", catalogue, default_capabilities=_CHATGPT_DEFAULTS,
+                     exceptions=exceptions, contract=_contract(images=True))
+    assert paid[0].capabilities.images is True
+    assert paid[0].capabilities.vision is False    # the exception still applies
 
 
 def test_without_a_contract_nothing_changes():

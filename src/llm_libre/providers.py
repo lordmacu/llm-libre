@@ -95,6 +95,38 @@ def join_path(base_url: str, suffix: str) -> str:
     return urlunsplit(parts._replace(path=parts.path.rstrip("/") + suffix))
 
 
+_API_PREFIX = "/v1"
+
+
+def contract_url(base_url: str) -> str:
+    """Where a proxy publishes its capability contract, derived from `base_url`.
+
+    THE ASYMMETRY, because it is a fact about these proxies and not an
+    arbitrary choice: their API lives under `/v1` (`/v1/chat/completions`,
+    `/v1/models`) but `/health` sits BESIDE that prefix, at the root, because it
+    is the container health check and predates the API surface. Measured against
+    the live chatgpt-proxy on 2026-08-20: `/v1/health` -> 404, `/health` -> 200.
+    `join_path(base_url, "/health")` therefore produced a URL no proxy serves,
+    and the 404 skipped the whole provider on every sweep.
+
+    So a trailing `/v1` is stripped from the path -- and NOTHING else is.
+    Reducing to the origin instead would be wrong: `_resolve_base_url`
+    deliberately supports an operator-chosen reverse-proxy mount, so
+    `https://host/proxy/v1` must yield `https://host/proxy/health`; dropping the
+    mount would ask for a path the reverse proxy does not serve. A `base_url`
+    with no `/v1` suffix simply gains `/health`.
+
+    Parses and rebuilds the URL for the same reason `join_path` does: `base_url`
+    may carry a query string (`CHATGPT_PROXY_URL` with a token), and raw
+    concatenation would splice the suffix into the query value.
+    """
+    parts = urlsplit(base_url)
+    path = parts.path.rstrip("/")
+    if path.endswith(_API_PREFIX):
+        path = path[: -len(_API_PREFIX)]
+    return urlunsplit(parts._replace(path=path + "/health"))
+
+
 def _resolve_base_url(p: dict, env: dict) -> str:
     """`base_url` in the YAML is always the default; `base_url_env`, when
     declared, names an environment variable that overrides it whenever it carries
@@ -216,11 +248,22 @@ def fixed_routes(p: Provider, contract=None) -> list[Route]:
     This block exists to name ids a catalogue does not publish, not to overrule
     live account state -- which is precisely what "the Go subscription expired"
     is.
+
+    ORDER MATTERS, and it is the same order `catalog.normalize` uses:
+    the contradiction is decided against what `fixed_models` DECLARED, and
+    `emulates_tools` is applied AFTERWARDS. Emulation is a claim about this
+    gateway, not about the proxy -- deepseek and mistral have no native function
+    calling and llm-libre supplies it by injecting the tool definitions into the
+    prompt (tool_emulator.py) -- so a truthful `tools: false` from their /health
+    agrees with the declaration rather than contradicting it. Folding emulation
+    in first made every one of deepseek's routes read as contradicted, which
+    would have emptied a `priority: 0` provider out of the catalogue the day it
+    adopted the contract.
     """
     routes = []
     for m in p.fixed_models:
         capabilities = Capabilities(
-            tools=True if p.emulates_tools else bool(m["tools"]),
+            tools=bool(m["tools"]),
             vision=bool(m["vision"]),
             context=int(m["context"]), max_output=int(m["max_output"]),
             images=bool(m.get("images", False)))
@@ -241,5 +284,7 @@ def fixed_routes(p: Provider, contract=None) -> list[Route]:
                 audio_transcription=caps["audio_transcription"],
                 translate=caps["translate"],
                 search=caps["search"])
+        if p.emulates_tools:
+            capabilities = replace(capabilities, tools=True)
         routes.append(Route(p.id, m["id"], p.tier, capabilities, priority=p.priority))
     return routes

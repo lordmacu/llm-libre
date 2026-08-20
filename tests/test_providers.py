@@ -2,7 +2,7 @@ from pathlib import Path
 
 from llm_libre.contract import REQUIRED_CAPABILITIES, Auth, ProviderContract
 from llm_libre.models import Capabilities
-from llm_libre.providers import Provider, fixed_routes, load
+from llm_libre.providers import Provider, contract_url, fixed_routes, load
 
 YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
@@ -579,11 +579,55 @@ def test_reads_capabilities_is_read_from_the_yaml(tmp_path):
     assert load(str(yaml_path), {})[0].reads_capabilities is True
 
 
+def test_the_only_real_image_route_does_not_pin_images_through_exceptions():
+    """`exceptions` is applied LAST, after the contract and after the per-model
+    narrowing, so anything it names is pinned past every plan change.
+
+    `gpt-image-1` -- not dall-e-3 -- is the id chatgpt-proxy actually publishes
+    in /v1/models. Declaring `images: true` for it would keep the gateway's only
+    real image route advertised at `priority: 0` after the Go plan lapses on
+    2026-09-06, absorbing every image request into a 503: verbatim the failure
+    the capability contract exists to end. The contract supplies `images`
+    instead, already resolved against the plan.
+    """
+    assert _providers()["chatgpt"].exceptions["gpt-image-1"] == {
+        "tools": False, "vision": False}
+
+
 def test_the_real_registry_only_lets_chatgpt_read_the_contract():
     # The rollout is per proxy. Any other provider turning this on before its
     # proxy publishes /health would cost it a sweep of skipped syncs.
     providers = load("providers.yaml", {})
     assert [p.id for p in providers if p.reads_capabilities] == ["chatgpt"]
+
+
+def test_the_contract_url_drops_the_v1_prefix():
+    """Verified against the live deployment on 2026-08-20: /v1/health answers
+    404 and /health answers 200. Asking for the wrong one raised, was caught,
+    and skipped the whole provider on every sweep -- forever."""
+    assert contract_url("http://127.0.0.1:8890/v1") == "http://127.0.0.1:8890/health"
+
+
+def test_the_contract_url_keeps_an_operator_chosen_mount_prefix():
+    """`_resolve_base_url` deliberately supports a reverse-proxy mount, so the
+    prefix is part of the address, not decoration: stripping to the origin would
+    request a path the reverse proxy does not serve."""
+    assert contract_url("https://host/proxy/v1") == "https://host/proxy/health"
+
+
+def test_a_base_url_without_v1_just_gains_health():
+    assert contract_url("https://k.test") == "https://k.test/health"
+    assert contract_url("https://k.test/gateway/") == "https://k.test/gateway/health"
+
+
+def test_the_contract_url_does_not_splinter_a_query_string():
+    # Same hazard join_path exists for: CHATGPT_PROXY_URL may carry a token.
+    assert contract_url("https://c.test:8888?token=abc") == \
+        "https://c.test:8888/health?token=abc"
+
+
+def test_only_a_whole_v1_segment_is_stripped():
+    assert contract_url("https://k.test/api/v10") == "https://k.test/api/v10/health"
 
 
 def _contract(**overrides):
@@ -636,3 +680,36 @@ def test_a_fixed_route_gains_all_four_provider_level_axes_even_when_unclaimed():
     assert caps.audio_speech is True
     assert caps.audio_transcription is True
     assert caps.search is True
+
+
+def test_an_emulated_tool_capability_is_not_read_as_a_contradiction():
+    """`emulates_tools` is a claim about the GATEWAY, not about the proxy.
+
+    deepseek declares both its models through `fixed_models`, sets
+    `emulates_tools: true`, and sits at `priority: 0`. A truthful deepseek
+    contract reports `tools: false` -- the proxy has no native function calling,
+    llm-libre supplies it by injecting the definitions into the prompt (see
+    tool_emulator.py). Testing emulation against the contract would read every
+    one of those routes as contradicted and empty the provider out of the
+    catalogue the moment it starts publishing /health.
+
+    The contradiction is decided on what `fixed_models` DECLARED; emulation is
+    applied afterwards, which is the order `catalog.normalize` already uses.
+    """
+    deepseek = Provider("deepseek", "free", "openai", "https://d.test/v1", "", "",
+                        {}, [{"id": "deepseek-chat", "tools": False, "vision": False,
+                              "context": 64000, "max_output": 8192}],
+                        emulates_tools=True)
+    routes = fixed_routes(deepseek, contract=_contract(tools=False))
+    assert [r.model_id for r in routes] == ["deepseek-chat"]
+    assert routes[0].capabilities.tools is True
+
+
+def test_a_declared_tool_capability_the_contract_denies_still_drops_the_route():
+    """The other half: emulation moving after the check must not make the check
+    unreachable. A route that declares `tools: true` on its own -- no emulation
+    -- against a contract reporting `tools: false` is still a contradiction."""
+    provider = Provider("x", "free", "openai", "https://x.test/v1", "", "",
+                        {}, [{"id": "m", "tools": True, "vision": False,
+                              "context": 1000, "max_output": 100}])
+    assert fixed_routes(provider, contract=_contract(tools=False)) == []

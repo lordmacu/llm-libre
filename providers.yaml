@@ -75,11 +75,27 @@ providers:
     # off when the Go subscription lapses (2026-09-06) instead of sending every
     # image request to a route that answers 503.
     #
-    # The declarations below STAY, and they are not dead weight: they are the
-    # fallback for a sweep where /health could not be read, and `exceptions`
-    # remains the strongest voice of all -- see the precedence note in
-    # catalog.normalize. `tools: false` in particular is a MEASURED correction
-    # to what this proxy says about itself, and no discovery may overrule it.
+    # The declarations below STAY, and they are not dead weight -- but they are
+    # now the WEAKEST voice, not a veto. Precedence, strongest first (see the
+    # note in catalog.normalize): `exceptions` > /v1/models per-model >
+    # /health > `default_capabilities`. So `default_capabilities` is the
+    # fallback for a sweep where /health could not be read AND no earlier
+    # contract is stored; the contract overrules it whenever one arrives.
+    #
+    # That is not a loophole, it is the point, and it applies to `tools: false`
+    # below like everything else: the contract wins there. chatgpt-proxy has
+    # since gained emulated function calling and reports `tools` from its own
+    # TOOL_EMULATION flag, so once a sweep succeeds this provider serves
+    # tool-calling traffic at `priority: 0`. The 0/3 measurement recorded below
+    # is HISTORY -- it describes a proxy that had no function calling at all --
+    # not a live constraint, and it was the operator's decision to let the
+    # proxy's own answer supersede it.
+    #
+    # TO PIN IT AGAIN, if the emulation ever proves as bad as the old backend
+    # was: add the id under `exceptions` with `tools: false`. That is level 1
+    # and nothing overrules it. `exceptions` is keyed BY MODEL ID only, so
+    # pinning the whole provider means one entry per id -- there is no
+    # provider-wide override key, and this file must not pretend otherwise.
     reads_capabilities: true
     unwraps_canvas: true   # see finding 1 of the review in catalog.py/reasoning.py:
                                 # it is the ONLY provider that genuinely leaks canvas mode into
@@ -107,14 +123,24 @@ providers:
       # capabilities are declared once here and catalog.normalize applies them
       # to every discovered id.
       #
-      # tools:false is MANDATORY -- re-confirmed 2026-08-18. The proxy no longer
-      # returns HTTP 500 when handed tools, but it still has no function calling:
-      # with tool_choice:"required" it returns tool_calls:None and plain prose.
-      # Its own docs draw the same distinction -- "advanced tools: bookings,
-      # shopping, widgets, canvas" (supported) vs "function calling / tool_calls
-      # in the response: not supported on the anonymous backend" (not) -- and
-      # llm-libre's `tools` capability means the second one. This declaration is
-      # the only barrier keeping tool-calling traffic away from this provider.
+      # tools:false is a FALLBACK, not a barrier. Read as a record of what was
+      # measured on 2026-08-18: with tool_choice:"required" the proxy returned
+      # tool_calls:None and plain prose, 0/3, twice -- its own docs drew the
+      # same line, "advanced tools: bookings, shopping, widgets, canvas"
+      # (supported) vs "function calling / tool_calls in the response: not
+      # supported on the anonymous backend" (not), and llm-libre's `tools`
+      # capability means the second one.
+      #
+      # That measurement no longer decides anything on its own. chatgpt-proxy
+      # gained emulated function calling and now publishes `tools` on its
+      # /health from its own TOOL_EMULATION flag; the capability contract
+      # carries that value and it outranks this line (see the precedence note
+      # above `reads_capabilities`). This value is what the gateway uses only
+      # while no contract can be read and none is stored.
+      #
+      # If tool traffic has to be kept away from this provider again, this line
+      # is NOT where to do it: put the id under `exceptions` with
+      # `tools: false`, which nothing overrules.
       tools: false
       vision: false
       context: 128000
@@ -149,9 +175,22 @@ providers:
     # the proxy intercepts requests for this model id and runs the image
     # generation flow, returning content: [{type: "image_url", ...}].
     # Declared via exceptions so it is picked up when the proxy exposes it
-    # in /v1/models. tools:false, vision:false — it only draws, not chats.
+    # in /v1/models. tools:false, vision:false -- it only draws, not chats.
+    #
+    # `images` IS DELIBERATELY NOT DECLARED HERE, and that omission is the whole
+    # reason this entry was narrowed. `exceptions` is level 1, applied LAST,
+    # after both the contract and the per-model narrowing -- so `images: true`
+    # here would survive the Go plan lapsing on 2026-09-06. And gpt-image-1, not
+    # dall-e-3, is the id the proxy actually publishes in /v1/models: pinning it
+    # true would leave the only real image route sitting at `priority: 0`,
+    # absorbing every image request into a 503. That is verbatim the failure the
+    # capability contract exists to end.
+    #
+    # Nothing is lost by leaving it out: the contract reports `images` resolved
+    # against the plan and /v1/models may narrow it per model, which together
+    # give `images: true` while the plan holds and false once it does not.
     exceptions:
-      gpt-image-1: {tools: false, vision: false, images: true}
+      gpt-image-1: {tools: false, vision: false}
 
   - id: perplexity
     tier: free
