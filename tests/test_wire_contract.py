@@ -195,6 +195,7 @@ def test_yaml_keys_are_still_understood():
     assert cg.default_capabilities is not None
     assert cg.unwraps_canvas is True
     assert cg.models_path == "/models"
+    assert cg.reads_capabilities is True
     grok = next(p for p in provs if p.id == "grok")
     assert "imagine-agent-mode" in grok.exceptions
 
@@ -223,6 +224,7 @@ def test_the_yaml_key_names_are_literal(tmp_path):
         "    timeout_s: 42\n"
         "    unwraps_canvas: true\n"
         "    emulates_tools: true\n"
+        "    reads_capabilities: true\n"
         "    extra_headers:\n"
         "      X-Thing: yes\n"
         "    default_capabilities:\n"
@@ -247,6 +249,7 @@ def test_the_yaml_key_names_are_literal(tmp_path):
     assert p.timeout_s == 42.0
     assert p.unwraps_canvas is True
     assert p.emulates_tools is True
+    assert p.reads_capabilities is True
     assert p.extra_headers == {"X-Thing": True}
     assert p.default_capabilities.context == 128000
     assert p.default_capabilities.max_output == 4096

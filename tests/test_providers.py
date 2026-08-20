@@ -558,6 +558,7 @@ def test_no_branded_proxy_is_cut_off_by_its_own_timeout_before_two_minutes():
         assert timeout is not None, f"{pid} must state its own ceiling"
         assert timeout >= 120, f"{pid} is cut off at {timeout}s"
 
+
 def test_reads_capabilities_defaults_to_false(tmp_path):
     yaml_path = tmp_path / "p.yaml"
     yaml_path.write_text(
