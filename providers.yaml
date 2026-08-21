@@ -323,9 +323,36 @@ providers:
     # grok-proxy's contract work (this plan's Tasks 3-10) is committed on its
     # `grok-contract` branch but NOT YET DEPLOYED as of this write: its live
     # /health still reports no contract. That does not block turning this on
-    # here -- the fallback below covers exactly that case until the proxy
-    # deploys and a sweep succeeds. grok-proxy deploys first, so the gateway
-    # never reads a contract from a proxy that cannot yet honour it.
+    # here -- with no contract to read, `default_capabilities` below decides,
+    # exactly as it did before. grok-proxy deploys first, so the gateway never
+    # reads a contract from a proxy that cannot yet honour it.
+    #
+    # BUT KNOW WHAT THE FALLBACK COVERS, because it is not everything. The
+    # block below carries `tools`, `vision`, `context` and `max_output` -- and
+    # NOTHING ELSE. `images` is NOT among them, and neither are `search`,
+    # `audio_speech`, `audio_transcription` or `translate`. Measured
+    # 2026-08-20 against grok's real /health + /v1/models payloads
+    # (tests/fixtures/grok_health.json, grok_models.json):
+    #
+    #   WITH a contract    -> image routes: imagine-agent-mode,
+    #                         imagine-agent-mode-dev, imagine-agent-mode-grok-4-5
+    #   WITHOUT a contract -> image routes: NONE
+    #
+    # So any state in which `parse_health` returns None -- grok-proxy rolled
+    # back, failing to start, answering /health with something unparseable, or
+    # a future `contract:` version bump this gateway does not speak -- silently
+    # removes grok's ONLY three image routes. One WARNING is logged and no
+    # alert fires (a provider that had a stored contract and now publishes none
+    # is not yet an alerted transition). The other 14 routes survive intact on
+    # the declared tools/vision, so the degradation is quiet, not loud.
+    #
+    # `images` is deliberately NOT added to the fallback: a hand-declared
+    # `images: true` here would be a stale snapshot claiming a capability grok
+    # may have stopped having, which is the exact defect retiring the
+    # `exceptions` block removed (see the note at the end of this provider).
+    # The exposure is recorded here, and pinned by
+    # tests/test_catalog.py::test_without_the_contract_grok_loses_every_image_route,
+    # rather than papered over.
     reads_capabilities: true
     default_capabilities:
       # tools AND vision both TRUE, and the path to this value is worth writing
