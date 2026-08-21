@@ -186,3 +186,72 @@ def test_the_gateway_reaches_proxies_by_host_gateway_not_localhost():
 def test_the_link_url_keeps_the_v1_suffix():
     """providers.yaml documents the /v1 as mandatory."""
     assert host_gateway_url(8890).endswith("/v1")
+
+
+# ── Verificación real ────────────────────────────────────────────────────────
+
+class _Recorder:
+    """Sustituye a http_json para poder afirmar QUÉ se preguntó, no sólo qué se
+    devolvió."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = []
+
+    def __call__(self, url, payload=None, headers=None, timeout=30):
+        self.calls.append((url, payload))
+        return self.reply
+
+
+def _quiet_ui():
+    import io
+
+    from llm_libre.installer import UI
+    return UI(stream=io.StringIO(), colour=False)
+
+
+def test_a_real_prompt_is_sent_to_the_provider_itself(monkeypatch):
+    """No al gateway: se está comprobando ESTE proxy, antes de vincularlo."""
+    from llm_libre import installer
+
+    rec = _Recorder((200, {"choices": [{"message": {"content": "ok"}}]}))
+    monkeypatch.setattr(installer, "http_json", rec)
+    assert installer.verify_provider(_quiet_ui(), BY_KEY["grok"]) is True
+    url, payload = rec.calls[0]
+    assert url == "http://127.0.0.1:8893/v1/chat/completions"
+    assert payload["messages"][0]["role"] == "user"
+
+
+def test_bad_credentials_fail_the_check(monkeypatch):
+    """El caso que motivó todo esto: /health responde 200 con la contraseña mal."""
+    from llm_libre import installer
+
+    monkeypatch.setattr(installer, "http_json",
+                        _Recorder((401, {"detail": "Invalid API key"})))
+    assert installer.verify_provider(_quiet_ui(), BY_KEY["grok"]) is False
+
+
+def test_a_200_with_empty_content_is_not_a_pass(monkeypatch):
+    """Así se ve una cuenta silenciada desde afuera: 200 y nada adentro.
+    Aceptarlo reportaría como funcional un proveedor que no responde nunca."""
+    from llm_libre import installer
+
+    monkeypatch.setattr(installer, "http_json",
+                        _Recorder((200, {"choices": [{"message": {"content": "   "}}]})))
+    assert installer.verify_provider(_quiet_ui(), BY_KEY["grok"]) is False
+
+
+def test_an_unparseable_200_is_not_a_pass(monkeypatch):
+    from llm_libre import installer
+
+    monkeypatch.setattr(installer, "http_json", _Recorder((200, {"unexpected": 1})))
+    assert installer.verify_provider(_quiet_ui(), BY_KEY["grok"]) is False
+
+
+def test_a_network_failure_is_not_a_pass(monkeypatch):
+    """http_json devuelve status 0 cuando no hubo respuesta. Tratarlo como
+    progreso es el error que ya se cometió antes en este proyecto."""
+    from llm_libre import installer
+
+    monkeypatch.setattr(installer, "http_json", _Recorder((0, "ConnectionError")))
+    assert installer.verify_provider(_quiet_ui(), BY_KEY["grok"]) is False

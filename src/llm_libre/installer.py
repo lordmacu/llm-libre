@@ -507,8 +507,18 @@ def start_gateway(ui: UI, root: Path, api_key: str) -> None:
 
 
 def install_provider(ui: UI, provider: Provider, workdir: Path, mode: AuthMode,
-                     credentials: dict) -> bool:
-    """Clone, configure and start one provider. Returns whether it came up."""
+                     credentials: dict) -> str:
+    """Clone, configure and start one provider.
+
+    Returns "ok" (it answered a real prompt), "unverified" (it is running but
+    did not answer) or "failed" (it never came up).
+
+    The middle case exists on purpose. A provider whose quota is spent today
+    answers nothing and is still worth linking: the gateway handles exactly
+    that with cooldowns and failover, and excluding it would be a worse
+    outcome than including it with a warning. Only a container that never came
+    up is skipped, because there is nothing to link.
+    """
     ui.title(f"{provider.label}")
     target = workdir / provider.key
 
@@ -537,7 +547,7 @@ def install_provider(ui: UI, provider: Provider, workdir: Path, mode: AuthMode,
     if not wait_for_health(f"http://127.0.0.1:{provider.port}/health", ui, attempts=40):
         ui.fail(f"{provider.label} did not answer on {provider.port}.")
         ui.info(f"Logs: cd {compose_dir} && docker compose logs --tail 50")
-        return False
+        return "failed"
 
     if mode.otp is not None and not run_otp_login(ui, provider, mode.otp):
         ui.warn(f"{provider.label} is up but not logged in. Chat will fail until "
@@ -549,10 +559,57 @@ def install_provider(ui: UI, provider: Provider, workdir: Path, mode: AuthMode,
         ui.ok(f"{provider.label} up — {len(live)}/11 capabilities: {', '.join(live)}")
         auth = (body.get("auth") or {}).get("mode")
         if auth == "anonymous" and mode.key != "anonymous":
-            ui.warn("It answered, but reports mode `anonymous`: the credentials "
-                    "were not accepted. Chat may work; account features will not.")
+            ui.warn("It reports mode `anonymous`: the credentials were not picked "
+                    "up. The prompt below will show whether it can answer at all.")
     else:
         ui.ok(f"{provider.label} up on port {provider.port}")
+
+    return "ok" if verify_provider(ui, provider) else "unverified"
+
+
+def verify_provider(ui: UI, provider: Provider, timeout: int = 180) -> bool:
+    """Send a real prompt to THIS proxy and require a real answer.
+
+    This exists because the cheaper checks lie in a specific, dangerous way.
+    `/health` answering 200 only proves the web server is running. And the
+    contract's `auth.mode` is a LOCAL read of whether credential variables are
+    set -- it says nothing about whether they are correct. A mistyped password
+    produces a healthy container reporting `account`, and the failure surfaces
+    later, to a user who was told the install succeeded.
+
+    So the check is the only one that cannot be faked: ask it something and see
+    whether it answers. Costs one request against the account, which is the
+    right price for knowing.
+    """
+    ui.step(f"Verifying {provider.label} answers a real prompt")
+    status, body = http_json(
+        f"http://127.0.0.1:{provider.port}/v1/chat/completions",
+        payload={"model": "auto",
+                 "messages": [{"role": "user", "content": "responde solo: ok"}]},
+        timeout=timeout)
+
+    if status == 401 or status == 403:
+        ui.fail(f"{provider.label} refused the request ({status}): the credentials "
+                f"are wrong or expired.")
+        return False
+    if status != 200:
+        detail = str(body)[:200]
+        ui.fail(f"{provider.label} answered {status}: {detail}")
+        return False
+    try:
+        answer = body["choices"][0]["message"]["content"].strip()
+    except Exception:
+        ui.fail(f"{provider.label} answered 200 with an unusable body: {str(body)[:200]}")
+        return False
+    if not answer:
+        # A 200 carrying nothing is how a refused or muted account looks from
+        # the outside. Accepting it would report a working provider that
+        # answers every real question with silence.
+        ui.fail(f"{provider.label} answered 200 but with empty content — the "
+                f"account is likely rate limited or muted.")
+        return False
+
+    ui.ok(f"{provider.label} answered: {answer[:60]!r}")
     return True
 
 
@@ -710,13 +767,19 @@ def main(argv: list | None = None) -> int:
             mode = choose_mode(ui, provider)
             plans.append((provider, mode, collect_credentials(ui, mode)))
 
-        installed = []
+        installed, unverified = [], []
         for provider, mode, credentials in plans:
-            if install_provider(ui, provider, workdir, mode, credentials):
-                link_provider(ui, root, provider)
-                installed.append(provider)
-            else:
+            outcome = install_provider(ui, provider, workdir, mode, credentials)
+            if outcome == "failed":
                 ui.warn(f"{provider.label} was skipped; the rest continue.")
+                continue
+            link_provider(ui, root, provider)
+            installed.append(provider)
+            if outcome == "unverified":
+                unverified.append(provider)
+                ui.warn(f"{provider.label} is linked but never answered. It stays "
+                        f"in the pool -- the gateway will fail over past it until "
+                        f"it recovers.")
 
         if not installed:
             ui.fail("No provider came up. Nothing to link.")
@@ -729,6 +792,9 @@ def main(argv: list | None = None) -> int:
         ui.info(f"Gateway:  http://127.0.0.1:8101")
         ui.info(f"API key:  {api_key}")
         ui.info(f"Providers installed: {', '.join(p.label for p in installed)}")
+        if unverified:
+            ui.warn(f"Never answered a prompt: {', '.join(p.label for p in unverified)}. "
+                    f"Most likely wrong credentials or a spent quota.")
         if not ok:
             ui.warn("The containers are up but the test prompt did not come back. "
                     "Check credentials with: curl -s http://127.0.0.1:8101/health")
