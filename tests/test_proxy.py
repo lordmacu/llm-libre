@@ -78,7 +78,10 @@ async def test_a_429_without_retry_after_does_not_escalate_on_repeated_hits():
     first = p.cooldowns["kilo/a:free"]
     await p.complete([_route("a:free")], BODY, now=first)
     second = p.cooldowns["kilo/a:free"]
-    assert second - first == COOLDOWN_429_DEFAULT_S  # flat, not exponential
+    # abs=0.5 for the same reason as the block at the two-cap tests below: the
+    # gap is `COOLDOWN_429_DEFAULT_S + the measured round-trip`, not a bare 30.0.
+    # A strict `==` here is a flake waiting for the mocked round-trip to cross 1ms.
+    assert second - first == pytest.approx(COOLDOWN_429_DEFAULT_S, abs=0.5)  # flat, not exponential
 
 
 async def test_a_429_respects_the_providers_retry_after():
@@ -1392,17 +1395,32 @@ async def test_the_503_says_how_many_routes_were_actually_tried():
 # muted account roughly 288 times a day, which is plausibly how the mute got there.
 
 
+# abs=0.5 on every cooldown comparison below, for the reason documented in full
+# at test_a_negative_or_non_finite_retry_after_falls_back_to_the_default: none of
+# these numbers is exact, because `_punish_429` is stamped with
+# `punish_at = now + the MEASURED round-trip` (HIGH 2, round 9), and `latency_ms`
+# is whole milliseconds. The mocked round-trip is normally under 1ms -- so the
+# value lands on exactly 1800.0/30.0 -- but crosses 1ms in ~1.5% of runs idle and
+# ~2.8% under load (measured over 400 iterations each, 2026-08-20), which stamps
+# 30.001-30.003 instead.
+#
+# A bare `pytest.approx` is RELATIVE (rel=1e-6), so the SMALLEST expected value
+# gets the tightest window and fails first: 30.0 tolerates +/-30us, 1800.0
+# +/-1.8ms, 3600.0 +/-3.6ms. That ranking is exactly why
+# test_without_a_retry_after_the_short_guessed_cap_still_applies was the one that
+# flaked -- the others here have the identical defect, just a wider window.
+
 async def test_a_stated_retry_after_is_honoured_far_past_the_guessed_cap():
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "1800"}))
     await p.complete([_route("a:free")], BODY, now=0.0)
-    assert p.cooldowns["kilo/a:free"] == pytest.approx(1800.0)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(1800.0, abs=0.5)
 
 
 async def test_a_stated_retry_after_is_still_bounded():
     """Bounded, because a compromised provider could send an absurd one."""
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "99999999"}))
     await p.complete([_route("a:free")], BODY, now=0.0)
-    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_STATED_MAX_S)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_STATED_MAX_S, abs=0.5)
 
 
 async def test_without_a_retry_after_the_short_guessed_cap_still_applies():
@@ -1410,7 +1428,7 @@ async def test_without_a_retry_after_the_short_guessed_cap_still_applies():
     about cannot cool a route for an hour."""
     p = _proxy(lambda req: httpx.Response(429))
     await p.complete([_route("a:free")], BODY, now=0.0)
-    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_DEFAULT_S)
+    assert p.cooldowns["kilo/a:free"] == pytest.approx(COOLDOWN_429_DEFAULT_S, abs=0.5)
     assert p.cooldowns["kilo/a:free"] <= COOLDOWN_429_MAX_S
 
 
@@ -1512,10 +1530,10 @@ async def test_the_image_503_reports_when_IMAGES_comes_back_not_chat():
                providers=("grok",))
     r = await p.generate_images([_image_route("imagine")], IMAGE_BODY, now=0.0)
     assert r.status == 503
-    assert r.json["error"]["next_release"] == pytest.approx(1800.0)
+    assert r.json["error"]["next_release"] == pytest.approx(1800.0, abs=0.5)
 
 
 async def test_the_chat_503_still_reports_the_chat_cooldown():
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "1800"}))
     r = await p.complete([_route("a:free")], BODY, now=0.0)
-    assert r.json["error"]["next_release"] == pytest.approx(1800.0)
+    assert r.json["error"]["next_release"] == pytest.approx(1800.0, abs=0.5)
