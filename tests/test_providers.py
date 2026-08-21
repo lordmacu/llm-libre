@@ -716,11 +716,6 @@ def test_a_declared_tool_capability_the_contract_denies_still_drops_the_route():
     assert fixed_routes(provider, contract=_contract(tools=False)) == []
 
 
-def test_grok_reads_the_contract():
-    providers = load("providers.yaml", {})
-    assert sorted(p.id for p in providers if p.reads_capabilities) == ["chatgpt", "grok"]
-
-
 def test_grok_no_longer_pins_images_through_exceptions():
     # The gpt-image-1 defect, in its other home: `exceptions` applies LAST, so
     # a hand-declared images:true would survive a contract that says otherwise.

@@ -1595,9 +1595,15 @@ ssh blog 'curl -s http://127.0.0.1:8893/health' | python3 -m json.tool
 ssh blog 'curl -s -H "X-API-Key: <key>" http://127.0.0.1:8102/health' | python3 -m json.tool
 ```
 
-Expected: grok's `/health` carries `contract: 1` with `search`, `files`,
-`conversations`, `audio_speech` and `audio_transcription` all true; the
-gateway's `providers` block lists both `chatgpt` and `grok`.
+Expected: grok's `/health` carries `contract: 1` with `search`,
+`conversations`, `audio_speech` and `audio_transcription` all true, and
+**`files` false** — that is the correct deploy, not a failure. Upload works,
+but it is served at grok-proxy's native `POST /grok/files`, and the contract's
+`files` boolean promises the whole CRUD surface at the standard path, so all
+four `/v1/files*` methods answer 501 and the boolean stays false until the
+live AssetRepository probe settles listing and deletion (see grok-proxy's
+`CAPABILITIES.md` and `capabilities.py`). `translate` is false too, and
+permanently. The gateway's `providers` block lists both `chatgpt` and `grok`.
 
 ## What this plan does not do
 
