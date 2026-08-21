@@ -113,13 +113,19 @@ PROVIDERS: tuple = (
         key="chatgpt", label="ChatGPT",
         repo="https://github.com/lordmacu/chatgpt-proxy.git", port=8890,
         modes=(
+            AuthMode("anonymous", "Free, no account (chat, search, translate)"),
             AuthMode("password", "Email and password", (
                 ("EMAIL", "ChatGPT email", False),
                 ("PASSWORD", "ChatGPT password", True))),
             AuthMode("token", "Access token", (
                 ("CHATGPT_ACCESS_TOKEN", "Access token", True),)),
         ),
-        notes=TOKEN_ONLY + " Richest provider of the five: 11 capabilities with an active plan.",
+        notes=("The only provider that genuinely works with NO account: it uses "
+               "ChatGPT's /backend-anon API. Measured at the HTTP route, in a "
+               "copy of the source with no token, cookie or .env file and an "
+               "empty HOME -- POST /v1/chat/completions answered 200. Anonymous "
+               "gets 5 of 11 capabilities; an account adds vision, images, "
+               "audio, files and conversations, and a paid plan adds images."),
     ),
     Provider(
         key="grok", label="Grok (xAI)",

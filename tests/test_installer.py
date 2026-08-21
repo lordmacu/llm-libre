@@ -149,19 +149,33 @@ def test_perplexity_is_not_offered_a_password_it_does_not_have():
     assert "otp" in modes
 
 
-def test_no_provider_offers_a_free_mode():
-    """Mistral se ofrecía como gratis sobre una medición de la capa equivocada:
-    su clase de Python chatea anónima, pero la ruta HTTP devuelve 401. Un
-    proveedor instalado que rechaza todo es peor que uno no ofrecido."""
+def test_only_chatgpt_offers_a_free_mode():
+    """Dos afirmaciones idénticas, dos resultados opuestos, y la diferencia es
+    DÓNDE se midió.
+
+    mistral se ofrecía como gratis porque su clase de Python chatea sin
+    credenciales — pero su ruta HTTP devuelve 401, así que se quitó.
+
+    chatgpt se comprobó en la ruta: código sin tokens.json ni cookies ni .env,
+    HOME vacío, y `POST /v1/chat/completions` respondió 200 con texto. Esa es
+    la única evidencia que cuenta.
+    """
     free = {p.key for p in PROVIDERS if any(m.key == "anonymous" for m in p.modes)}
-    assert free == set()
+    assert free == {"chatgpt"}
 
 
-def test_every_mode_can_actually_authenticate():
-    """Cada modo pide algo o corre un flujo. Un modo que no hace ninguna de las
-    dos produce exactamente el fallo de mistral: contenedor sano, 401 en todo."""
+def test_the_free_mode_asks_for_nothing():
+    anon = [m for m in BY_KEY["chatgpt"].modes if m.key == "anonymous"][0]
+    assert anon.prompts == () and anon.otp is None
+
+
+def test_every_credentialed_mode_can_actually_authenticate():
+    """Un modo que ni pide nada ni corre un flujo, y que no está declarado
+    anónimo, produce el fallo de mistral: contenedor sano, 401 en todo."""
     for provider in PROVIDERS:
         for mode in provider.modes:
+            if mode.key == "anonymous":
+                continue
             assert mode.prompts or mode.otp is not None, f"{provider.key}/{mode.key}"
 
 
