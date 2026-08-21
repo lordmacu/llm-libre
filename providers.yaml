@@ -264,6 +264,24 @@ providers:
     # test_tool_emulator.py.
     emulates_tools: true
 
+    # Its /health publishes the capability contract (spec 2026-08-20), the
+    # fourth proxy to do so. It had NO /health at all until today -- port 8892
+    # answered 404 -- so this is a new endpoint, not an extended one.
+    #
+    # It reports `tools: false`, and that is correct and must not be "fixed":
+    # deepseek's own backend has no function calling. What makes tool traffic
+    # work here is `emulates_tools` above -- THIS GATEWAY injecting the tool
+    # definitions into the prompt and parsing the answer back. That is llm-libre's
+    # work, not the proxy's, and the contract describes the proxy. The routes
+    # survive the honest declaration because fixed_routes tests the contradiction
+    # against the DECLARED value and applies emulation afterwards; verified before
+    # opting in, both routes come through with tools=True.
+    #
+    # It also reports `search: false` while its backend supports search: server.py
+    # hardcodes "search_enabled": False, so a request sent right now does not
+    # search. The boolean says what a request ACHIEVES.
+    reads_capabilities: true
+
   - id: grok
     tier: free          # the proxy runs on Grok's free tier
     priority: 0
