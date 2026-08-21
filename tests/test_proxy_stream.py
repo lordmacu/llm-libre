@@ -749,3 +749,101 @@ async def test_a_genuinely_broken_route_in_a_single_route_chain_cools_down_quick
         [l async for l in p.complete_stream(_multi("a:free"), BODY, float(i))]
     await p.wait_for_pending_probes()
     assert "kilo/a:free" in p.cooldowns
+
+
+# --- tool emulation over streaming ---
+# The buffered branch: an emulating provider with callable tools in the request
+# gathers the whole answer, then emits either one tool_calls chunk or one text
+# chunk. Until this section, that branch had no offline coverage at all.
+
+WEATHER_TOOL = {"type": "function", "function": {
+    "name": "get_weather",
+    "description": "Get current weather for a city",
+    "parameters": {"type": "object",
+                   "properties": {"city": {"type": "string"}},
+                   "required": ["city"]},
+}}
+
+
+def _emu_proxy(handler):
+    store = Storage(":memory:")
+    store.create_schema()
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://k.test", "",
+                              "/models", {}, [], emulates_tools=True)}
+    return Proxy(prov, store, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+
+def _tool_body(**extra):
+    return {"model": "auto", "messages": [{"role": "user", "content": "weather?"}],
+            "stream": True, "tools": [WEATHER_TOOL], **extra}
+
+
+def _payload_lines(lines):
+    return [json.loads(l[len("data: "):]) for l in lines
+            if l.startswith("data: ") and "[DONE]" not in l]
+
+
+async def test_emulated_stream_converts_a_call_split_across_deltas():
+    p = _emu_proxy(lambda req: httpx.Response(200, content=_sse_json(
+        '{"name": "get_w', 'eather", "argume', 'nts": {"city": "Lima"}}')))
+    lines = [l async for l in p.complete_stream([_route()], _tool_body(), 0.0)]
+    chunks = _payload_lines(lines)
+    assert len(chunks) == 1
+    delta = chunks[0]["choices"][0]["delta"]
+    assert delta["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert json.loads(delta["tool_calls"][0]["function"]["arguments"]) == {"city": "Lima"}
+    assert chunks[0]["choices"][0]["finish_reason"] == "tool_calls"
+    assert lines[-1].strip() == "data: [DONE]"
+
+
+async def test_emulated_stream_releases_prose_as_one_text_chunk():
+    p = _emu_proxy(lambda req: httpx.Response(200, content=_sse_json(
+        "It is ", "sunny in Lima.")))
+    lines = [l async for l in p.complete_stream([_route()], _tool_body(), 0.0)]
+    chunks = _payload_lines(lines)
+    assert len(chunks) == 1
+    assert chunks[0]["choices"][0]["delta"]["content"] == "It is sunny in Lima."
+    assert chunks[0]["choices"][0]["finish_reason"] == "stop"
+
+
+async def test_emulated_stream_fails_over_when_required_gets_prose():
+    """tool_choice:"required" is a promise: prose is a failed attempt, and with
+    nothing emitted yet the next route still gets its chance."""
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=_sse_json("I would rather chat."))
+        return httpx.Response(200, content=_sse_json(
+            '{"name": "get_weather", "arguments": {"city": "Lima"}}'))
+
+    p = _emu_proxy(handler)
+    body = _tool_body(tool_choice="required")
+    lines = [l async for l in p.complete_stream(
+        [_route("a:free"), _route("b:free")], body, 0.0)]
+    assert len(calls) == 2
+    chunks = _payload_lines(lines)
+    assert len(chunks) == 1
+    assert chunks[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "get_weather"
+
+
+async def test_emulated_stream_required_prose_everywhere_ends_with_an_error():
+    p = _emu_proxy(lambda req: httpx.Response(
+        200, content=_sse_json("Prose, always prose.")))
+    body = _tool_body(tool_choice="required")
+    lines = [l async for l in p.complete_stream([_route()], body, 0.0)]
+    assert any("error" in l for l in lines)
+    assert lines[-1].strip() == "data: [DONE]"
+
+
+async def test_emulated_stream_tool_choice_none_streams_incrementally():
+    """With "none" there is nothing to detect, so buffering the whole answer
+    would only cost the client its incremental stream."""
+    p = _emu_proxy(lambda req: httpx.Response(200, content=_sse_json("Hel", "lo")))
+    body = _tool_body(tool_choice="none")
+    lines = [l async for l in p.complete_stream([_route()], body, 0.0)]
+    chunks = _payload_lines(lines)
+    contents = [c["choices"][0]["delta"].get("content") for c in chunks]
+    assert "".join(x for x in contents if x) == "Hello"
+    assert len([x for x in contents if x]) == 2

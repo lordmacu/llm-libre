@@ -1537,3 +1537,91 @@ async def test_the_chat_503_still_reports_the_chat_cooldown():
     p = _proxy(lambda req: httpx.Response(429, headers={"Retry-After": "1800"}))
     r = await p.complete([_route("a:free")], BODY, now=0.0)
     assert r.json["error"]["next_release"] == pytest.approx(1800.0, abs=0.5)
+
+
+# --- tool_choice "required" on an emulated route is a promise, not a hint ---
+# The injected prompt asks the model to call; only failover enforces it. Prose
+# where the client was guaranteed tool_calls gets the same treatment as a 200
+# with no content: a failed attempt, and the next route's chance.
+
+WEATHER_TOOL = {"type": "function", "function": {
+    "name": "get_weather",
+    "description": "Get current weather for a city",
+    "parameters": {"type": "object",
+                   "properties": {"city": {"type": "string"}},
+                   "required": ["city"]},
+}}
+
+
+def _emu_proxy(handler):
+    store = Storage(":memory:")
+    store.create_schema()
+    prov = {"kilo": Provider("kilo", "free", "openai", "https://kilo.test", "",
+                              "/models", {}, [], emulates_tools=True)}
+    return Proxy(prov, store,
+                 httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+
+def _tool_body(**extra):
+    return {"model": "auto",
+            "messages": [{"role": "user", "content": "weather in Lima?"}],
+            "tools": [WEATHER_TOOL], **extra}
+
+
+async def test_required_prose_fails_over_to_the_next_route():
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, json=_ok("It is sunny, probably."))
+        return httpx.Response(200, json=_ok(
+            '{"name": "get_weather", "arguments": {"city": "Lima"}}'))
+
+    p = _emu_proxy(handler)
+    r = await p.complete([_route("a:free"), _route("b:free")],
+                         _tool_body(tool_choice="required"), now=0.0)
+    assert r.status == 200
+    assert r.attempts == 2
+    tcs = r.json["choices"][0]["message"]["tool_calls"]
+    assert tcs[0]["function"]["name"] == "get_weather"
+
+
+async def test_required_prose_on_every_route_returns_503_naming_the_reason():
+    p = _emu_proxy(lambda req: httpx.Response(200, json=_ok("Prose only.")))
+    r = await p.complete([_route("a:free")],
+                         _tool_body(tool_choice="required"), now=0.0)
+    assert r.status == 503
+    assert "tool_choice" in r.json["error"]["detail"]
+
+
+async def test_required_prose_without_emulation_is_left_alone():
+    """A provider that does NOT emulate keeps its native behaviour: whatever it
+    answered travels to the client untouched."""
+    p = _proxy(lambda req: httpx.Response(200, json=_ok("Prose only.")))
+    r = await p.complete([_route("a:free")],
+                         _tool_body(tool_choice="required"), now=0.0)
+    assert r.status == 200
+    assert r.json["choices"][0]["message"]["content"] == "Prose only."
+
+
+async def test_forced_function_answered_with_another_tool_fails_over():
+    """tool_choice forcing fn1 makes a call to fn2 an unmet demand, not a win."""
+    fn1 = {"type": "function", "function": {"name": "fn1", "parameters": {}}}
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    calls = []
+
+    def handler(req):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, json=_ok('{"name": "fn2", "arguments": {}}'))
+        return httpx.Response(200, json=_ok('{"name": "fn1", "arguments": {}}'))
+
+    p = _emu_proxy(handler)
+    body = {"model": "auto", "messages": [{"role": "user", "content": "go"}],
+            "tools": [fn1, fn2],
+            "tool_choice": {"type": "function", "function": {"name": "fn1"}}}
+    r = await p.complete([_route("a:free"), _route("b:free")], body, now=0.0)
+    assert r.status == 200
+    assert r.attempts == 2
+    assert r.json["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "fn1"

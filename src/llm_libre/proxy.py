@@ -583,6 +583,26 @@ class Proxy:
                 if not has_answer(data):
                     data = None
                     last_error = "200 with neither content nor tool_calls"
+                elif provider.emulates_tools:
+                    # `body` is the CLIENT's request, with its `tools` intact:
+                    # build_request strips it only from the copy that travels to
+                    # the provider. That array is the allow-list that prevents
+                    # converting a legitimate text answer into an invented tool
+                    # call.
+                    data = _emu.detect_and_convert(data, body.get("tools"),
+                                                    body.get("tool_choice"))
+                    # tool_choice `required` (or a forced function) is a promise
+                    # to the client, not a hint to the model: the injected
+                    # prompt ASKS for the call, only failing over ENFORCES it.
+                    # Prose here is the same kind of non-answer as the empty 200
+                    # above -- the next route gets its chance, and if none takes
+                    # it the chain's 503 names the reason. Native providers are
+                    # untouched: they enforce tool_choice themselves.
+                    if _emu.unmet_tool_demand(data, body.get("tools"),
+                                              body.get("tool_choice")):
+                        data = None
+                        last_error = ("200 answering in prose where tool_choice "
+                                      "demanded a function call")
 
             success = code == 200 and data is not None
             self.store.record_event(route.key, success, 0, code, now,
@@ -599,13 +619,6 @@ class Proxy:
                 # clearing it) -- complete() cannot know that from here.
                 if not is_probe:
                     self._clear_punishment(route.key)
-                if provider.emulates_tools:
-                    # `body` is the CLIENT's request, with its `tools` intact:
-                    # build_request strips it only from the copy that travels to
-                    # the provider. That array is the allow-list that prevents
-                    # converting a legitimate text answer into an invented tool call.
-                    data = _emu.detect_and_convert(data, body.get("tools"),
-                                                    body.get("tool_choice"))
                 return ProxyResponse(200, data, route, attempts, reasoning_text, code)
 
             if code == 429:
@@ -862,9 +875,14 @@ class Proxy:
                     # routes -- unavoidable, and only when the client asked for
                     # tools against a provider that does not support them natively.
                     #
-                    # `tool_name_allowlist` is the CLIENT request's allow-list: without
-                    # it, legitimate text carrying JSON would be turned into an
-                    # invented call (see tool_emulator's docstring).
+                    # `tool_name_allowlist` is the CLIENT request's allow-list,
+                    # already narrowed by tool_choice (a forced function
+                    # authorises only itself, `"none"` authorises nothing --
+                    # which also keeps `"none"` on the incremental path below:
+                    # with nothing to detect, buffering would only cost the
+                    # client its stream). Without the allow-list, legitimate
+                    # text carrying JSON would be turned into an invented call
+                    # (see tool_emulator's docstring).
                     #
                     # MIND THE ORDER: `emulates_tools` is evaluated BEFORE looking
                     # at `tools`. The other way round, a malformed `tools` from any
@@ -872,8 +890,10 @@ class Proxy:
                     # that emulate nothing -- and the exception was raised INSIDE
                     # the generator, with the 200 and the SSE headers already sent:
                     # a cut stream with no possible failover.
-                    if provider.emulates_tools and _emu.tool_names(body.get("tools")):
-                        tool_name_allowlist = _emu.tool_names(body.get("tools"))
+                    tool_name_allowlist = (
+                        _emu.allowed_names(body.get("tools"), body.get("tool_choice"))
+                        if provider.emulates_tools else set())
+                    if tool_name_allowlist:
                         buffered = ""
                         # id/created/model/usage from the provider: fields the
                         # chunk schema marks as required, and the synthetic chunk
@@ -912,14 +932,29 @@ class Proxy:
                         if not raw:
                             buffered += rec.close()
 
-                        calls = _emu.parse_tool_calls(buffered, tool_name_allowlist)
-                        if calls and body.get("tool_choice") != "none":
+                        calls = _emu.parse_tool_calls(buffered, tool_name_allowlist,
+                                                      schemas=body.get("tools"))
+                        if calls:
                             _record_success_once()
                             useful = True
                             chunk = _emu.build_stream_chunk(calls, envelope)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
+                        if _emu.demands_call(body.get("tool_choice")):
+                            # Prose (or nothing) where the client's tool_choice
+                            # guaranteed a call. Nothing has been emitted, so
+                            # failover is still clean -- same treatment as the
+                            # empty 200 below, and for the same reason: this
+                            # attempt served nobody.
+                            if not event_recorded:
+                                self.store.record_event(route.key, False, 0, 200, now,
+                                                         trace=trace, attempt=attempts)
+                                event_recorded = True
+                                self._react_to_non_429_failure(
+                                    route, now, now + (time.monotonic() - t0),
+                                    is_probe=False)
+                            continue
                         if buffered.strip():
                             # It was not a tool call: it is delivered as an
                             # ordinary text response, which is exactly what the
