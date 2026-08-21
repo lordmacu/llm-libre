@@ -17,20 +17,32 @@ This module closes that gap in two halves, wired in at opposite ends of a reques
 The emulation is transparent: the router sees ``tools=True`` for these routes and
 clients see a normal OpenAI response either way.
 
-Three guarantees make it a contract rather than a best effort:
+Invariants, each held by construction and pinned by tests:
 
-- ``tool_choice`` is ENFORCED, not relayed. ``"none"`` can never yield a call,
-  a forced function authorises only itself (:func:`allowed_names`), and
-  ``"required"`` unmet is a failed attempt (:func:`unmet_tool_demand`) — the
-  proxy fails over instead of handing an agentic client prose it will misread.
-- Detection reads every dialect a prompted model actually emits — bare JSON,
-  fenced JSON, ``<tool_call>`` tags (one per parallel call), Mistral's
-  ``[TOOL_CALLS]`` marker, JSONL runs, Python-literal dicts, ReAct
-  ``action``/``action_input``, wrapper envelopes, leaked ``functions.``
-  namespaces — all behind the same allow-list.
-- Arguments are repaired against the tool's own JSON Schema where the fix is
-  lossless (``"5"`` → 5 for an ``integer``), and left untouched anywhere it is
-  not (:func:`_apply_schemas`).
+1. SOUNDNESS — every call this module produces names a function in
+   ``allowed_names(tools, tool_choice)``, the client's own offer narrowed by
+   its own constraint. No input (model output, schema, history) can widen it.
+2. ``tool_choice`` is ENFORCED, not relayed. ``"none"`` can never yield a
+   call; a forced function (nested or flat spelling) authorises only itself;
+   an ``allowed_tools`` subset authorises exactly its members; ``"required"``
+   (or forced/``mode: "required"``) unmet is a failed attempt
+   (:func:`unmet_tool_demand`) — the proxy fails over instead of handing an
+   agentic client prose it will misread. ``parallel_tool_calls: false`` caps
+   the emitted batch at one call.
+3. COVERAGE — detection reads every dialect a prompted model actually emits:
+   bare JSON, fenced JSON, ``<tool_call>`` tags (one per parallel call),
+   Mistral's ``[TOOL_CALLS]`` marker, JSONL runs, Python-literal dicts, ReAct
+   ``action``/``action_input``, wrapper envelopes, leaked ``functions.``
+   namespaces — all behind the same allow-list. Native ``tool_calls`` a
+   provider produces on its own pass through untouched, streaming included.
+4. Argument repair is LOSSLESS OR IDENTITY, and idempotent: values are
+   re-read against the tool's own JSON Schema by JSON's grammar (``"5"`` → 5
+   for an ``integer``, unions and nested structures included) and anything
+   that does not convert cleanly travels exactly as the model sent it
+   (:func:`_apply_schemas`).
+5. TOTALITY — the parser never raises on any string input, and its work is
+   bounded linearly in the response size (``_MAX_UNCLOSED_SCANS``); when a
+   bound trips, the failure direction is a missed call, never an invented one.
 
 **The central risk is a false positive.** Converting a genuine text answer into a
 tool call is worse than missing a call: the client acts on a function invocation
@@ -43,6 +55,7 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 
 log = logging.getLogger("llm_libre.tool_emulator")
@@ -117,39 +130,75 @@ _CALL_WRAPPER_KEYS = ("function_call", "tool_call", "tool_use", "function")
 # still has to clear the same allow-list.
 _NAMESPACE_PREFIXES = ("functions", "tools")
 
+# The bare scan's work bound: each unclosed opener buys one O(n) walk, so this
+# caps the scan at O(_MAX_UNCLOSED_SCANS * n) on any input. See _json_candidates.
+_MAX_UNCLOSED_SCANS = 8
 
-def _describe_params(params: dict) -> str:
+
+# How deep the prompt renders nested schemas. Past this, fields are announced
+# as omitted rather than silently dropped: a model told a parameter exists but
+# not its shape asks; a model never told invents.
+_DESCRIBE_MAX_DEPTH = 3
+
+
+def _describe_params(params, indent: str = "  ", depth: int = 0) -> str:
     """Render a JSON-Schema parameter block as prose for the injected prompt.
+
+    Recursive: nested object properties and array-item fields are what complex
+    tools are made of, and a flat rendering left the model guessing exactly the
+    arguments it gets wrong most. Depth-capped by _DESCRIBE_MAX_DEPTH.
 
     Every field is type-checked before use. This runs on a body the client sent
     verbatim -- ``api.py`` does no schema validation -- so a malformed ``tools``
     entry must degrade to a thinner prompt, never raise: an exception here
     escapes ``build_request`` inside the route loop and aborts the whole chain
-    before a single upstream attempt.
+    before a single upstream attempt. (That includes ``required`` lists with
+    unhashable members, which a bare ``set()`` turned into exactly such an
+    exception.)
     """
     if not isinstance(params, dict):
-        return "  (no parameters)"
+        return "  (no parameters)" if depth == 0 else ""
     props = params.get("properties")
     props = props if isinstance(props, dict) else {}
     raw_required = params.get("required")
-    required = set(raw_required) if isinstance(raw_required, (list, tuple, set)) else set()
+    required = ({r for r in raw_required if isinstance(r, str)}
+                if isinstance(raw_required, (list, tuple, set)) else set())
     lines = []
     for name, schema in props.items():
         if not isinstance(schema, dict):
             schema = {}
         kind = schema.get("type", "any")
-        line = f"  - {name} ({kind}{' , required' if name in required else ', optional'})"
+        if isinstance(kind, list):
+            kind = "|".join(str(k) for k in kind if isinstance(k, str)) or "any"
+        line = f"{indent}- {name} ({kind}{', required' if name in required else ', optional'})"
         desc = schema.get("description")
-        if desc:
+        if isinstance(desc, str) and desc:
             line += f": {desc}"
         if isinstance(schema.get("enum"), list):
             allowed = ", ".join(json.dumps(v, ensure_ascii=False) for v in schema["enum"])
             line += f" [allowed: {allowed}]"
+        if "default" in schema:
+            try:
+                line += f" (default: {json.dumps(schema['default'], ensure_ascii=False)})"
+            except (TypeError, ValueError):
+                pass
         items = schema.get("items")
-        if kind == "array" and isinstance(items, dict) and items.get("type"):
+        if kind == "array" and isinstance(items, dict) and isinstance(items.get("type"), str):
             line += f" (array of {items['type']})"
         lines.append(line)
-    return "\n".join(lines) if lines else "  (no parameters)"
+
+        for nested in (schema, items if isinstance(items, dict) else None):
+            if nested is None or not isinstance(nested.get("properties"), dict):
+                continue
+            if depth >= _DESCRIBE_MAX_DEPTH:
+                lines.append(f"{indent}  (deeper fields omitted)")
+            else:
+                rendered = _describe_params(nested, indent + "  ", depth + 1)
+                if rendered:
+                    lines.append(rendered)
+    if lines:
+        return "\n".join(lines)
+    return "  (no parameters)" if depth == 0 else ""
 
 
 def _tool_choice_instruction(tool_choice) -> str:
@@ -165,12 +214,23 @@ def _tool_choice_instruction(tool_choice) -> str:
     if tool_choice == "none":
         return ("\n\nIMPORTANT: Do NOT call any function on this turn. "
                 "Answer in plain text only.")
-    if isinstance(tool_choice, dict):
-        fn = tool_choice.get("function")
-        name = fn.get("name") if isinstance(fn, dict) else None
-        if isinstance(name, str) and name:
-            return (f"\n\nIMPORTANT: You MUST call the function `{name}` specifically. "
-                    "Do not call any other function, and do not answer in prose.")
+    subset = _allowed_tools_names(tool_choice)
+    if subset is not None:
+        clause = ""
+        if subset:
+            listed = ", ".join(f"`{n}`" for n in sorted(subset))
+            clause = (f"\n\nIMPORTANT: On this turn you may only call: {listed}. "
+                      "Do not call any function outside that list.")
+        if isinstance(tool_choice, dict) and tool_choice.get("mode") == "required":
+            clause += (" You MUST call one of them -- do not answer in prose."
+                       if clause else
+                       "\n\nIMPORTANT: You MUST call one of the functions listed "
+                       "below. Do NOT answer in prose.")
+        return clause
+    forced = _forced_function_name(tool_choice)
+    if forced is not None:
+        return (f"\n\nIMPORTANT: You MUST call the function `{forced}` specifically. "
+                "Do not call any other function, and do not answer in prose.")
     return ""
 
 
@@ -196,39 +256,82 @@ def tool_names(tools) -> set[str]:
     return names
 
 
+def _forced_function_name(tool_choice) -> str | None:
+    """The single function a dict-shaped ``tool_choice`` forces, or None.
+
+    Reads both spellings in the wild: the Chat Completions nested form
+    ``{"type": "function", "function": {"name": X}}`` and the Responses-style
+    flat form ``{"type": "function", "name": X}``. This is THE definition of
+    "forced" -- allowed_names, demands_call and the prompt instruction all read
+    it here, so the three can never disagree about what was forced.
+    """
+    if not isinstance(tool_choice, dict):
+        return None
+    if tool_choice.get("type") == "allowed_tools":
+        return None
+    fn = tool_choice.get("function")
+    name = fn.get("name") if isinstance(fn, dict) else None
+    if isinstance(name, str) and name:
+        return name
+    name = tool_choice.get("name")
+    return name if isinstance(name, str) and name else None
+
+
+def _allowed_tools_names(tool_choice) -> set[str] | None:
+    """The subset an ``allowed_tools`` choice authorises, or None if it is not
+    one. Entries are read in both spellings, like :func:`_forced_function_name`.
+    An empty set is a meaningful answer: the client authorised nothing."""
+    if not (isinstance(tool_choice, dict)
+            and tool_choice.get("type") == "allowed_tools"):
+        return None
+    names = set()
+    entries = tool_choice.get("tools")
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        fn = entry.get("function")
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if not (isinstance(name, str) and name):
+            name = entry.get("name")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
+
+
 def allowed_names(tools, tool_choice) -> set[str]:
     """The names detection may produce once ``tool_choice`` has had its say.
 
     ``tool_choice`` does not only demand calls, it narrows them: a client that
-    forced one specific function has NOT authorised any other, and ``"none"``
+    forced one specific function has NOT authorised any other, an
+    ``allowed_tools`` subset authorises exactly its members, and ``"none"``
     authorises nothing at all. Detection gated on this set instead of the raw
     tool list is what turns ``tool_choice`` from a hint into a contract.
     """
     names = tool_names(tools)
     if tool_choice == "none":
         return set()
-    if isinstance(tool_choice, dict):
-        fn = tool_choice.get("function")
-        name = fn.get("name") if isinstance(fn, dict) else None
-        if isinstance(name, str) and name:
-            return names & {name}
+    subset = _allowed_tools_names(tool_choice)
+    if subset is not None:
+        return names & subset
+    forced = _forced_function_name(tool_choice)
+    if forced is not None:
+        return names & {forced}
     return names
 
 
 def demands_call(tool_choice) -> bool:
     """Whether ``tool_choice`` PROMISES the client a tool call.
 
-    OpenAI's contract: ``"required"`` and a forced specific function both
-    guarantee the response carries ``tool_calls``. ``auto``/``none``/absent
-    promise nothing.
+    OpenAI's contract: ``"required"``, a forced specific function, and an
+    ``allowed_tools`` choice with ``mode: "required"`` all guarantee the
+    response carries ``tool_calls``. ``auto``/``none``/absent promise nothing.
     """
     if tool_choice == "required":
         return True
-    if isinstance(tool_choice, dict):
-        fn = tool_choice.get("function")
-        name = fn.get("name") if isinstance(fn, dict) else None
-        return isinstance(name, str) and bool(name)
-    return False
+    if (isinstance(tool_choice, dict)
+            and tool_choice.get("type") == "allowed_tools"):
+        return tool_choice.get("mode") == "required"
+    return _forced_function_name(tool_choice) is not None
 
 
 def unmet_tool_demand(data, tools, tool_choice) -> bool:
@@ -430,8 +533,12 @@ def inject_into_body(body: dict) -> dict:
         if role == "assistant" and msg.get("tool_calls"):
             as_text = _calls_as_text(msg["tool_calls"])
             # An assistant turn may carry BOTH prose and calls. Keeping the prose
-            # preserves reasoning the model may refer back to later.
+            # preserves reasoning the model may refer back to later -- including
+            # prose delivered as a list of typed parts, which flattens the same
+            # way a tool result's does.
             prose = msg.get("content")
+            if isinstance(prose, list):
+                prose = _tool_result_text(prose)
             content = f"{prose}\n{as_text}".strip() if isinstance(prose, str) and prose.strip() else as_text
             messages.append({"role": "assistant", "content": content})
             continue
@@ -459,8 +566,33 @@ def inject_into_body(body: dict) -> dict:
     return result
 
 
-def detect_and_convert(data: dict, tools=None, tool_choice=None) -> dict:
-    """Convert a text answer that is really a tool call into ``tool_calls`` shape.
+def _content_as_text(content) -> str | None:
+    """Flatten response content into detectable text, or None to leave it be.
+
+    A plain string passes through. A list of parts flattens ONLY when every
+    part is text (a bare string, or a dict whose payload is its ``text``):
+    flattening past a non-text part (an image) would detect against a lossy
+    projection of the answer and then discard the part on conversion.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content:
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif (isinstance(p, dict) and isinstance(p.get("text"), str)
+                    and p.get("type") in (None, "text")):
+                parts.append(p["text"])
+            else:
+                return None
+        return "\n".join(parts)
+    return None
+
+
+def detect_and_convert(data: dict, tools=None, tool_choice=None,
+                       parallel_tool_calls=None) -> dict:
+    """Convert text answers that are really tool calls into ``tool_calls`` shape.
 
     ``tools`` is the array from the ORIGINAL client request. Only functions named
     there can be produced; see the module docstring on why this allow-list is not
@@ -472,9 +604,15 @@ def detect_and_convert(data: dict, tools=None, tool_choice=None) -> dict:
     outright: the injected prompt already asks the model not to call anything,
     but a prompt is a request, not a guarantee -- and OpenAI's contract promises
     the client that ``none`` yields no tool calls. A forced specific function
-    narrows the allow-list to that one function (see :func:`allowed_names`): a
-    call to any OTHER offered tool stays text, so the caller can treat the
-    attempt as an unmet demand instead of handing the client a call it forbade.
+    (or an ``allowed_tools`` subset) narrows the allow-list (see
+    :func:`allowed_names`): a call to any OTHER offered tool stays text, so the
+    caller can treat the attempt as an unmet demand instead of handing the
+    client a call it forbade. ``parallel_tool_calls=False`` caps a detected
+    batch at its first call -- the prompt asks for one, this makes it true.
+
+    Every choice converts independently (``n > 1`` sampling), and a choice that
+    already carries native ``tool_calls`` is never touched: re-parsing its prose
+    commentary must not overwrite the calls the provider actually made.
 
     Returns ``data`` unchanged (same object) when no call is detected.
     """
@@ -482,21 +620,27 @@ def detect_and_convert(data: dict, tools=None, tool_choice=None) -> dict:
     if not valid:
         return data
 
-    for i, choice in enumerate(data.get("choices") or []):
+    choices = list(data.get("choices") or [])
+    converted_any = False
+    for i, choice in enumerate(choices):
         if not isinstance(choice, dict):
             continue
         msg = choice.get("message") or {}
-        content = msg.get("content")
+        if not isinstance(msg, dict) or msg.get("tool_calls"):
+            continue
+        content = _content_as_text(msg.get("content"))
         if not isinstance(content, str) or not content.strip():
             continue
 
         parsed = parse_tool_calls(content, valid, schemas=tools)
         if not parsed:
             continue
+        if parallel_tool_calls is False:
+            parsed = parsed[:1]
         log.debug("emulated tool call detected: %s",
                   [c["name"] for c in parsed])
 
-        converted = {
+        choices[i] = {
             **choice,
             "message": {
                 **msg,
@@ -505,11 +649,9 @@ def detect_and_convert(data: dict, tools=None, tool_choice=None) -> dict:
             },
             "finish_reason": "tool_calls",
         }
-        choices = list(data.get("choices") or [])
-        choices[i] = converted
-        return {**data, "choices": choices}
+        converted_any = True
 
-    return data
+    return {**data, "choices": choices} if converted_any else data
 
 
 def _to_openai_tool_calls(parsed: list[dict]) -> list[dict]:
@@ -525,7 +667,9 @@ def _to_openai_tool_calls(parsed: list[dict]) -> list[dict]:
 
 
 def build_stream_chunk(parsed: list[dict] | None, envelope: dict | None = None,
-                       content: str | None = None) -> dict:
+                       content: str | None = None,
+                       raw_tool_calls: list[dict] | None = None,
+                       fallback_model: str | None = None) -> dict:
     """Build the single SSE chunk that closes an emulated streaming response.
 
     Detection needs the whole answer, so the streaming path buffers the response
@@ -534,32 +678,110 @@ def build_stream_chunk(parsed: list[dict] | None, envelope: dict | None = None,
     just not progressive.
 
     ``envelope`` carries ``id``/``created``/``model`` (and any ``usage``) captured
-    from the provider's own chunks. Without it these emulated chunks were the only
-    ones in the gateway missing fields the chunk schema marks required, and any
-    client billing from ``usage`` silently got nothing on exactly these routes.
-    ``model`` comes from the provider, not from the request, so it names the route
-    that really served the call rather than the alias ``auto``.
+    from the provider's own chunks, plus the provider's own ``finish_reason``.
+    ``model`` comes from the provider, not from the request, so it names the
+    route that really served the call rather than the alias ``auto``; when the
+    provider never sent one, ``fallback_model`` (the route's own id) fills in.
+    ``id`` and ``created`` are synthesized when absent -- the chunk schema marks
+    them required, and a nonconforming provider must not make THIS gateway
+    nonconforming too.
 
-    Pass ``parsed`` for a tool-call chunk, or ``content`` for a plain-text one.
+    The text variant keeps the provider's ``finish_reason``: masking a
+    ``"length"`` as ``"stop"`` hides from the client that its answer was cut --
+    exactly the case where the buffered text may be a truncated call that could
+    not be detected.
+
+    Pass ``parsed`` for an emulated tool-call chunk, ``raw_tool_calls`` for
+    already-shaped native calls travelling through verbatim, or ``content`` for
+    a plain-text one.
     """
     envelope = envelope or {}
-    if parsed:
+    if raw_tool_calls:
+        # `content` may ride along: a native provider that streams prose AND
+        # calls said both, and relaying only the calls drops half its answer.
+        delta = {"role": "assistant", "content": content if content else None,
+                 "tool_calls": [{"index": i, **c}
+                                for i, c in enumerate(raw_tool_calls)]}
+        finish = "tool_calls"
+    elif parsed:
         delta = {"role": "assistant", "content": None,
                  "tool_calls": [{"index": i, **c}
                                 for i, c in enumerate(_to_openai_tool_calls(parsed))]}
         finish = "tool_calls"
     else:
         delta = {"role": "assistant", "content": content or ""}
-        finish = "stop"
+        # Only reasons that make sense WITHOUT tool_calls travel through: a
+        # provider claiming "tool_calls" on what is being released as text
+        # would hand the client a contract violation.
+        provider_finish = envelope.get("finish_reason")
+        finish = (provider_finish
+                  if provider_finish in ("stop", "length", "content_filter")
+                  else "stop")
 
     chunk = {"object": "chat.completion.chunk",
              "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
     for key in ("id", "created", "model", "system_fingerprint"):
         if envelope.get(key) is not None:
             chunk[key] = envelope[key]
+    if "id" not in chunk:
+        chunk["id"] = f"chatcmpl-emu-{uuid.uuid4().hex[:16]}"
+    if "created" not in chunk:
+        chunk["created"] = int(time.time())
+    if "model" not in chunk and fallback_model is not None:
+        chunk["model"] = fallback_model
     if envelope.get("usage") is not None:
         chunk["usage"] = envelope["usage"]
     return chunk
+
+
+def accumulate_tool_call_delta(acc: dict, fragments) -> None:
+    """Fold one streaming delta's ``tool_calls`` list into ``acc``.
+
+    The OpenAI streaming contract splits each call across chunks keyed by
+    ``index``: the id/type/name usually arrive once, ``function.arguments``
+    arrives as string fragments to concatenate. Concatenation is the correct
+    accumulation for BOTH text fields -- a name that arrives whole concatenates
+    onto the empty string, a name that arrives split still assembles.
+
+    A provider that answers an "emulated" route with native tool_calls deltas
+    is a provider doing the RIGHT thing; before this existed, the buffered
+    emulation path read only ``delta.content`` and silently dropped its calls
+    -- while the non-streaming path passed the same calls through. One request
+    shape, two different answers: exactly the asymmetry this module exists to
+    remove.
+    """
+    if not isinstance(fragments, list):
+        return
+    for frag in fragments:
+        if not isinstance(frag, dict):
+            continue
+        index = frag.get("index")
+        index = index if isinstance(index, int) and index >= 0 else 0
+        slot = acc.setdefault(index, {"id": None, "name": "", "arguments": ""})
+        if isinstance(frag.get("id"), str) and frag["id"]:
+            slot["id"] = frag["id"]
+        fn = frag.get("function")
+        if isinstance(fn, dict):
+            if isinstance(fn.get("name"), str):
+                slot["name"] += fn["name"]
+            if isinstance(fn.get("arguments"), str):
+                slot["arguments"] += fn["arguments"]
+
+
+def assembled_tool_calls(acc: dict) -> list[dict] | None:
+    """Close an accumulator into OpenAI-shaped ``tool_calls``, or None if empty.
+
+    Calls come out ordered by ``index`` -- the order the provider declared --
+    and a call whose id never arrived gets one synthesized, because clients key
+    their tool results by it.
+    """
+    if not acc:
+        return None
+    return [{"id": acc[index]["id"] or f"call_emu_{uuid.uuid4().hex[:8]}",
+             "type": "function",
+             "function": {"name": acc[index]["name"],
+                          "arguments": acc[index]["arguments"] or "{}"}}
+            for index in sorted(acc)]
 
 
 def _blank_out(text: str, pattern: re.Pattern) -> str:
@@ -604,9 +826,17 @@ def _json_candidates(text: str) -> list[tuple[int, str, bool]]:
 
     residual = _blank_out(_blank_out(text, _TOOL_CALL_TAG), _CODE_FENCE)
     spans: list[tuple[int, int, str]] = []
+    # Every unclosed opener costs one walk to the end of the text before the
+    # scan can step past it. Unbudgeted, a hostile storm of bare openers makes
+    # the whole scan quadratic in the response size -- a model (or whoever
+    # controls one) must not be able to buy O(n²) of this gateway's CPU with
+    # O(n) of output. The budget keeps the total work at O(k·n) and gives up
+    # in the SAFE direction: a missed call behind 8+ stray unclosed openers,
+    # never an invented one.
+    unclosed_budget = _MAX_UNCLOSED_SCANS
     for opener, closer in (("[", "]"), ("{", "}")):
         pos = 0
-        while True:
+        while unclosed_budget > 0:
             hit = _balanced_span(residual, opener, closer, pos)
             if hit is None:
                 break
@@ -614,6 +844,7 @@ def _json_candidates(text: str) -> list[tuple[int, str, bool]]:
             if span is None:
                 # An opener whose span never closes (an unpaired quote, a cut
                 # answer). Step past it: a real call may still follow.
+                unclosed_budget -= 1
                 pos = start + 1
                 continue
             spans.append((start, start + len(span), span))
@@ -968,32 +1199,137 @@ def _apply_schemas(calls: list[dict] | None, schemas) -> list[dict] | None:
     return repaired
 
 
-def _coerce_value(value, schema):
-    kind = schema.get("type") if isinstance(schema, dict) else None
-    if kind == "integer" and isinstance(value, str):
-        try:
-            return int(value.strip())   # int() rejects "5.5" and "five" alike
-        except ValueError:
-            return value
-    if kind == "number" and isinstance(value, str):
-        try:
-            number = float(value.strip())
-        except ValueError:
-            return value
-        return number if math.isfinite(number) else value
-    if kind == "boolean" and isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in ("true", "false"):
-            return lowered == "true"
+# Coercion reads numbers by JSON's own grammar, not Python's: int("1_000") and
+# float("1_2.5") succeed in Python but "1_000" is not a JSON number, so
+# accepting them would not be a lossless re-reading of what the model wrote.
+_JSON_INT = re.compile(r"[+-]?[0-9]+\Z")
+_JSON_NUMBER = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\Z")
+
+# Bounds recursion through nested objects/array items. Client schemas arrive as
+# parsed JSON (acyclic by construction), so this is belt: a depth past it just
+# stops repairing, never fails.
+_COERCE_MAX_DEPTH = 8
+
+
+def _satisfies(value, kind: str) -> bool:
+    """Whether ``value`` already inhabits JSON-Schema type ``kind``.
+
+    ``bool`` is deliberately NOT an integer here, although Python says it is:
+    JSON Schema draws the same line, and folding True into 1 would rewrite a
+    flag the model may have meant literally. A whole float (5.0) is
+    deliberately NOT accepted as ``integer`` either, even though JSON Schema
+    would validate it: rejecting it here routes it through the coercion step,
+    which folds it to the canonical int that strict consumers (pydantic and
+    friends) expect.
+    """
+    if kind == "string":
+        return isinstance(value, str)
+    if kind == "boolean":
+        return isinstance(value, bool)
+    if kind == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if kind == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if kind == "array":
+        return isinstance(value, list)
+    if kind == "object":
+        return isinstance(value, dict)
+    if kind == "null":
+        return value is None
+    return False
+
+
+def _coerce_scalar(value, kind: str, kinds: list[str]):
+    """One lossless conversion attempt toward ``kind``; the input on failure."""
+    if kind == "integer":
+        if isinstance(value, str) and _JSON_INT.match(value.strip()):
+            return int(value.strip())
+        if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+            return int(value)
+    elif kind == "number":
+        if isinstance(value, str) and _JSON_NUMBER.match(value.strip()):
+            return float(value.strip())
+    elif kind == "boolean":
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower() == "true"
+    elif kind == "string":
+        # bool is excluded: json.dumps(True) is "true", which silently rewrites
+        # a flag the model may have meant literally.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return json.dumps(value)
+    elif kind == "array" or kind == "object":
+        if isinstance(value, str):
+            parsed = _loads_tolerant(value.strip())
+            if kind == "array" and isinstance(parsed, list):
+                return parsed
+            if kind == "object" and isinstance(parsed, dict):
+                return parsed
+    elif kind == "null":
+        # Only when the union has no "string" member: with one, the literal
+        # text "null" is at least as plausibly the string as the null.
+        if (isinstance(value, str) and value.strip().lower() == "null"
+                and "string" not in kinds):
+            return None
+    return value
+
+
+def _coerce_value(value, schema, depth: int = 0):
+    """Repair one value against its schema: losslessly, or not at all.
+
+    The decision procedure, in order:
+
+    1. Enum repair: a string differing from exactly ONE enum member only by
+       case/padding becomes that member. Two members that collide
+       case-insensitively make a third spelling ambiguous -- untouched.
+    2. Identity: a value already satisfying ANY declared type (``type`` may be
+       a union list) is never converted -- "5" under ["integer", "string"] IS
+       the string. The one exception is a whole float under ``integer``, folded
+       to the canonical int.
+    3. Otherwise the declared types are tried in order and the first clean
+       conversion wins; no clean conversion, no change.
+    4. Structure recursion: dicts repair their declared ``properties``, lists
+       repair every element against ``items`` -- bounded by _COERCE_MAX_DEPTH.
+
+    The procedure is idempotent: every repaired value satisfies its type, and
+    step 2 makes satisfying values fixed points.
+    """
+    if not isinstance(schema, dict) or depth > _COERCE_MAX_DEPTH:
         return value
-    # bool is excluded: json.dumps(True) is "true", which silently rewrites a
-    # flag the model may have meant literally.
-    if kind == "string" and isinstance(value, (int, float)) and not isinstance(value, bool):
-        return json.dumps(value)
-    if kind in ("array", "object") and isinstance(value, str):
-        parsed = _loads_tolerant(value.strip())
-        if kind == "array" and isinstance(parsed, list):
-            return parsed
-        if kind == "object" and isinstance(parsed, dict):
-            return parsed
+
+    enum = schema.get("enum")
+    if (isinstance(enum, list) and isinstance(value, str) and value not in enum):
+        matches = [e for e in enum
+                   if isinstance(e, str) and e.lower() == value.strip().lower()]
+        if len(matches) == 1:
+            value = matches[0]
+
+    declared = schema.get("type")
+    if isinstance(declared, str):
+        kinds = [declared]
+    elif isinstance(declared, list):
+        kinds = [k for k in declared if isinstance(k, str)]
+    else:
+        kinds = []
+
+    if not any(_satisfies(value, k) for k in kinds):
+        for kind in kinds:
+            converted = _coerce_scalar(value, kind, kinds)
+            if converted is not value:
+                value = converted
+                break
+    elif ("integer" in kinds and isinstance(value, float)
+            and math.isfinite(value) and value.is_integer()):
+        # A whole float in a union that also allows "number" satisfies the
+        # union as-is; it is still folded to the canonical integer form.
+        value = int(value)
+
+    if isinstance(value, dict):
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            value = {k: _coerce_value(v, props.get(k), depth + 1)
+                     for k, v in value.items()}
+    elif isinstance(value, list):
+        items = schema.get("items")
+        if isinstance(items, dict):
+            value = [_coerce_value(v, items, depth + 1) for v in value]
     return value

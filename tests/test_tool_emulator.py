@@ -878,6 +878,337 @@ def test_inject_tool_result_with_unknown_id_keeps_generic_label():
     assert last["content"].startswith("[Function result]")
 
 
+# --- every choice is its own conversion problem ---
+
+def test_detect_converts_every_choice_independently():
+    """n>1 sampling: each choice that is a call converts; prose stays prose."""
+    call = '{"name": "get_weather", "arguments": {"city": "Lima"}}'
+    data = {"choices": [
+        {"message": {"role": "assistant", "content": call}},
+        {"message": {"role": "assistant", "content": "It is sunny."}},
+        {"message": {"role": "assistant", "content": call}},
+    ]}
+    result = detect_and_convert(data, [WEATHER_TOOL])
+    assert result["choices"][0]["message"]["tool_calls"]
+    assert result["choices"][1]["message"]["content"] == "It is sunny."
+    assert "tool_calls" not in result["choices"][1]["message"]
+    assert result["choices"][2]["message"]["tool_calls"]
+
+
+def test_detect_leaves_a_choice_with_native_tool_calls_untouched():
+    """A provider that already answered with tool_calls needs no emulation:
+    re-parsing its prose commentary must not overwrite the real calls."""
+    data = {"choices": [{"message": {
+        "role": "assistant",
+        "content": 'Calling now: {"name": "get_weather", "arguments": {"city": "X"}}',
+        "tool_calls": [{"id": "native_1", "type": "function",
+                        "function": {"name": "get_weather",
+                                     "arguments": '{"city": "Lima"}'}}],
+    }}]}
+    assert detect_and_convert(data, [WEATHER_TOOL]) is data
+
+
+def test_detect_reads_content_delivered_as_text_parts():
+    """Some backends return content as a list of typed parts."""
+    data = {"choices": [{"message": {"role": "assistant", "content": [
+        {"type": "text", "text": '{"name": "get_weather", "arguments": {"city": "Lima"}}'},
+    ]}}]}
+    result = detect_and_convert(data, [WEATHER_TOOL])
+    tcs = result["choices"][0]["message"]["tool_calls"]
+    assert tcs[0]["function"]["name"] == "get_weather"
+
+
+def test_detect_leaves_mixed_part_content_alone():
+    """A non-text part (an image) means flattening would lose data: skip."""
+    data = {"choices": [{"message": {"role": "assistant", "content": [
+        {"type": "text", "text": '{"name": "get_weather", "arguments": {}}'},
+        {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+    ]}}]}
+    assert detect_and_convert(data, [WEATHER_TOOL]) is data
+
+
+# --- parallel_tool_calls: false caps the OUTPUT, not just the prompt ---
+
+def test_detect_caps_calls_when_parallel_is_disabled():
+    data = _response_with_content(
+        '[{"name": "fn1", "arguments": {}}, {"name": "fn2", "arguments": {}}]')
+    fn1 = {"type": "function", "function": {"name": "fn1", "parameters": {}}}
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    result = detect_and_convert(data, [fn1, fn2], parallel_tool_calls=False)
+    tcs = result["choices"][0]["message"]["tool_calls"]
+    assert len(tcs) == 1
+    assert tcs[0]["function"]["name"] == "fn1"
+
+
+# --- tool_choice spellings beyond the nested classic ---
+
+def test_allowed_names_reads_the_flat_forced_form():
+    from llm_libre.tool_emulator import allowed_names, demands_call
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    tools = [WEATHER_TOOL, fn2]
+    flat = {"type": "function", "name": "get_weather"}
+    assert allowed_names(tools, flat) == {"get_weather"}
+    assert demands_call(flat) is True
+
+
+def test_allowed_names_reads_allowed_tools():
+    from llm_libre.tool_emulator import allowed_names, demands_call
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    tools = [WEATHER_TOOL, fn2]
+    subset = {"type": "allowed_tools", "mode": "auto",
+              "tools": [{"type": "function", "function": {"name": "fn2"}}]}
+    assert allowed_names(tools, subset) == {"fn2"}
+    assert demands_call(subset) is False
+    required = {**subset, "mode": "required"}
+    assert demands_call(required) is True
+    flat_entries = {"type": "allowed_tools", "mode": "auto",
+                    "tools": [{"type": "function", "name": "get_weather"}]}
+    assert allowed_names(tools, flat_entries) == {"get_weather"}
+
+
+def test_detect_respects_an_allowed_tools_subset():
+    fn1 = {"type": "function", "function": {"name": "fn1", "parameters": {}}}
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    data = _response_with_content('{"name": "fn2", "arguments": {}}')
+    subset = {"type": "allowed_tools", "mode": "auto",
+              "tools": [{"type": "function", "function": {"name": "fn1"}}]}
+    assert detect_and_convert(data, [fn1, fn2], subset) is data
+
+
+# --- coercion is lossless by a strict grammar, or it does not happen ---
+
+def test_coercion_rejects_python_only_numeric_spellings():
+    """int("1_000") is a Python quirk, not a JSON number: not lossless."""
+    data = _response_with_content(
+        '{"name": "typed", "arguments": {"count": "1_000", "ratio": "1_2.5"}}')
+    result = detect_and_convert(data, [TYPED_TOOL])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"count": "1_000", "ratio": "1_2.5"}
+
+
+def test_coercion_accepts_scientific_notation_for_number():
+    data = _response_with_content(
+        '{"name": "typed", "arguments": {"ratio": "1.5e2"}}')
+    result = detect_and_convert(data, [TYPED_TOOL])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"ratio": 150.0}
+
+
+def test_coercion_folds_a_whole_float_into_a_declared_integer():
+    data = _response_with_content(
+        '{"name": "typed", "arguments": {"count": 5.0}}')
+    result = detect_and_convert(data, [TYPED_TOOL])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"count": 5}
+    assert isinstance(args["count"], int)
+
+
+def test_coercion_understands_type_unions():
+    union_tool = {"type": "function", "function": {
+        "name": "u", "parameters": {"type": "object", "properties": {
+            "n": {"type": ["integer", "null"]},
+            "s": {"type": ["integer", "string"]},
+        }}}}
+    data = _response_with_content(
+        '{"name": "u", "arguments": {"n": "5", "s": "5"}}')
+    result = detect_and_convert(data, [union_tool])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    # "5" satisfies no member of ["integer","null"] -> coerced to the integer.
+    # "5" already satisfies "string" in ["integer","string"] -> identity wins.
+    assert args == {"n": 5, "s": "5"}
+
+
+def test_coercion_repairs_a_unique_case_insensitive_enum_value():
+    enum_tool = {"type": "function", "function": {
+        "name": "e", "parameters": {"type": "object", "properties": {
+            "units": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+        }}}}
+    data = _response_with_content(
+        '{"name": "e", "arguments": {"units": "Celsius"}}')
+    result = detect_and_convert(data, [enum_tool])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"units": "celsius"}
+
+
+def test_coercion_recurses_into_nested_objects_and_array_items():
+    nested_tool = {"type": "function", "function": {
+        "name": "n", "parameters": {"type": "object", "properties": {
+            "config": {"type": "object", "properties": {
+                "retries": {"type": "integer"}}},
+            "ids": {"type": "array", "items": {"type": "integer"}},
+        }}}}
+    data = _response_with_content(
+        '{"name": "n", "arguments": {"config": {"retries": "3"}, "ids": ["1", "2"]}}')
+    result = detect_and_convert(data, [nested_tool])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"config": {"retries": 3}, "ids": [1, 2]}
+
+
+# --- the injected prompt renders nested schemas, not just flat ones ---
+
+def test_inject_describes_nested_parameters_and_defaults():
+    tool = {"type": "function", "function": {
+        "name": "search_orders",
+        "description": "Search the order database",
+        "parameters": {"type": "object", "properties": {
+            "filters": {"type": "object", "description": "Search filters",
+                        "properties": {
+                            "status": {"type": "string",
+                                       "enum": ["open", "closed"]},
+                            "limit": {"type": "integer", "default": 10},
+                        }},
+            "tags": {"type": "array",
+                     "items": {"type": "object", "properties": {
+                         "key": {"type": "string"}}}},
+        }, "required": ["filters"]},
+    }}
+    body = {"model": "m", "messages": [{"role": "user", "content": "orders"}],
+            "tools": [tool]}
+    system = inject_into_body(body)["messages"][0]["content"]
+    assert "filters" in system
+    assert "status" in system            # nested field is visible
+    assert "open" in system              # nested enum is visible
+    assert "limit" in system
+    assert "default: 10" in system
+    assert "key" in system               # array-item field is visible
+
+
+def test_inject_keeps_assistant_prose_delivered_as_parts():
+    body = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant",
+             "content": [{"type": "text", "text": "Looking it up."}],
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "get_weather",
+                                          "arguments": '{"city": "X"}'}}]},
+        ],
+        "tools": [WEATHER_TOOL],
+    }
+    result = inject_into_body(body)
+    asst = next(m for m in result["messages"] if m["role"] == "assistant")
+    assert "Looking it up." in asst["content"]
+    assert "get_weather" in asst["content"]
+
+
+# --- the synthetic chunk always satisfies the chunk schema ---
+
+def test_stream_chunk_synthesizes_id_and_created_when_the_provider_sent_none():
+    from llm_libre.tool_emulator import build_stream_chunk
+    chunk = build_stream_chunk(
+        [{"name": "get_weather", "arguments": {"city": "X"}}], {})
+    assert isinstance(chunk.get("id"), str) and chunk["id"]
+    assert isinstance(chunk.get("created"), int)
+
+
+def test_stream_chunk_falls_back_to_the_route_model():
+    from llm_libre.tool_emulator import build_stream_chunk
+    chunk = build_stream_chunk(None, {}, "hi", fallback_model="deepseek-chat")
+    assert chunk["model"] == "deepseek-chat"
+    kept = build_stream_chunk(None, {"model": "real"}, "hi",
+                              fallback_model="deepseek-chat")
+    assert kept["model"] == "real"
+
+
+def test_stream_chunk_text_variant_keeps_the_providers_finish_reason():
+    """A truncation ("length") masked as "stop" hides from the client that the
+    answer was cut."""
+    from llm_libre.tool_emulator import build_stream_chunk
+    chunk = build_stream_chunk(None, {"finish_reason": "length"}, "cut answ")
+    assert chunk["choices"][0]["finish_reason"] == "length"
+
+
+# --- native tool_calls deltas assemble and pass through ---
+
+def test_native_tool_call_deltas_assemble_across_chunks():
+    from llm_libre.tool_emulator import (accumulate_tool_call_delta,
+                                         assembled_tool_calls)
+    acc = {}
+    accumulate_tool_call_delta(acc, [
+        {"index": 0, "id": "c1", "type": "function",
+         "function": {"name": "buscar", "arguments": ""}}])
+    accumulate_tool_call_delta(acc, [{"index": 0, "function": {"arguments": '{"q":'}}])
+    accumulate_tool_call_delta(acc, [{"index": 0, "function": {"arguments": '"x"}'}}])
+    calls = assembled_tool_calls(acc)
+    assert calls[0]["id"] == "c1"
+    assert calls[0]["function"]["name"] == "buscar"
+    assert calls[0]["function"]["arguments"] == '{"q":"x"}'
+
+
+def test_native_assembly_orders_parallel_calls_and_fills_missing_ids():
+    from llm_libre.tool_emulator import (accumulate_tool_call_delta,
+                                         assembled_tool_calls)
+    acc = {}
+    accumulate_tool_call_delta(acc, [
+        {"index": 1, "function": {"name": "fn2", "arguments": "{}"}},
+        {"index": 0, "function": {"name": "fn1", "arguments": "{}"}}])
+    calls = assembled_tool_calls(acc)
+    assert [c["function"]["name"] for c in calls] == ["fn1", "fn2"]
+    assert all(c["id"] for c in calls)
+    assert assembled_tool_calls({}) is None
+
+
+def test_stream_chunk_carries_raw_tool_calls_verbatim():
+    from llm_libre.tool_emulator import build_stream_chunk
+    raw = [{"id": "c9", "type": "function",
+            "function": {"name": "buscar", "arguments": '{"q": 1}'}}]
+    chunk = build_stream_chunk(None, {"id": "x"}, None, raw_tool_calls=raw)
+    delta = chunk["choices"][0]["delta"]
+    assert delta["tool_calls"][0]["id"] == "c9"
+    assert delta["tool_calls"][0]["index"] == 0
+    assert chunk["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_stream_chunk_keeps_native_prose_next_to_raw_calls():
+    """A native provider may stream prose AND calls; relaying only the calls
+    would drop half its answer."""
+    from llm_libre.tool_emulator import build_stream_chunk
+    raw = [{"id": "c1", "type": "function",
+            "function": {"name": "buscar", "arguments": "{}"}}]
+    chunk = build_stream_chunk(None, {}, "checking that now",
+                               raw_tool_calls=raw)
+    delta = chunk["choices"][0]["delta"]
+    assert delta["content"] == "checking that now"
+    assert delta["tool_calls"][0]["function"]["name"] == "buscar"
+
+
+def test_stream_chunk_text_variant_ignores_a_nonsensical_finish_reason():
+    """finish_reason "tool_calls" on a chunk with no tool_calls is a contract
+    violation; only reasons that make sense for text travel through."""
+    from llm_libre.tool_emulator import build_stream_chunk
+    chunk = build_stream_chunk(None, {"finish_reason": "tool_calls"}, "prose")
+    assert chunk["choices"][0]["finish_reason"] == "stop"
+
+
+# --- the scan's work is bounded ---
+
+def test_parse_gives_up_after_bounded_unclosed_scans():
+    """Each unclosed opener costs one walk to the end of the text; unbounded,
+    a hostile brace storm makes the scan quadratic. After the budget, giving
+    up (a miss, the safe direction) beats unbounded rescue."""
+    text = "{" * 20 + '{"name": "get_weather", "arguments": {}}'
+    assert parse_tool_calls(text, VALID) is None
+
+
+@pytest.mark.parametrize("text", [
+    "{" * 5000,
+    "[" * 2500 + "]" * 2500,
+    '{"name": "get_weather", "arguments": ' * 200,
+    "{'" * 1000,
+    '<think>' + '{"name": "get_weather"}' * 50,
+    '{"name": "get_weather", "arguments": {"q": "' + "a" * 100000 + '"}}',
+    "\x00{\x00}",
+    "🌦️ {'name': '🌦️'} 🌦️",
+    "{'a': {1, 2}}",
+    "(1, 2)",
+    '{"tool_calls": "not a list"}',
+    '{"function_call": {"function_call": {"function_call": {}}}}',
+])
+def test_parser_never_raises_and_never_escapes_the_allowlist(text):
+    result = parse_tool_calls(text, VALID)
+    assert result is None or all(c["name"] in VALID for c in result)
+
+
 # --- live tests against the real DeepSeek proxy ---
 
 @pytest.mark.vivo
