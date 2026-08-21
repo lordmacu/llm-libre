@@ -310,6 +310,23 @@ providers:
     # CAREFUL: /models exposes an "auto" id of Grok's own that COLLIDES with
     # llm-libre's "auto" alias. Nothing needs doing: catalog.is_reserved_id
     # already discards it, which is exactly what it exists for.
+    #
+    # Its /health now publishes the capability contract (spec 2026-08-20):
+    # eleven booleans, the same shape chatgpt reports on /health, plus
+    # per-model {tools, vision, images} on /v1/models. Precedence, strongest
+    # first (see the note above chatgpt's reads_capabilities, and
+    # catalog.normalize): `exceptions` > /v1/models per-model > /health >
+    # `default_capabilities`. The declarations below are now the WEAKEST
+    # voice, not a veto -- they are the fallback for a sweep that could not
+    # read /health AND has no earlier contract stored, nothing more.
+    #
+    # grok-proxy's contract work (this plan's Tasks 3-10) is committed on its
+    # `grok-contract` branch but NOT YET DEPLOYED as of this write: its live
+    # /health still reports no contract. That does not block turning this on
+    # here -- the fallback below covers exactly that case until the proxy
+    # deploys and a sweep succeeds. grok-proxy deploys first, so the gateway
+    # never reads a contract from a proxy that cannot yet honour it.
+    reads_capabilities: true
     default_capabilities:
       # tools AND vision both TRUE, and the path to this value is worth writing
       # down because it nearly cost us 30 usable routes.
@@ -328,6 +345,16 @@ providers:
       # 488x232 image. The ones that did not are below.
       tools: true
       vision: true
+      # context: 128000 is a DECLARED FLOOR, not a measurement, and there is
+      # nothing here to correct it against: grok's /v1/models publishes only
+      # created, description, id, notes, object, owned_by, rate_per_hour,
+      # requests_per_hour and window_hours for all 26 advertised models --
+      # verified live, no context_window, no token field of any kind, for any
+      # of them. chatgpt's equivalent number WAS correctable this way (its
+      # declared 128000 turned out to be 2.4x the real 52815, see the note
+      # above its reads_capabilities); grok's contract cannot do the same
+      # because the provider has nothing to report. This number stays until
+      # some other measurement replaces it.
       context: 128000
       max_output: 8192
     # The imagine-agent-mode family is the only genuinely different thing: they
@@ -338,20 +365,32 @@ providers:
     # and grok-4-1-thinking-1129 gave 3/3 when repeated, their original "no" was
     # the roulette.
     #
-    # `images: true` on those same three, added 2026-08-18: they are not merely
-    # the weak chat routes, they are the ONLY grok routes that generate images.
-    # grok-proxy exposes POST /v1/images/generations and rotates between exactly
-    # these three (3x999/hour). The capability is DECLARED here rather than
-    # discovered because /models says nothing about image output -- the same
-    # reason the other capabilities are declared.
+    # `images: true` on those same three, added 2026-08-18: they were not
+    # merely the weak chat routes, they were the ONLY grok routes that
+    # generate images. grok-proxy exposes POST /v1/images/generations and
+    # rotates between exactly these three (3x999/hour). The capability was
+    # DECLARED here rather than discovered because /models said nothing about
+    # image output at the time -- the same reason the other capabilities were
+    # declared.
     #
-    # They deliberately stay in the CHAT pool too: nothing is excluded by
-    # declaration, the measured ranking decides. They score badly at chat and
-    # sink on their own, which self-corrects if grok ever changes what they do.
-    exceptions:
-      imagine-agent-mode:          {tools: false, vision: false, images: true}
-      imagine-agent-mode-dev:      {tools: false, vision: false, images: true}
-      imagine-agent-mode-grok-4-5: {tools: false, vision: false, images: true}
+    # They deliberately stayed in the CHAT pool too: nothing was excluded by
+    # declaration, the measured ranking decided. They scored badly at chat and
+    # sank on their own, which self-corrects if grok ever changes what they do.
+    #
+    # RETIRED, 2026-08-20: the `exceptions` block that used to carry these
+    # three entries is gone. grok's /v1/models now publishes its own
+    # {tools, vision, images} per model, and the imagine family reports
+    # exactly what was hand-declared above, so the override became redundant
+    # -- and worse than redundant. `exceptions` is applied LAST, after the
+    # contract and after the per-model narrowing (see the precedence note
+    # above `reads_capabilities`), so a hand-written `images: true` here would
+    # keep claiming the capability even if grok changed what these models do,
+    # surviving a contract that said otherwise. That is the exact defect the
+    # final whole-branch review of the previous plan caught in chatgpt's
+    # `gpt-image-1`: the only real image route would have kept claiming
+    # `images` after the paid plan lapsed, absorbing every request into a
+    # 503. Do not add this override back -- the per-model data is the truth
+    # now, and `exceptions` would only be able to lie about it.
     timeout_s: 150
 
   - id: mistral

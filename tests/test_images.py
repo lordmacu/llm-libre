@@ -249,11 +249,15 @@ def test_the_registry_declares_exactly_the_measured_generators():
     from llm_libre.providers import fixed_routes, load
     provs = load("providers.yaml", {})
     grok = next(p for p in provs if p.id == "grok")
-    # grok: the three imagine-agent-mode ids, granted through the per-id
-    # exception. Its default_capabilities must NOT claim it, or all 33 discovered
-    # routes would advertise a capability only three of them have.
+    # grok's default_capabilities must NOT claim images, or all discovered
+    # routes would advertise a capability only the imagine-agent-mode family
+    # has. Those three ids used to get `images: true` through a per-id
+    # `exceptions` entry; that was retired 2026-08-20 -- grok's /v1/models now
+    # publishes {tools, vision, images} per model directly, so nothing needs
+    # pinning here anymore. See the retirement note on `exceptions` in
+    # providers.yaml.
     assert grok.default_capabilities.images is False
-    assert all(e.get("images") is True for e in grok.exceptions.values())
+    assert grok.exceptions == {}
     # mistral claims BOTH: one route that reads images and generates them. It
     # generates intermittently (the model decides whether to call the tool) and
     # on a small shared quota -- see the note in providers.yaml -- but a real

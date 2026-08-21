@@ -240,7 +240,11 @@ def test_yaml_keys_are_still_understood():
     assert cg.models_path == "/models"
     assert cg.reads_capabilities is True
     grok = next(p for p in provs if p.id == "grok")
-    assert "imagine-agent-mode" in grok.exceptions
+    assert grok.reads_capabilities is True
+    assert grok.default_capabilities.tools is True
+    # exceptions is retired for grok (2026-08-20): its /v1/models now supplies
+    # {tools, vision, images} per model, so nothing is hand-pinned here anymore.
+    assert grok.exceptions == {}
 
 
 def test_tier_values_are_wire():

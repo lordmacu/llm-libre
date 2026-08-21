@@ -594,11 +594,12 @@ def test_the_only_real_image_route_does_not_pin_images_through_exceptions():
         "tools": False, "vision": False}
 
 
-def test_the_real_registry_only_lets_chatgpt_read_the_contract():
-    # The rollout is per proxy. Any other provider turning this on before its
-    # proxy publishes /health would cost it a sweep of skipped syncs.
+def test_the_real_registry_only_lets_chatgpt_and_grok_read_the_contract():
+    # The rollout is per proxy. perplexity, deepseek and mistral have not
+    # adopted the contract -- turning this on before a proxy publishes /health
+    # would cost it a sweep of skipped syncs.
     providers = load("providers.yaml", {})
-    assert [p.id for p in providers if p.reads_capabilities] == ["chatgpt"]
+    assert sorted(p.id for p in providers if p.reads_capabilities) == ["chatgpt", "grok"]
 
 
 def test_the_contract_url_drops_the_v1_prefix():
@@ -713,3 +714,17 @@ def test_a_declared_tool_capability_the_contract_denies_still_drops_the_route():
                         {}, [{"id": "m", "tools": True, "vision": False,
                               "context": 1000, "max_output": 100}])
     assert fixed_routes(provider, contract=_contract(tools=False)) == []
+
+
+def test_grok_reads_the_contract():
+    providers = load("providers.yaml", {})
+    assert sorted(p.id for p in providers if p.reads_capabilities) == ["chatgpt", "grok"]
+
+
+def test_grok_no_longer_pins_images_through_exceptions():
+    # The gpt-image-1 defect, in its other home: `exceptions` applies LAST, so
+    # a hand-declared images:true would survive a contract that says otherwise.
+    # The per-model block on grok's /v1/models supplies these now.
+    grok = [p for p in load("providers.yaml", {}) if p.id == "grok"][0]
+    for override in grok.exceptions.values():
+        assert "images" not in override

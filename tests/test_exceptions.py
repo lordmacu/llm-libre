@@ -45,7 +45,7 @@ def test_several_fields_can_be_overridden_at_once():
     assert caps["other"].tools is False and caps["other"].vision is True
 
 
-def test_the_yaml_declares_groks_exceptions():
+def test_the_yaml_declares_groks_defaults_and_no_longer_pins_exceptions():
     provs = load("providers.yaml", dict(os.environ))
     grok = [p for p in provs if p.id == "grok"][0]
     assert grok.default_capabilities.tools is True
@@ -53,15 +53,18 @@ def test_the_yaml_declares_groks_exceptions():
     # sends whatever cannot see to the VISION_POOL), and 30 of 31 routes read a
     # 4-digit code from a 488x232 image.
     assert grok.default_capabilities.vision is True
-    # Only the imagine-agent-mode family is left out: they are image-generation
-    # agents, 0/3 on tool_calls when repeated, and grok_backend itself documents
-    # that they have no vision. Since 2026-08-18 the exception also grants what
-    # they DO have -- images:true -- so the same three ids that are the worst
-    # chat routes are the only grok routes /v1/images/generations can use.
-    assert set(grok.exceptions) == {
-        "imagine-agent-mode", "imagine-agent-mode-dev", "imagine-agent-mode-grok-4-5"}
-    assert all(v == {"tools": False, "vision": False, "images": True}
-               for v in grok.exceptions.values())
+    # The imagine-agent-mode family (image-generation agents, 0/3 on tool_calls
+    # when repeated, no vision per grok_backend's own docs) used to be pinned
+    # here by hand with an `imagine-agent-mode*: {tools, vision, images}`
+    # exception. Retired 2026-08-20: grok reads the capability contract now
+    # (reads_capabilities is True, below), and its /v1/models publishes
+    # exactly that {tools, vision, images} per model, so the override is gone
+    # rather than merely redundant -- `exceptions` outranks the contract, and
+    # a hand-written entry here would have survived it if grok ever changed
+    # what these models do. See the retirement note on `exceptions` in
+    # providers.yaml.
+    assert grok.reads_capabilities is True
+    assert grok.exceptions == {}
 
 
 def test_minimax_declares_measured_vision():
