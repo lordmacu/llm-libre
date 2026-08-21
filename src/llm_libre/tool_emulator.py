@@ -360,8 +360,19 @@ def unmet_tool_demand(data, tools, tool_choice) -> bool:
     return True
 
 
-def _build_tools_block(tools: list, tool_choice=None, parallel_tool_calls=None) -> str:
-    """Build the system-prompt section describing the callable functions."""
+def _build_tools_block(tools: list, tool_choice=None, parallel_tool_calls=None,
+                       has_tool_results: bool = False) -> str:
+    """Build the system-prompt section describing the callable functions.
+
+    ``has_tool_results`` adds the one clause that teaches what to DO with a
+    ``[Function result ...]`` message. It lives here in the system prompt and
+    only here -- never appended to the result messages themselves -- because
+    the system prompt is the text a model is least prone to echo back, and a
+    result message must stay pure data (see the leak-free test pinning its
+    exact shape). It is also conditional: on a first turn there is no result
+    to instruct about, and an instruction with no referent is just prompt
+    noise for the model to trip on.
+    """
     described = []
     example_name = None
     for t in tools if isinstance(tools, (list, tuple)) else []:
@@ -395,6 +406,17 @@ def _build_tools_block(tools: list, tool_choice=None, parallel_tool_calls=None) 
                    '[{"name": "first", "arguments": {}}, '
                    '{"name": "second", "arguments": {}}]\n\n')
 
+    # Measured in production (2026-08-20): without this, a weak model answers
+    # a "[Function result ...]" message by echoing its raw JSON instead of
+    # using it -- the client gets data back where it expected an answer.
+    results_clause = (
+        "## Using function results\n\n"
+        "A message beginning with \"[Function result\" carries what a function "
+        "returned. Answer the user in your own words, grounded in that data. "
+        "Do not echo the raw JSON back, and do not call a function again for "
+        "data you already received.\n\n"
+    ) if has_tool_results else ""
+
     return (
         "## How to call a function\n\n"
         "To call a function, reply with ONLY a JSON object in exactly this shape -- "
@@ -405,6 +427,7 @@ def _build_tools_block(tools: list, tool_choice=None, parallel_tool_calls=None) 
         "Use only the function names listed below, spelled exactly as shown. "
         "If no function is needed, just answer normally in plain text."
         f"{_tool_choice_instruction(tool_choice)}\n\n"
+        + results_clause +
         "## Available functions\n\n"
         + "\n\n".join(described)
     )
@@ -494,8 +517,11 @@ def inject_into_body(body: dict) -> dict:
     if not tools:
         return body
 
+    has_tool_results = any(isinstance(m, dict) and m.get("role") == "tool"
+                           for m in body.get("messages") or [])
     block = _build_tools_block(tools, body.get("tool_choice"),
-                               body.get("parallel_tool_calls"))
+                               body.get("parallel_tool_calls"),
+                               has_tool_results=has_tool_results)
 
     names_by_call_id = {}
     for msg in body.get("messages") or []:

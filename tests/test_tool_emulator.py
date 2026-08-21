@@ -830,6 +830,54 @@ def test_inject_parallel_false_instructs_a_single_call():
     assert "at most one" not in body_default["messages"][0]["content"].lower()
 
 
+# --- turning a result into prose is taught once, and it leaks nowhere ---
+
+def test_inject_teaches_result_handling_only_when_results_exist():
+    """Measured in production (2026-08-20): a weak model sometimes answers a
+    function result by echoing its raw JSON. The fix is one system-prompt
+    clause -- present exactly when the history carries a result, absent on a
+    first turn, so the prompt never carries instructions with nothing to
+    instruct."""
+    with_result = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "weather?"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "get_weather",
+                                          "arguments": '{"city": "X"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"temp": 18}'},
+        ],
+        "tools": [WEATHER_TOOL],
+    }
+    system = inject_into_body(with_result)["messages"][0]["content"]
+    assert "your own words" in system
+    assert "echo" in system.lower()
+
+    first_turn = inject_into_body(BODY_WITH_TOOLS)["messages"][0]["content"]
+    assert "your own words" not in first_turn
+
+
+def test_inject_keeps_result_messages_free_of_instruction_text():
+    """The instruction lives in the system prompt ONLY. A result message is
+    the function's data and nothing else: mixing guidance into it would hand
+    every downstream turn a template of gateway prose to leak back."""
+    body = {
+        "model": "m",
+        "messages": [
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "get_weather",
+                                          "arguments": '{"city": "X"}'}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"temp": 18}'},
+        ],
+        "tools": [WEATHER_TOOL],
+    }
+    result = inject_into_body(body)
+    tool_msg = result["messages"][-1]
+    assert tool_msg["content"] == '[Function result for get_weather]: {"temp": 18}'
+
+
 # --- tool results carry the function they answer ---
 
 SEARCH_TOOL = {"type": "function", "function": {
