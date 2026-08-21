@@ -121,7 +121,10 @@ PROVIDERS: tuple = (
     Provider(
         key="grok", label="Grok (xAI)",
         repo="https://github.com/lordmacu/grok-proxy.git", port=8893,
-        compose_dir="docker-api",
+        # La raíz, no docker-api/. Ese subdirectorio tiene OTRO compose, de
+        # desarrollo, que publica en el 8000: levantarlo dejaría el proxy en un
+        # puerto y al instalador esperando en otro.
+        compose_dir=".",
         modes=(
             AuthMode("otp", "Email and a code they send you", otp=OtpFlow(
                 request_path="/auth/otp/send",
@@ -367,6 +370,13 @@ def ensure_docker(ui: UI, assume_yes: bool = False) -> None:
     ui.step("Checking Docker Compose")
     compose = compose_command()
     ui.ok(f"Compose present — {' '.join(compose)}")
+
+    ui.step("Checking git")
+    if not have("git"):
+        ui.fail("git is not installed, and the providers are cloned with it.")
+        ui.info("Debian/Ubuntu: sudo apt install git   ·   macOS: xcode-select --install")
+        raise SystemExit(1)
+    ui.ok("git present")
 
     ui.step("Checking that the Docker daemon is reachable")
     probe = run(["docker", "info"], check=False)

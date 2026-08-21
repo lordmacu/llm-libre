@@ -255,3 +255,35 @@ def test_a_network_failure_is_not_a_pass(monkeypatch):
 
     monkeypatch.setattr(installer, "http_json", _Recorder((0, "ConnectionError")))
     assert installer.verify_provider(_quiet_ui(), BY_KEY["grok"]) is False
+
+
+# ── Que el compose que se levanta sea el correcto ────────────────────────────
+
+def test_each_compose_dir_points_where_the_compose_actually_is():
+    """grok tiene DOS compose: el de producción en la raíz y uno de desarrollo
+    en docker-api/ que publica en el 8000. Apuntar al segundo dejaría el proxy
+    en un puerto y al instalador esperando en otro."""
+    expected = {"chatgpt": ".", "grok": ".", "perplexity": "docker-api",
+                "deepseek": ".", "mistral": "."}
+    assert {p.key: p.compose_dir for p in PROVIDERS} == expected
+
+
+def test_the_gateway_declares_host_gateway_so_linux_can_reach_the_proxies():
+    """`host.docker.internal` sólo resuelve solo en Docker Desktop. Sin esta
+    línea el gateway no alcanza NINGÚN proxy en Linux, y el fallo aparece
+    recién en el prompt final, sin decir por qué."""
+    import yaml
+
+    compose = yaml.safe_load(open("docker-compose.yml"))
+    hosts = compose["services"]["llm-libre"].get("extra_hosts") or []
+    assert any("host.docker.internal:host-gateway" in h for h in hosts)
+
+
+def test_the_gateway_port_matches_what_the_installer_polls():
+    """El instalador espera /health en 8101; si el compose publicara otro
+    puerto, esperaría para siempre a algo que ya está arriba."""
+    import yaml
+
+    compose = yaml.safe_load(open("docker-compose.yml"))
+    ports = compose["services"]["llm-libre"]["ports"]
+    assert any(str(p).endswith(":8101") for p in ports)

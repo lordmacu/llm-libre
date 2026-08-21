@@ -8,5 +8,13 @@ services:
     env_file: .env
     ports:
       - "127.0.0.1:8101:8101"
+    # Sin esto el gateway NO alcanza a ningún proxy en Linux. Los proveedores
+    # se vinculan por `host.docker.internal` -- `127.0.0.1` dentro del
+    # contenedor es el gateway mismo, así que apuntaría a la nada. Ese nombre
+    # resuelve solo en Docker Desktop; en Linux hay que declararlo, y hacerlo
+    # acá es lo que permite usar UN solo nombre en las dos plataformas en vez
+    # de ramificar por sistema operativo y equivocarse en el tercero.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./datos:/datos
