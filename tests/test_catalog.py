@@ -3,10 +3,13 @@ import logging
 from pathlib import Path
 
 from llm_libre.catalog import SUSTAINED_RATE_FLOOR, normalize
-from llm_libre.contract import REQUIRED_CAPABILITIES, Auth, ProviderContract
+from llm_libre.contract import (REQUIRED_CAPABILITIES, Auth, ProviderContract,
+                                parse_health)
 from llm_libre.models import Capabilities
+from llm_libre.providers import load
 
 FIXTURES = Path(__file__).parent / "fixtures"
+PROVIDERS_YAML = str(Path(__file__).resolve().parents[1] / "providers.yaml")
 
 _CHATGPT_DEFAULTS = Capabilities(tools=False, vision=False, context=128000, max_output=8192)
 
@@ -543,3 +546,94 @@ def test_without_a_contract_nothing_changes():
     routes = normalize("chatgpt", {"data": [{"id": "gpt-5-6"}]},
                        default_capabilities=_CHATGPT_DEFAULTS)
     assert routes[0].capabilities == _CHATGPT_DEFAULTS
+
+
+# ── grok's three image routes, end to end ─────────────────────────────────────
+#
+# Until 2026-08-20 this invariant was asserted in providers.yaml, as
+# `all(e.get("images") is True for e in grok.exceptions.values())`: a
+# CI-checked statement that the gateway ends up with grok image routes.
+# Retiring `exceptions` removed the assertion along with the override, and the
+# invariant moved from a YAML declaration to a CROSS-REPO RUNTIME FACT -- grok's
+# /health says `images: true`, grok's /v1/models says which three models it
+# applies to, and normalize puts the two together. Nothing checked that.
+#
+# The fixtures are grok-proxy's REAL published shape, captured from its
+# /health and /v1/models on the grok-contract branch, so this also documents
+# the wire shape the gateway expects of it.
+
+def _grok_fixtures():
+    return _load("grok_health.json"), _load("grok_models.json")
+
+
+def _grok_routes(contract_doc):
+    """grok's catalogue through the REAL providers.yaml entry -- priority,
+    default_capabilities and exceptions included. Using the registry rather
+    than a synthetic Provider is the point: an `images: true` exception added
+    back, or a default_capabilities edit, has to show up here."""
+    _, models = _grok_fixtures()
+    grok = [p for p in load(PROVIDERS_YAML, {}) if p.id == "grok"][0]
+    return normalize("grok", models, priority=grok.priority,
+                     default_capabilities=grok.default_capabilities,
+                     exceptions=grok.exceptions,
+                     contract=parse_health("grok", contract_doc)
+                     if contract_doc is not None else None)
+
+
+IMAGINE = {"imagine-agent-mode", "imagine-agent-mode-dev",
+           "imagine-agent-mode-grok-4-5"}
+
+
+def test_groks_health_fixture_is_a_contract_this_gateway_can_read():
+    health, _ = _grok_fixtures()
+    c = parse_health("grok", health)
+    assert c is not None, "the captured /health no longer parses as a contract"
+    assert c.provider == "grok"
+    assert c.capabilities["images"] is True
+    assert c.capabilities["files"] is False
+
+
+def test_grok_ends_up_with_exactly_three_image_routes():
+    health, _ = _grok_fixtures()
+    routes = _grok_routes(health)
+    assert {r.model_id for r in routes if r.capabilities.images} == IMAGINE
+
+
+def test_the_imagine_family_draws_and_does_nothing_else():
+    """The per-model block's whole job: the provider level says tools, vision
+    and images are all true, and /v1/models narrows the imagine family to
+    images only. A regression here does not remove a route -- it advertises
+    three image agents as chat models at priority 0."""
+    health, _ = _grok_fixtures()
+    imagine = [r for r in _grok_routes(health) if r.model_id in IMAGINE]
+    assert len(imagine) == 3
+    for r in imagine:
+        assert (r.capabilities.images, r.capabilities.tools,
+                r.capabilities.vision) == (True, False, False), r.model_id
+
+
+def test_the_plugin_routes_keep_tools_and_vision_and_do_not_draw():
+    health, _ = _grok_fixtures()
+    plugins = [r for r in _grok_routes(health)
+               if r.model_id.startswith("grok-plugins-")]
+    assert len(plugins) == 14
+    for r in plugins:
+        assert (r.capabilities.tools, r.capabilities.vision,
+                r.capabilities.images) == (True, True, False), r.model_id
+
+
+def test_without_the_contract_grok_loses_every_image_route():
+    """The exposure providers.yaml's fallback comment now names explicitly.
+    `default_capabilities` covers tools, vision and context; it carries no
+    `images`, so any state where parse_health returns None -- the proxy rolled
+    back, failing to start, a future contract version bump -- takes grok's only
+    three image routes away, with one WARNING and no alert. Asserted rather
+    than fixed: adding `images` to default_capabilities would reintroduce
+    exactly the stale hand-declaration the exceptions retirement removed."""
+    without = _grok_routes(None)
+    assert [r.model_id for r in without if r.capabilities.images] == []
+    # ...and nothing ELSE is lost, which is why this degrades quietly: the
+    # same 17 routes come back, tools and vision intact.
+    assert len(without) == len(_grok_routes(_grok_fixtures()[0])) == 17
+    assert all(r.capabilities.tools and r.capabilities.vision
+               for r in without if r.model_id not in IMAGINE)

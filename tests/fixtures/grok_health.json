@@ -1,0 +1,27 @@
+{
+  "status": "ok",
+  "version": "1.0.0",
+  "contract": 1,
+  "provider": "grok",
+  "auth": {
+    "mode": "account",
+    "plan": null,
+    "subscription_active": false,
+    "expires_at": null
+  },
+  "capabilities": {
+    "chat": true,
+    "streaming": true,
+    "tools": true,
+    "vision": true,
+    "images": true,
+    "audio_speech": true,
+    "audio_transcription": true,
+    "translate": false,
+    "search": true,
+    "files": false,
+    "conversations": true
+  },
+  "session_configured": true,
+  "high_rate_pool_size": 17
+}

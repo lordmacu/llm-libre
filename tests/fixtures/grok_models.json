@@ -1,0 +1,403 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "auto",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-4.5",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "gpt-4o",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "gpt-4",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "gpt-4-turbo",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "gpt-3.5-turbo",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "claude-3-opus",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "claude-3-sonnet",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "notes": "round-robin over the 999/h pool",
+      "description": "Alias → round-robin over the 17 models in the 999/h pool",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "imagine-agent-mode",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Grok Imagine agent (producción)",
+      "max_output_tokens": 0,
+      "capabilities": {
+        "tools": false,
+        "vision": false,
+        "images": true
+      }
+    },
+    {
+      "id": "imagine-agent-mode-dev",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Imagine dev (tiene web_search activo)",
+      "max_output_tokens": 0,
+      "capabilities": {
+        "tools": false,
+        "vision": false,
+        "images": true
+      }
+    },
+    {
+      "id": "imagine-agent-mode-grok-4-5",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Imagine variant Grok 4.5",
+      "max_output_tokens": 0,
+      "capabilities": {
+        "tools": false,
+        "vision": false,
+        "images": true
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-excel",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Excel plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-word",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Word plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-docs",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Google Docs plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-sheets",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Google Sheets plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-powerpoint",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "PowerPoint plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-outlook",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Outlook plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p6-slides",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Google Slides plugin agent",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-excel",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Excel plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-word",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Word plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-powerpoint",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "PowerPoint plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-outlook",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Outlook plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-docs",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Google Docs plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-sheets",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Google Sheets plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    },
+    {
+      "id": "grok-plugins-4p5-slides",
+      "object": "model",
+      "created": 1787272576,
+      "owned_by": "grok",
+      "rate_per_hour": 999,
+      "window_hours": 1,
+      "requests_per_hour": 999.0,
+      "notes": "Google Slides plugin agent (4p5)",
+      "max_output_tokens": 8192,
+      "capabilities": {
+        "tools": true,
+        "vision": true,
+        "images": false
+      }
+    }
+  ]
+}
