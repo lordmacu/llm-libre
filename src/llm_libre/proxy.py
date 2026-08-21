@@ -590,7 +590,8 @@ class Proxy:
                     # converting a legitimate text answer into an invented tool
                     # call.
                     data = _emu.detect_and_convert(data, body.get("tools"),
-                                                    body.get("tool_choice"))
+                                                    body.get("tool_choice"),
+                                                    body.get("parallel_tool_calls"))
                     # tool_choice `required` (or a forced function) is a promise
                     # to the client, not a hint to the model: the injected
                     # prompt ASKS for the call, only failing over ENFORCES it.
@@ -897,8 +898,16 @@ class Proxy:
                         buffered = ""
                         # id/created/model/usage from the provider: fields the
                         # chunk schema marks as required, and the synthetic chunk
-                        # was the only one in the gateway that lost them.
+                        # was the only one in the gateway that lost them. The
+                        # provider's own finish_reason rides along too: masking
+                        # its "length" as "stop" hid a truncation from the client.
                         envelope = {}
+                        # Native tool_calls deltas, accumulated by index. An
+                        # "emulated" provider that answers with REAL tool_calls
+                        # is doing the right thing, and the non-streaming path
+                        # already passes those through -- this keeps the two
+                        # paths one behaviour.
+                        native_acc = {}
                         async for buf_line in resp.aiter_lines():
                             if not buf_line.startswith("data:"):
                                 continue
@@ -923,7 +932,18 @@ class Proxy:
                             buf_choice = (buf_obj.get("choices") or [{}])[0]
                             if not isinstance(buf_choice, dict):
                                 continue
-                            frag = (buf_choice.get("delta") or {}).get("content")
+                            buf_finish = buf_choice.get("finish_reason")
+                            if isinstance(buf_finish, str) and buf_finish:
+                                envelope["finish_reason"] = buf_finish
+                            buf_delta = buf_choice.get("delta")
+                            if not isinstance(buf_delta, dict):
+                                continue
+                            if buf_delta.get("tool_calls"):
+                                _emu.accumulate_tool_call_delta(
+                                    native_acc, buf_delta.get("tool_calls"))
+                                if measured_ttft_ms is None:
+                                    measured_ttft_ms = int((time.monotonic() - t0) * 1000)
+                            frag = buf_delta.get("content")
                             if not isinstance(frag, str):
                                 continue
                             if measured_ttft_ms is None and frag:
@@ -932,12 +952,30 @@ class Proxy:
                         if not raw:
                             buffered += rec.close()
 
+                        native = _emu.assembled_tool_calls(native_acc)
+                        if native:
+                            _record_success_once()
+                            useful = True
+                            chunk = _emu.build_stream_chunk(
+                                None, envelope,
+                                buffered if buffered.strip() else None,
+                                raw_tool_calls=native,
+                                fallback_model=route.model_id)
+                            yield f"data: {json.dumps(chunk)}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+
                         calls = _emu.parse_tool_calls(buffered, tool_name_allowlist,
                                                       schemas=body.get("tools"))
                         if calls:
+                            if body.get("parallel_tool_calls") is False:
+                                # The injected prompt asks for one call; this
+                                # makes the promise hold on the wire too.
+                                calls = calls[:1]
                             _record_success_once()
                             useful = True
-                            chunk = _emu.build_stream_chunk(calls, envelope)
+                            chunk = _emu.build_stream_chunk(
+                                calls, envelope, fallback_model=route.model_id)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
@@ -961,7 +999,9 @@ class Proxy:
                             # client would have received without emulation.
                             _record_success_once()
                             useful = True
-                            chunk = _emu.build_stream_chunk(None, envelope, buffered)
+                            chunk = _emu.build_stream_chunk(
+                                None, envelope, buffered,
+                                fallback_model=route.model_id)
                             yield f"data: {json.dumps(chunk)}\n\n"
                             yield "data: [DONE]\n\n"
                             return

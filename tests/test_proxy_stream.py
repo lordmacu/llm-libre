@@ -847,3 +847,76 @@ async def test_emulated_stream_tool_choice_none_streams_incrementally():
     contents = [c["choices"][0]["delta"].get("content") for c in chunks]
     assert "".join(x for x in contents if x) == "Hello"
     assert len([x for x in contents if x]) == 2
+
+
+async def test_emulated_stream_passes_native_tool_calls_through():
+    """A provider that answers an emulated route with NATIVE tool_calls deltas
+    is doing the right thing; the buffered path must assemble and relay them,
+    exactly as the non-streaming path already does."""
+    body_sse = (
+        b'data: {"id":"x1","model":"real","choices":[{"delta":{"role":"assistant",'
+        b'"tool_calls":[{"index":0,"id":"c1","type":"function",'
+        b'"function":{"name":"get_weather","arguments":""}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+        b'"function":{"arguments":"{\\"city\\": \\"Lima\\"}"}}]}}]}\n\n'
+        b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n'
+        b'data: [DONE]\n\n')
+    p = _emu_proxy(lambda req: httpx.Response(200, content=body_sse))
+    lines = [l async for l in p.complete_stream([_route()], _tool_body(), 0.0)]
+    chunks = _payload_lines(lines)
+    assert len(chunks) == 1
+    call = chunks[0]["choices"][0]["delta"]["tool_calls"][0]
+    assert call["id"] == "c1"
+    assert call["function"]["name"] == "get_weather"
+    assert json.loads(call["function"]["arguments"]) == {"city": "Lima"}
+    assert chunks[0]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+async def test_emulated_stream_keeps_the_providers_finish_reason_on_text():
+    body_sse = (
+        b'data: {"choices":[{"delta":{"content":"cut ans"}}]}\n\n'
+        b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n'
+        b'data: [DONE]\n\n')
+    p = _emu_proxy(lambda req: httpx.Response(200, content=body_sse))
+    lines = [l async for l in p.complete_stream([_route()], _tool_body(), 0.0)]
+    chunks = _payload_lines(lines)
+    assert chunks[0]["choices"][0]["delta"]["content"] == "cut ans"
+    assert chunks[0]["choices"][0]["finish_reason"] == "length"
+
+
+async def test_emulated_stream_caps_parallel_calls_when_disabled():
+    p = _emu_proxy(lambda req: httpx.Response(200, content=_sse_json(
+        '[{"name": "get_weather", "arguments": {"city": "Lima"}}, '
+        '{"name": "get_weather", "arguments": {"city": "Quito"}}]')))
+    body = _tool_body(parallel_tool_calls=False)
+    lines = [l async for l in p.complete_stream([_route()], body, 0.0)]
+    chunks = _payload_lines(lines)
+    tcs = chunks[0]["choices"][0]["delta"]["tool_calls"]
+    assert len(tcs) == 1
+    assert json.loads(tcs[0]["function"]["arguments"]) == {"city": "Lima"}
+
+
+async def test_emulated_stream_chunk_names_the_route_when_the_provider_does_not():
+    """A provider that never sends id/model in its chunks must not produce a
+    synthetic chunk that violates the chunk schema."""
+    p = _emu_proxy(lambda req: httpx.Response(200, content=_sse_json(
+        '{"name": "get_weather", "arguments": {"city": "Lima"}}')))
+    lines = [l async for l in p.complete_stream([_route("a:free")], _tool_body(), 0.0)]
+    chunks = _payload_lines(lines)
+    assert chunks[0]["model"] == "a:free"
+    assert isinstance(chunks[0].get("id"), str) and chunks[0]["id"]
+    assert isinstance(chunks[0].get("created"), int)
+
+
+async def test_emulated_stream_relays_native_prose_alongside_native_calls():
+    body_sse = (
+        b'data: {"choices":[{"delta":{"content":"Checking now. "}}]}\n\n'
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+        b'"function":{"name":"get_weather","arguments":"{}"}}]}}]}\n\n'
+        b'data: [DONE]\n\n')
+    p = _emu_proxy(lambda req: httpx.Response(200, content=body_sse))
+    lines = [l async for l in p.complete_stream([_route()], _tool_body(), 0.0)]
+    chunks = _payload_lines(lines)
+    delta = chunks[0]["choices"][0]["delta"]
+    assert delta["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert delta["content"] == "Checking now. "

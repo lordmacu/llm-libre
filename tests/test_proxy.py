@@ -1625,3 +1625,14 @@ async def test_forced_function_answered_with_another_tool_fails_over():
     assert r.status == 200
     assert r.attempts == 2
     assert r.json["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "fn1"
+
+
+async def test_complete_caps_parallel_calls_when_disabled():
+    p = _emu_proxy(lambda req: httpx.Response(200, json=_ok(
+        '[{"name": "get_weather", "arguments": {"city": "Lima"}}, '
+        '{"name": "get_weather", "arguments": {"city": "Quito"}}]')))
+    r = await p.complete([_route("a:free")],
+                         _tool_body(parallel_tool_calls=False), now=0.0)
+    tcs = r.json["choices"][0]["message"]["tool_calls"]
+    assert len(tcs) == 1
+    assert json.loads(tcs[0]["function"]["arguments"]) == {"city": "Lima"}
