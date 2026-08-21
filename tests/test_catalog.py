@@ -642,3 +642,39 @@ def test_without_the_contract_grok_loses_every_image_route():
     assert len(without) == len(_grok_routes(_grok_fixtures()[0])) == 17
     assert all(r.capabilities.tools and r.capabilities.vision
                for r in without if r.model_id not in IMAGINE)
+
+
+def test_emulates_tools_over_discovered_native_models_warns_once(caplog):
+    """A discovered catalogue whose models already report native tool support
+    plus emulates_tools is the same contradiction fixed_routes warns about --
+    aggregated to one line, because a provider like grok discovers 25 of them."""
+    import logging
+    data = {"data": [
+        {"id": "native-a:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["tools", "tool_choice"]},
+        {"id": "native-b:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["tools", "tool_choice"]},
+        {"id": "plain:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["max_tokens"]},
+    ]}
+    with caplog.at_level(logging.WARNING, logger="llm_libre.catalog"):
+        routes = normalize("kilo", data, emulates_tools=True)
+    assert caplog.text.count("native tool support") == 1
+    assert "2" in caplog.text
+    assert all(r.capabilities.tools for r in routes)
+
+
+def test_emulates_tools_over_a_toolless_discovery_stays_silent(caplog):
+    import logging
+    data = {"data": [
+        {"id": "plain:free", "pricing": {"prompt": "0"}, "context_length": 4096,
+         "architecture": {"output_modalities": ["text"]},
+         "supported_parameters": ["max_tokens"]},
+    ]}
+    with caplog.at_level(logging.WARNING, logger="llm_libre.catalog"):
+        routes = normalize("kilo", data, emulates_tools=True)
+    assert "native tool support" not in caplog.text
+    assert routes[0].capabilities.tools is True

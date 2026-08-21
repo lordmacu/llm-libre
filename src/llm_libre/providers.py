@@ -285,6 +285,19 @@ def fixed_routes(p: Provider, contract=None) -> list[Route]:
                 translate=caps["translate"],
                 search=caps["search"])
         if p.emulates_tools:
+            if capabilities.tools:
+                # The flag claims "no native function calling"; this model
+                # declares it HAS it. Acting on the flag silently replaces the
+                # provider's own function calling with prompt injection --
+                # strictly worse (see the grok note in providers.yaml). The
+                # contradiction is knowable right here, so it is said right
+                # here; the flag still wins, because a declared configuration
+                # is an operator's decision, not this loader's.
+                log.warning(
+                    "%s: emulates_tools is set, but the fixed model %s already "
+                    "declares native tool calling. Emulation will replace the "
+                    "native path with prompt injection for it.",
+                    p.id, m["id"])
             capabilities = replace(capabilities, tools=True)
         routes.append(Route(p.id, m["id"], p.tier, capabilities, priority=p.priority))
     return routes

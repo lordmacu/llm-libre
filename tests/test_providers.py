@@ -723,3 +723,32 @@ def test_grok_no_longer_pins_images_through_exceptions():
     grok = [p for p in load("providers.yaml", {}) if p.id == "grok"][0]
     for override in grok.exceptions.values():
         assert "images" not in override
+
+
+def test_emulates_tools_over_a_native_fixed_model_warns_about_the_downgrade(caplog):
+    """emulates_tools claims "this provider has no native function calling".
+    A fixed model declaring tools:true claims the opposite -- and acting on the
+    flag silently replaces real function calling with prompt injection. The
+    contradiction is knowable at load time, so it must be said at load time."""
+    import logging
+    p = Provider("grokish", "free", "openai", "https://g.test", "", "/models",
+                 {}, [{"id": "m1", "tools": True, "vision": False,
+                       "context": 32000, "max_output": 4096}],
+                 emulates_tools=True)
+    with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
+        routes = fixed_routes(p)
+    assert "grokish" in caplog.text
+    assert "native" in caplog.text
+    assert routes[0].capabilities.tools is True   # behaviour unchanged: flag wins
+
+
+def test_emulates_tools_over_a_non_native_fixed_model_stays_silent(caplog):
+    import logging
+    p = Provider("deepseekish", "free", "openai", "https://d.test", "", "/models",
+                 {}, [{"id": "m1", "tools": False, "vision": False,
+                       "context": 32000, "max_output": 4096}],
+                 emulates_tools=True)
+    with caplog.at_level(logging.WARNING, logger="llm_libre.providers"):
+        routes = fixed_routes(p)
+    assert caplog.text == ""
+    assert routes[0].capabilities.tools is True

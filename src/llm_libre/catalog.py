@@ -248,6 +248,7 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
     """
     items = data.get("data", data) if isinstance(data, dict) else data
     routes: list[Route] = []
+    native_tools_overridden = 0
     for m in items:
         # An entry with no `id` (or that is not even a dict) used to blow up with
         # KeyError/AttributeError; probing.py swallowed it and that provider's
@@ -309,6 +310,8 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
             if override:
                 capabilities = replace(capabilities, **override)
         if emulates_tools:
+            if capabilities.tools:
+                native_tools_overridden += 1
             capabilities = replace(capabilities, tools=True)
         routes.append(Route(
             provider=provider,
@@ -321,6 +324,17 @@ def normalize(provider: str, data: dict | list, priority: int = 100,
             priority=priority + 1 if _is_scarce(
                 m, (measured_rates or {}).get(f"{provider}/{m['id']}")) else priority,
         ))
+    if native_tools_overridden:
+        # Same contradiction fixed_routes warns about, aggregated: the flag
+        # claims "no native function calling" while the discovered catalogue
+        # reports models that HAVE it, and acting on the flag downgrades their
+        # native calling to prompt injection. One line, not one per model -- a
+        # provider like grok would print 25.
+        log.warning(
+            "%s: emulates_tools is set, but %d discovered models already "
+            "report native tool support. Emulation will replace their native "
+            "path with prompt injection.",
+            provider, native_tools_overridden)
     return routes
 
 
