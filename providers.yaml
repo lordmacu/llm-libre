@@ -484,6 +484,20 @@ providers:
     #
     # The declared id is the honest one: mistral-medium-latest is what actually
     # answers, so a client asking for it gets what it asked for.
+    #
+    # Reads the contract as of 2026-08-20, the FIFTH and last proxy to do so:
+    # no provider's capabilities are declared by hand any more. It reports
+    # eight of eleven true -- chat, streaming, vision, images, audio_speech,
+    # audio_transcription, search and conversations -- which makes it the
+    # second-richest of the fleet behind chatgpt. None of that is new work;
+    # those routes already existed and nothing published them, so this file
+    # had been under-describing mistral for weeks.
+    #
+    # One asymmetry worth knowing before reading its /health: mistral is the
+    # only proxy whose chat answers with NO account, measured with every
+    # credential stripped. So its `chat` and `streaming` stay true even when
+    # `auth.mode` is anonymous, which for any other provider would be a bug.
+    reads_capabilities: true
     fixed_models:
       - id: mistral-medium-latest
         # tools:false MEASURED, not assumed: with tool_choice:"required" and a
