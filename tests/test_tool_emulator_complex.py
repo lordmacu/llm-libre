@@ -77,6 +77,142 @@ def _skip_if_no_url():
     return url
 
 
+# A deliberately COMPLETE tool: nested object, array of typed items, enums,
+# a default, required vs optional at two levels. This is the shape real
+# agentic clients send, and the shape prompted models get wrong most.
+ORDER_TOOL = {"type": "function", "function": {
+    "name": "create_delivery_order",
+    "description": "Create a hardware-store delivery order for a customer",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "customer": {"type": "object",
+                         "description": "Who receives the order",
+                         "properties": {
+                             "name": {"type": "string"},
+                             "phone": {"type": "string"},
+                             "address": {"type": "string",
+                                         "description": "Full street address"}},
+                         "required": ["name", "address"]},
+            "items": {"type": "array",
+                      "description": "Products to deliver",
+                      "items": {"type": "object", "properties": {
+                          "sku": {"type": "string"},
+                          "quantity": {"type": "integer"},
+                          "unit": {"type": "string",
+                                   "enum": ["unit", "box", "kg"]}},
+                          "required": ["sku", "quantity"]}},
+            "priority": {"type": "string", "enum": ["normal", "express"],
+                         "default": "normal"},
+            "notes": {"type": "string"}},
+        "required": ["customer", "items"]},
+}}
+
+ORDER_PROMPT = ("Create a delivery order for Marta Ruiz at Calle 45 #12-34 in "
+                "Bogota, phone 3001234567: 2 boxes of screws (SKU TOR-8x2) and "
+                "5 kg of cement (SKU CEM-50). It is urgent, please.")
+
+
+def _check_order_arguments(args: dict) -> None:
+    """The assertions that make this scenario COMPLETE: not just 'a call came
+    back' but 'the nested structure, the coerced types and the enums are all
+    what the schema promised the client'."""
+    customer = args.get("customer")
+    assert isinstance(customer, dict), f"customer is not an object: {args}"
+    assert "marta" in str(customer.get("name", "")).lower()
+    assert customer.get("address"), f"missing required address: {customer}"
+
+    items = args.get("items")
+    assert isinstance(items, list) and len(items) >= 2, f"items: {items}"
+    for item in items:
+        assert isinstance(item, dict), f"item is not an object: {item}"
+        assert isinstance(item.get("sku"), str) and item["sku"], f"sku: {item}"
+        assert isinstance(item["quantity"], int) and not isinstance(
+            item["quantity"], bool), (
+            f"quantity must arrive as a real integer (schema coercion): {item}")
+        if "unit" in item:
+            assert item["unit"] in ("unit", "box", "kg"), f"unit enum: {item}"
+    skus = {i["sku"].upper() for i in items}
+    assert any("TOR" in s for s in skus) and any("CEM" in s for s in skus), skus
+
+    if "priority" in args:
+        assert args["priority"] in ("normal", "express"), args["priority"]
+
+
+async def test_full_agentic_flow_with_a_complete_tool():
+    """The whole loop a real agentic client runs, against the real backend:
+    a rich nested schema in, a typed call out, a result injected, a grounded
+    text answer back."""
+    url = _skip_if_no_url()
+    providers, route, store = _build_proxy(url)
+
+    async with httpx.AsyncClient(timeout=90) as http:
+        from llm_libre.proxy import Proxy
+        proxy = Proxy(providers, store, http)
+
+        messages = [{"role": "user", "content": ORDER_PROMPT}]
+        r1 = await proxy.complete(
+            [route],
+            {"model": "deepseek-chat", "messages": messages,
+             "tools": [ORDER_TOOL], "tool_choice": "required"},
+            now=0.0)
+        assert r1.status == 200, f"turn 1: HTTP {r1.status}: {r1.json}"
+        tcs = _tool_calls(r1)
+        assert tcs, f"turn 1: no tool_calls: {json.dumps(r1.json)[:400]}"
+        tc = tcs[0]
+        assert tc["function"]["name"] == "create_delivery_order"
+        args = json.loads(tc["function"]["arguments"])
+        _check_order_arguments(args)
+        print(f"\n  turn 1 — call: {json.dumps(args, ensure_ascii=False)[:300]}")
+
+        result = json.dumps({"order_id": "ORD-7781", "status": "confirmed",
+                             "eta_minutes": 45, "total_cop": 182000})
+        messages += [
+            {"role": "assistant", "content": None, "tool_calls": [tc]},
+            {"role": "tool", "tool_call_id": tc["id"], "content": result},
+        ]
+        r2 = await proxy.complete(
+            [route],
+            {"model": "deepseek-chat", "messages": messages,
+             "tools": [ORDER_TOOL]},
+            now=0.0)
+        assert r2.status == 200, f"turn 2: HTTP {r2.status}: {r2.json}"
+        final = _content(r2)
+        assert final.strip(), "turn 2: empty final answer"
+        grounded = any(fact in final for fact in ("ORD-7781", "7781", "45"))
+        assert grounded, f"final answer ignores the tool result: {final!r}"
+        print(f"  turn 2 — final: {final[:200]!r}")
+
+
+async def test_full_agentic_flow_streaming_turn():
+    """The same first turn over SSE: one tool_calls chunk, then [DONE]."""
+    url = _skip_if_no_url()
+    providers, route, store = _build_proxy(url)
+
+    async with httpx.AsyncClient(timeout=90) as http:
+        from llm_libre.proxy import Proxy
+        proxy = Proxy(providers, store, http)
+
+        lines = [l async for l in proxy.complete_stream(
+            [route],
+            {"model": "deepseek-chat", "stream": True,
+             "messages": [{"role": "user", "content": ORDER_PROMPT}],
+             "tools": [ORDER_TOOL], "tool_choice": "required"},
+            now=0.0)]
+        assert lines[-1].strip() == "data: [DONE]"
+        payloads = [json.loads(l[len("data: "):]) for l in lines
+                    if l.startswith("data: ") and "[DONE]" not in l]
+        assert payloads, f"no chunks: {lines}"
+        delta = payloads[0]["choices"][0]["delta"]
+        tcs = delta.get("tool_calls")
+        assert tcs, f"stream did not carry tool_calls: {payloads[0]}"
+        assert tcs[0]["function"]["name"] == "create_delivery_order"
+        args = json.loads(tcs[0]["function"]["arguments"])
+        _check_order_arguments(args)
+        assert payloads[0]["choices"][0]["finish_reason"] == "tool_calls"
+        print(f"\n  stream — call: {json.dumps(args, ensure_ascii=False)[:300]}")
+
+
 async def test_selects_correct_tool_from_multiple():
     """With 3 tools available, the model should pick the right one for each question."""
     url = _skip_if_no_url()
