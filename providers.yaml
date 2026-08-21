@@ -383,9 +383,11 @@ providers:
       # context: 128000 is a DECLARED FLOOR, not a measurement, and there is
       # nothing here to correct it against: grok's /v1/models publishes only
       # created, description, id, notes, object, owned_by, rate_per_hour,
-      # requests_per_hour and window_hours for all 26 advertised models --
-      # verified live, no context_window, no token field of any kind, for any
-      # of them. chatgpt's equivalent number WAS correctable this way (its
+      # requests_per_hour and window_hours for all 26 advertised models, plus
+      # the contract's own max_output_tokens and per-model capabilities block.
+      # Verified live: no context_window, and nothing else that bounds an INPUT
+      # window, for any of them -- max_output_tokens bounds the reply, which is
+      # a different number and not what x_min_context filters on. chatgpt's equivalent number WAS correctable this way (its
       # declared 128000 turned out to be 2.4x the real 52815, see the note
       # above its reads_capabilities); grok's contract cannot do the same
       # because the provider has nothing to report. This number stays until
