@@ -94,17 +94,20 @@ PROVIDERS: tuple = (
     Provider(
         key="mistral", label="Mistral (Le Chat)",
         repo="https://github.com/lordmacu/mistral-proxy.git", port=8894,
+        # No hay modo anónimo, aunque el módulo se llame `mistral_anon_chat`.
+        # La clase de Python chatea sin credenciales; la RUTA HTTP no: comprueba
+        # `client.session_token` y devuelve 401 sin él. Ofrecerlo dejaba un
+        # proveedor instalado que rechaza todas las peticiones -- lo encontró
+        # una corrida real del instalador, no la lectura del código.
         modes=(
-            AuthMode("anonymous", "Free, no account (chat only)"),
             AuthMode("password", "Email and password", (
                 ("MISTRAL_EMAIL", "Mistral email", False),
                 ("MISTRAL_PASSWORD", "Mistral password", True))),
             AuthMode("token", "Session token", (
                 ("MISTRAL_SESSION_TOKEN", "Ory session token", True),)),
         ),
-        notes=("The only provider whose chat answers with NO account -- measured, "
-               "not assumed. Vision, images, audio, search and conversations all "
-               "need credentials."),
+        notes=(TOKEN_ONLY + " Its client library chats anonymously, but the "
+               "proxy's HTTP routes do not: they answer 401 without a session."),
     ),
     Provider(
         key="chatgpt", label="ChatGPT",

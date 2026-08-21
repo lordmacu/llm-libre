@@ -149,11 +149,20 @@ def test_perplexity_is_not_offered_a_password_it_does_not_have():
     assert "otp" in modes
 
 
-def test_only_mistral_offers_a_free_mode():
-    """Measured this session: with every credential stripped, only Mistral
-    answered. Offering a free mode elsewhere would promise what fails."""
+def test_no_provider_offers_a_free_mode():
+    """Mistral se ofrecía como gratis sobre una medición de la capa equivocada:
+    su clase de Python chatea anónima, pero la ruta HTTP devuelve 401. Un
+    proveedor instalado que rechaza todo es peor que uno no ofrecido."""
     free = {p.key for p in PROVIDERS if any(m.key == "anonymous" for m in p.modes)}
-    assert free == {"mistral"}
+    assert free == set()
+
+
+def test_every_mode_can_actually_authenticate():
+    """Cada modo pide algo o corre un flujo. Un modo que no hace ninguna de las
+    dos produce exactamente el fallo de mistral: contenedor sano, 401 en todo."""
+    for provider in PROVIDERS:
+        for mode in provider.modes:
+            assert mode.prompts or mode.otp is not None, f"{provider.key}/{mode.key}"
 
 
 def test_secrets_are_marked_so_they_are_never_echoed():
