@@ -6,8 +6,8 @@ picked, and editing a .env that holds credentials.
 """
 import pytest
 
-from llm_libre.installer import (PROVIDERS, host_gateway_url, parse_selection,
-                                 read_env, write_env)
+from llm_libre.installer import (BY_KEY, PROVIDERS, host_gateway_url,
+                                 parse_selection, read_env, write_env)
 
 
 # ── Selection parsing ────────────────────────────────────────────────────────
@@ -104,13 +104,49 @@ def test_the_url_variable_matches_what_providers_yaml_reads():
 
 
 def test_every_provider_offers_at_least_one_way_in():
+    """Every mode must actually be able to authenticate: either it asks for
+    something up front, or it runs an OTP flow after the container starts."""
     for provider in PROVIDERS:
         assert provider.modes, provider.key
         for mode in provider.modes:
             if mode.key == "anonymous":
-                assert mode.prompts == ()
+                assert mode.prompts == () and mode.otp is None
+            elif mode.key == "otp":
+                assert mode.otp is not None, f"{provider.key}: otp mode with no flow"
+                assert mode.prompts == (), (
+                    f"{provider.key}: an otp mode cannot ask up front -- the code "
+                    f"does not exist yet")
             else:
                 assert mode.prompts, f"{provider.key}/{mode.key} asks for nothing"
+
+
+def test_the_otp_providers_are_the_ones_whose_proxies_serve_that_flow():
+    """grok and perplexity expose request/verify endpoints; the others do not.
+    Offering an OTP mode where the proxy has no such route would 404 mid-install."""
+    with_otp = {p.key for p in PROVIDERS if any(m.key == "otp" for m in p.modes)}
+    assert with_otp == {"grok", "perplexity"}
+
+
+def test_each_otp_flow_names_both_steps_and_the_right_field():
+    """The two proxies disagree on what the code field is called -- `code` on
+    grok, `otp` on perplexity -- and sending the wrong name fails validation."""
+    fields = {}
+    for provider in PROVIDERS:
+        for mode in provider.modes:
+            if mode.otp is None:
+                continue
+            assert mode.otp.request_path.startswith("/")
+            assert mode.otp.verify_path.startswith("/")
+            assert mode.otp.request_path != mode.otp.verify_path
+            fields[provider.key] = mode.otp.code_field
+    assert fields == {"grok": "code", "perplexity": "otp"}
+
+
+def test_perplexity_is_not_offered_a_password_it_does_not_have():
+    """Perplexity has no password at all; the emailed code IS the login."""
+    modes = {m.key for m in BY_KEY["perplexity"].modes}
+    assert "password" not in modes
+    assert "otp" in modes
 
 
 def test_only_mistral_offers_a_free_mode():

@@ -35,16 +35,40 @@ from pathlib import Path
 # ── The provider registry ────────────────────────────────────────────────────
 
 @dataclass(frozen=True)
+class OtpFlow:
+    """A two-step email login the PROXY performs, not the installer.
+
+    Several providers have no password at all: you give an email, they send a
+    six-digit code, you send it back. That cannot be answered up front like a
+    token can -- the code does not exist until the first call is made -- so
+    this flow runs AFTER the container is up, against the proxy's own
+    endpoints, and the proxy stores the session it gets back.
+
+    Distinct from the OTP *worker* some proxies also configure: that one reads
+    the emailed code automatically to RENEW an expiring session. This is the
+    initial login, and a human reads the code.
+    """
+    request_path: str             # asks the vendor to email a code
+    verify_path: str              # exchanges the code for a session
+    code_field: str = "otp"       # what the verify endpoint calls the code
+    email_field: str = "email"
+
+
+@dataclass(frozen=True)
 class AuthMode:
     """One way to authenticate a provider.
 
-    `env` maps the variable the proxy reads to what the installer must ask.
+    `prompts` maps the variable the proxy reads to what the installer must ask,
+    and is answered BEFORE the container starts. `otp` is the alternative: a
+    flow that can only run once the proxy is answering.
+
     `secret` fields are read with getpass so they never reach the terminal
     history or a screen recording.
     """
-    key: str                      # "token" | "password" | "anonymous"
+    key: str                      # "token" | "password" | "otp" | "anonymous"
     label: str
     prompts: tuple = ()           # (env_var, question, is_secret)
+    otp: OtpFlow | None = None
 
 
 @dataclass(frozen=True)
@@ -99,20 +123,33 @@ PROVIDERS: tuple = (
         repo="https://github.com/lordmacu/grok-proxy.git", port=8893,
         compose_dir="docker-api",
         modes=(
-            AuthMode("token", "Session token", (
+            AuthMode("otp", "Email and a code they send you", otp=OtpFlow(
+                request_path="/auth/otp/send",
+                verify_path="/auth/otp/verify",
+                code_field="code")),
+            AuthMode("password", "Email and password", (
+                ("GROK_EMAIL", "Grok email", False),
+                ("GROK_PASSWORD", "Grok password", True))),
+            AuthMode("token", "Session token you already have", (
                 ("GROK_SESSION_TOKEN", "Grok session token", True),)),
         ),
-        notes=TOKEN_ONLY + " Only a session token works here; there is no email/password flow.",
+        notes=(TOKEN_ONLY + " Accounts created through Twitter or Google have no "
+               "password -- use the emailed code for those."),
     ),
     Provider(
         key="perplexity", label="Perplexity",
         repo="https://github.com/lordmacu/perplexity-proxy.git", port=8891,
         compose_dir="docker-api",
         modes=(
-            AuthMode("token", "Session cookie", (
+            AuthMode("otp", "Email and a code they send you", otp=OtpFlow(
+                request_path="/perplexity/auth/request-otp",
+                verify_path="/perplexity/auth/verify-otp",
+                code_field="otp")),
+            AuthMode("token", "Session cookie you already have", (
                 ("PERPLEXITY_SESSION", "__Secure-next-auth.session-token", True),)),
         ),
-        notes=TOKEN_ONLY,
+        notes=(TOKEN_ONLY + " Perplexity has no password: the code emailed to you "
+               "IS the login. The cookie option is for one you already extracted."),
     ),
     Provider(
         key="deepseek", label="DeepSeek",
@@ -502,6 +539,10 @@ def install_provider(ui: UI, provider: Provider, workdir: Path, mode: AuthMode,
         ui.info(f"Logs: cd {compose_dir} && docker compose logs --tail 50")
         return False
 
+    if mode.otp is not None and not run_otp_login(ui, provider, mode.otp):
+        ui.warn(f"{provider.label} is up but not logged in. Chat will fail until "
+                f"you authenticate; the container keeps running.")
+
     status, body = http_json(f"http://127.0.0.1:{provider.port}/health")
     if isinstance(body, dict) and "capabilities" in body:
         live = sorted(k for k, v in body["capabilities"].items() if v)
@@ -513,6 +554,48 @@ def install_provider(ui: UI, provider: Provider, workdir: Path, mode: AuthMode,
     else:
         ui.ok(f"{provider.label} up on port {provider.port}")
     return True
+
+
+def run_otp_login(ui: UI, provider: Provider, flow: OtpFlow) -> bool:
+    """The two-step email login, run against the proxy once it is answering.
+
+    Why here and not with the other prompts: the code does not exist until the
+    first call is made, so it cannot be collected up front like a token. The
+    proxy stores whatever session it gets back -- the installer never sees or
+    writes it, which is one fewer place a credential lives.
+    """
+    base = f"http://127.0.0.1:{provider.port}"
+    ui.step(f"Logging in to {provider.label} with an emailed code")
+
+    email = input("  Email: ").strip()
+    if not email:
+        ui.fail("An email is required.")
+        return False
+
+    status, body = http_json(f"{base}{flow.request_path}",
+                             payload={flow.email_field: email}, timeout=60)
+    if status not in (200, 201):
+        ui.fail(f"Could not request the code ({status}): {str(body)[:200]}")
+        return False
+    ui.ok(f"Code requested — check {email}")
+
+    for attempt in (1, 2, 3):
+        code = input("  Code you received: ").strip()
+        if not code:
+            ui.warn("Cannot be empty.")
+            continue
+        status, body = http_json(
+            f"{base}{flow.verify_path}",
+            payload={flow.email_field: email, flow.code_field: code}, timeout=60)
+        if status in (200, 201):
+            ui.ok(f"{provider.label} authenticated")
+            return True
+        ui.warn(f"The code was not accepted ({status}): {str(body)[:160]}")
+        if attempt < 3:
+            ui.info("Codes expire quickly — if this one has, ask for a new one "
+                    "and run the installer again.")
+    ui.fail("Three codes rejected. Leaving this provider unauthenticated.")
+    return False
 
 
 def link_provider(ui: UI, root: Path, provider: Provider) -> None:
