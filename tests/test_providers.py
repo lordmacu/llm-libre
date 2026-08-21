@@ -595,12 +595,12 @@ def test_the_only_real_image_route_does_not_pin_images_through_exceptions():
 
 
 def test_the_real_registry_names_exactly_the_proxies_that_publish_a_contract():
-    # The rollout is per proxy. perplexity, deepseek and mistral have not
-    # adopted the contract -- turning this on before a proxy publishes /health
-    # would cost it a sweep of skipped syncs.
+    # The rollout is per proxy. mistral has not adopted the contract -- turning
+    # this on before a proxy publishes /health would cost it a sweep of skipped
+    # syncs. perplexity joined on 2026-08-20, the fourth to do so.
     providers = load("providers.yaml", {})
     assert sorted(p.id for p in providers if p.reads_capabilities) == [
-        "chatgpt", "deepseek", "grok"]
+        "chatgpt", "deepseek", "grok", "perplexity"]
 
 
 def test_the_contract_url_drops_the_v1_prefix():

@@ -212,6 +212,21 @@ providers:
     # layer on 2026-08-18, same as chatgpt (see the long note there for why
     # claiming a capability this provider does not have is worse than admitting
     # it lacks one). Only deepseek passed that test.
+    #
+    # Reads the contract as of 2026-08-20, the fourth proxy to do so. Its
+    # /health used to answer `{"status": "ok"}` and nothing else; it now
+    # publishes the eleven booleans, six of them true: chat, streaming,
+    # audio_speech, search, plus conversations and audio_transcription, which
+    # that same day went from absent to implemented and MEASURED against the
+    # live account.
+    #
+    # One of those six is not really Perplexity's, and the distinction matters
+    # for whoever debugs it next: `audio_transcription` runs on SONIOX, a third
+    # party. Perplexity only issues the short-lived credential. Soniox going
+    # down would show up here as a capability failing while Perplexity itself
+    # is perfectly healthy -- so that is the boolean to suspect first when
+    # transcription breaks and nothing else does.
+    reads_capabilities: true
     fixed_models:
       # tools:false verified natively AND through emulation -- neither works.
       # vision:false: it does not support image input.
