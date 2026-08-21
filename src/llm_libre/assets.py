@@ -58,6 +58,14 @@ _SAFE_TYPES = {
     "image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml",
     "application/pdf", "text/plain", "text/csv", "application/json",
     "application/zip",
+    # Audio landed here on 2026-08-20, when all five proxies started reporting
+    # `audio_speech` on their capability contract. Without these a generated
+    # MP3 fell through to application/octet-stream, so a browser downloaded it
+    # instead of playing it -- the asset was intact and the player was the
+    # thing that broke. None of these can carry script the way SVG can, so
+    # unlike SVG they are safe to serve inline.
+    "audio/mpeg", "audio/wav", "audio/ogg", "audio/webm", "audio/mp4",
+    "audio/aac", "audio/flac",
 }
 _FALLBACK_TYPE = "application/octet-stream"
 

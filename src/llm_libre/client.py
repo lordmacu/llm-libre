@@ -60,3 +60,37 @@ def build_request(p: Provider, body: dict,
     if p.emulates_tools and out.get("tools"):
         out = _emu.inject_into_body(out)
     return url, headers, out
+
+
+def build_capability_request(p: Provider, path: str,
+                             body: dict | None = None) -> tuple[str, dict]:
+    """URL and headers for a capability endpoint that takes NO model.
+
+    `/audio/speech`, `/audio/transcriptions` and `/translate` are all of this
+    shape: the provider is chosen by capability, and there is nothing to
+    rewrite into the payload because there is no model id in it. So unlike the
+    two builders above this one returns no body -- the caller sends either the
+    client's JSON (with this gateway's own `x_*` extensions stripped) or, for
+    a multipart upload, the raw bytes it received.
+
+    Identical to the others where it matters: `join_path` assembles the URL
+    (see its docstring for the query-string bug plain concatenation causes) and
+    the Authorization header is omitted for an empty key, because Kilo's
+    anonymous tier depends on that and the rule must not differ per endpoint.
+    """
+    url = join_path(p.base_url, path)
+    headers = dict(p.extra_headers)
+    if p.api_key.strip():
+        headers["Authorization"] = "Bearer " + p.api_key
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    return url, headers
+
+
+def strip_extensions(body: dict) -> dict:
+    """The client's JSON minus this gateway's own `x_*` extensions.
+
+    Only THIS gateway's, not everything starting with `x_`: the contract is
+    passthrough, and a provider's own new parameter has to be able to travel.
+    """
+    return {k: v for k, v in body.items() if k not in GATEWAY_EXTENSIONS}

@@ -10,7 +10,8 @@ import httpx
 
 from llm_libre import tool_emulator as _emu
 from llm_libre.quality_suite import SHORT_TOKEN_BUDGET
-from llm_libre.client import build_image_request, build_request
+from llm_libre.client import (build_capability_request, build_image_request,
+                             build_request, strip_extensions)
 from llm_libre.models import RequestTrace, Route
 from llm_libre.notify import Notifier
 from llm_libre.reasoning import CompositeStreamTrimmer, trim
@@ -299,6 +300,12 @@ def _is_client_error(code: int) -> bool:
 ALL_CAPABILITIES = "*"
 CHAT = "chat"
 IMAGES = "images"
+# One scope per capability endpoint, for the same reason IMAGES exists: a rate
+# limit is evidence about the capability it rate-limited and nothing more. A
+# provider whose TTS quota is spent must not have its chat traffic parked.
+AUDIO_SPEECH = "audio_speech"
+AUDIO_TRANSCRIPTION = "audio_transcription"
+TRANSLATE = "translate"
 
 
 class Cooldowns(MutableMapping):
@@ -442,6 +449,13 @@ class ProxyResponse:
     # one row per attempt. The health probe always passes a single route, so
     # there is no ambiguity there.
     upstream_code: int = 0
+    # Set ONLY by `serve_capability`, and only when the provider answered with
+    # something that is not JSON -- text-to-speech returns audio bytes. `json`
+    # stays a dict there (empty) rather than becoming `bytes | dict`, so every
+    # existing reader of `.json` keeps its type. A caller that sees `content`
+    # is not None must return it as a binary body; see api.py.
+    content: bytes | None = None
+    media_type: str | None = None
 
 
 class Proxy:
@@ -646,6 +660,141 @@ class Proxy:
             "next_release": (min(request_cooldowns.values())
                                    if request_cooldowns else None),
         }}, None, attempts, "", last_code)
+
+    async def serve_capability(
+        self, routes: list[Route], now: float, *,
+        scope: str, path: str, json_body: dict | None = None,
+        content: bytes | None = None, content_type: str | None = None,
+        expect_binary: bool = False,
+        on_billable_attempt: Callable[[Route], None] | None = None,
+        trace: RequestTrace | None = None,
+    ) -> ProxyResponse:
+        """The model-less capability endpoints, with the SAME failover as chat.
+
+        A sibling of `complete` and `generate_images`, covering `/audio/speech`,
+        `/audio/transcriptions` and `/translate` in one method rather than three
+        near-identical ones: those endpoints differ from each other only in the
+        upstream path, the capability scope, and whether the answer is JSON or
+        bytes -- all three of which are parameters here. They differ from chat
+        and images in the same two ways as each other, so splitting them would
+        have produced three copies of this loop, which is how the copies drift.
+
+        What it shares with its siblings, and why that matters more than the
+        differences: walk the ordered chain, record one event per attempt,
+        punish a 429 within its own scope, turn any other failure into
+        suspicion, count a billable paid attempt, and report the exhausted
+        chain the same way. A capability endpoint that grew its own provider
+        picker would be a second gateway hiding inside the first.
+
+        Two things it deliberately does NOT do:
+
+          - no tool emulation and no reasoning trimming: there is no `content`
+            to trim and no `tools` to emulate, exactly as in `generate_images`;
+          - no request rewriting. There is no model id in any of these bodies,
+            so nothing has to be substituted -- the client's JSON travels with
+            only this gateway's own `x_*` extensions removed, and a multipart
+            upload travels byte for byte.
+
+        `expect_binary` is what text-to-speech needs: its 200 carries audio, and
+        parsing it as JSON would fail on every success. The success test is
+        "200 with a non-empty body" in both modes, because both proxies can
+        answer 200 with nothing inside -- and treating that as success is how a
+        broken route stays at the head of the ranking.
+        """
+        attempts = 0
+        last_error = None
+        last_code = 0
+        for route in routes:
+            provider = self.providers[route.provider]
+            url, headers = build_capability_request(provider, path, json_body)
+            if content is not None and content_type:
+                headers["Content-Type"] = content_type
+            attempts += 1
+            t0 = time.monotonic()
+            resp = None
+            try:
+                resp = await self.http.post(
+                    url, headers=headers,
+                    json=strip_extensions(json_body) if json_body is not None else None,
+                    content=content,
+                    timeout=_timeout_for(provider))
+                code = resp.status_code
+            except httpx.HTTPError as e:
+                code, resp, last_error = 0, None, describe_error(e)
+            last_code = code
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            punish_at = now + latency_ms / 1000.0
+
+            if code == 200 and route.tier == "paid" and on_billable_attempt is not None:
+                on_billable_attempt(route)
+
+            payload = None
+            blob = None
+            if code == 200 and resp is not None:
+                if expect_binary:
+                    blob = resp.content
+                    if not blob:
+                        last_error = "200 with an empty body"
+                else:
+                    try:
+                        payload = resp.json()
+                    except ValueError:
+                        payload = None
+                        last_error = "200 with a non-JSON body"
+                    else:
+                        if not isinstance(payload, dict):
+                            payload = None
+                            last_error = "200 with a JSON body that is not an object"
+
+            success = code == 200 and (bool(blob) if expect_binary else payload is not None)
+
+            if success:
+                log.info("%s: %s answered 200 in %d ms (%s)", scope, route.key,
+                         latency_ms, f"{len(blob)} bytes" if expect_binary else "json")
+            else:
+                detail = ""
+                if resp is not None:
+                    try:
+                        detail = resp.text[:300]
+                    except Exception:
+                        detail = "<unreadable body>"
+                log.warning("%s: %s failed (HTTP %s, %d ms): %s | body: %.300s",
+                            scope, route.key, code, latency_ms, last_error, detail)
+
+            # ttft stays 0 as on every non-streaming path. `capability=scope`
+            # for the same reason generate_images files under IMAGES: an
+            # allowance belongs to the resource it was spent on, and filing a
+            # TTS refusal against chat traffic is how rate_budgets ends up
+            # computing allowances a route was already observed exceeding.
+            self.store.record_event(route.key, success, 0, code, now,
+                                    latency_ms=latency_ms,
+                                    is_client_error=_is_client_error(code),
+                                    capability=scope,
+                                    trace=trace, attempt=attempts)
+
+            if success:
+                self._suspicions.pop(route.key, None)
+                self._paid_failures.pop(route.key, None)
+                self._clear_punishment(route.key)
+                if expect_binary:
+                    return ProxyResponse(
+                        200, {}, route, attempts, "", code,
+                        content=blob,
+                        media_type=(resp.headers.get("content-type") or
+                                    "application/octet-stream").split(";")[0].strip())
+                return ProxyResponse(200, payload, route, attempts, "", code)
+
+            if code == 429:
+                self._punish_429(route.key, punish_at, resp, scope=scope)
+            elif not _is_client_error(code):
+                self._react_to_non_429_failure(route, now, punish_at, is_probe=False)
+            last_error = last_error or f"HTTP {code}"
+
+        return ProxyResponse(
+            503,
+            {"error": {"message": f"no provider served {scope}: {last_error}",
+                       "type": "no_route_available"}},
+            None, attempts, "", last_code)
 
     async def generate_images(self, routes: list[Route], body: dict, now: float,
                               on_billable_attempt: Callable[[Route], None] | None = None,

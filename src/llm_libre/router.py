@@ -93,6 +93,16 @@ def _satisfies(r: Route, p: RouteRequest) -> bool:
         return False
     if p.needs_images and not c.images:
         return False
+    # The provider-level axes. Unlike tools/vision/images these do not vary per
+    # model -- the endpoints behind them take no model at all -- but they are
+    # filtered here anyway so every endpoint gets the same failover, cooldown
+    # and ranking machinery instead of growing its own provider picker.
+    if p.needs_audio_speech and not c.audio_speech:
+        return False
+    if p.needs_audio_transcription and not c.audio_transcription:
+        return False
+    if p.needs_translate and not c.translate:
+        return False
     if p.min_context and c.context < p.min_context:
         return False
     return True

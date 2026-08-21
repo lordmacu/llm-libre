@@ -16,7 +16,8 @@ from llm_libre.models import (NEUTRAL_METRICS, UNKNOWN_BUDGET, RequestTrace,
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
                                ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
                                USAGE_DOCS, VERSION, customise_openapi)
-from llm_libre.proxy import CHAT, IMAGES
+from llm_libre.proxy import (AUDIO_SPEECH, AUDIO_TRANSCRIPTION, CHAT,
+                             IMAGES, TRANSLATE)
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
 
@@ -309,14 +310,26 @@ def create_app(state: State) -> FastAPI:
         key = _resolve_api_key(x_api_key, authorization)
         return bool(key) and key in state.api_keys
 
-    def _routes_for(body: dict, key: str, needs_images: bool = False) -> tuple[list, object]:
+    # Which RouteRequest flag each capability endpoint sets. The mapping lives
+    # here, next to the endpoints, because it encodes the one rule that keeps
+    # these endpoints honest: the capability comes from the URL that was
+    # called, never from anything a client can put in a body.
+    _NEEDS_FOR = {
+        IMAGES: "needs_images",
+        AUDIO_SPEECH: "needs_audio_speech",
+        AUDIO_TRANSCRIPTION: "needs_audio_transcription",
+        TRANSLATE: "needs_translate",
+    }
+
+    def _routes_for(body: dict, key: str, capability: str = CHAT) -> tuple[list, object]:
         request = parse_request(body)
-        if needs_images:
+        flag = _NEEDS_FOR.get(capability)
+        if flag is not None:
             # Set HERE, not in parse_request: it is decided by which endpoint was
             # called, never by anything the client can put in the body. That is
             # what makes it impossible for a chat request to be routed to an
             # image generator, or the reverse.
-            request = replace(request, needs_images=True)
+            request = replace(request, **{flag: True})
         active = state.store.active_routes()
         # An explicit id that no longer exists deserves a 404 with hints, not a
         # generic 400: it is exactly the failure this project exists to prevent.
@@ -333,7 +346,7 @@ def create_app(state: State) -> FastAPI:
                 cap_reached = True
         now = time.time()
         # The capability this request is actually asking for -- see _metrics.
-        metrics = _metrics(state, now, IMAGES if request.needs_images else CHAT)
+        metrics = _metrics(state, now, capability)
         routes = order_routes(active, metrics, request, now, state.rng)
         if not routes:
             _no_routes(active, request, metrics, now, cap_reached)   # always raises
@@ -447,7 +460,7 @@ def create_app(state: State) -> FastAPI:
         """
         key = require_api_key(x_api_key, authorization, request)
         body = await request.json()
-        routes, _ = _routes_for(body, key, needs_images=True)
+        routes, _ = _routes_for(body, key, IMAGES)
         now = time.time()
 
         def _count_paid_usage(route) -> None:
@@ -471,6 +484,85 @@ def create_app(state: State) -> FastAPI:
             headers["X-Route-Used"] = r.route.key
             headers["X-Tier"] = r.route.tier
         return JSONResponse(r.json, status_code=r.status, headers=headers)
+
+    def _capability_headers(r) -> dict:
+        headers = {"X-Attempts": str(r.attempts)}
+        if r.route is not None:
+            headers["X-Route-Used"] = r.route.key
+            headers["X-Tier"] = r.route.tier
+        return headers
+
+    @app.post("/v1/audio/speech")
+    async def audio_speech(request: Request, x_api_key: str | None = Header(None),
+                           authorization: str | None = Header(None)):
+        """OpenAI's text-to-speech contract, routed by the `audio_speech` capability.
+
+        The answer is AUDIO, not JSON, and that is the whole reason this is not
+        a branch inside the images endpoint: `serve_capability` is told to
+        expect binary, and the provider's own content type is passed through so
+        a client gets `audio/mpeg` rather than a guess.
+
+        Like every capability endpoint here, the filter is the point: routes
+        that cannot speak are dropped before a single request is attempted, so
+        a caller never waits on a chat-only provider to be told it has no voice.
+        """
+        key = require_api_key(x_api_key, authorization, request)
+        body = await request.json()
+        routes, _ = _routes_for(body, key, AUDIO_SPEECH)
+        r = await state.proxy.serve_capability(
+            routes, time.time(), scope=AUDIO_SPEECH, path="/audio/speech",
+            json_body=body, expect_binary=True,
+            trace=RequestTrace(request_id=uuid4().hex, requested=body.get("model")))
+        if r.content is not None:
+            return Response(content=r.content, media_type=r.media_type,
+                            headers=_capability_headers(r))
+        return JSONResponse(r.json, status_code=r.status, headers=_capability_headers(r))
+
+    @app.post("/v1/audio/transcriptions")
+    async def audio_transcriptions(request: Request, x_api_key: str | None = Header(None),
+                                   authorization: str | None = Header(None)):
+        """OpenAI's speech-to-text contract, routed by `audio_transcription`.
+
+        The request is MULTIPART -- an uploaded audio file -- so unlike every
+        other endpoint here the body is forwarded byte for byte rather than
+        re-serialised. Parsing and rebuilding it would mean re-encoding the
+        audio on every attempt of a failover chain, and would silently drop any
+        field a provider accepts that this gateway has not heard of.
+
+        The consequence, stated because it is a real limit and not an
+        oversight: the gateway's own `x_*` extensions cannot be stripped from a
+        multipart body, and `x_model` cannot select a route here. Routing is by
+        capability alone.
+        """
+        key = require_api_key(x_api_key, authorization, request)
+        raw = await request.body()
+        routes, _ = _routes_for({}, key, AUDIO_TRANSCRIPTION)
+        r = await state.proxy.serve_capability(
+            routes, time.time(), scope=AUDIO_TRANSCRIPTION,
+            path="/audio/transcriptions", content=raw,
+            content_type=request.headers.get("content-type"),
+            trace=RequestTrace(request_id=uuid4().hex, requested=None))
+        return JSONResponse(r.json, status_code=r.status, headers=_capability_headers(r))
+
+    @app.post("/v1/translate")
+    async def translate(request: Request, x_api_key: str | None = Header(None),
+                        authorization: str | None = Header(None)):
+        """Translation, routed by the `translate` capability.
+
+        Not an OpenAI endpoint -- there is no such thing in their API -- so the
+        wire shape is whatever the provider behind it accepts, passed through.
+        Only chatgpt-proxy reports this capability today, which means the
+        routing chain is usually one route long; that is a fact about the
+        fleet, not a reason for the endpoint to work differently.
+        """
+        key = require_api_key(x_api_key, authorization, request)
+        body = await request.json()
+        routes, _ = _routes_for(body, key, TRANSLATE)
+        r = await state.proxy.serve_capability(
+            routes, time.time(), scope=TRANSLATE, path="/translate",
+            json_body=body,
+            trace=RequestTrace(request_id=uuid4().hex, requested=body.get("model")))
+        return JSONResponse(r.json, status_code=r.status, headers=_capability_headers(r))
 
     @app.get("/v1/assets/{asset_id}", **ASSETS_DOCS)
     def asset(asset_id: str, request: Request):

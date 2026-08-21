@@ -187,8 +187,9 @@ def test_error_body_exposes_the_request_fields(client):
     detail = r.json()["detail"]
     assert "message" in detail
     assert set(detail["request"]) == {
-        "model", "needs_tools", "needs_vision", "needs_images", "min_context",
-        "profile", "allow_paid",
+        "model", "needs_tools", "needs_vision", "needs_images",
+        "needs_audio_speech", "needs_audio_transcription", "needs_translate",
+        "min_context", "profile", "allow_paid",
     }
 
 

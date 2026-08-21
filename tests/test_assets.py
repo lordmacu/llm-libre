@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from llm_libre.api import State, create_app
-from llm_libre.assets import AssetStore, localise
+from llm_libre.assets import AssetStore, content_disposition, localise, normalise_type
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
 from llm_libre.proxy import Proxy
@@ -287,3 +287,21 @@ def test_with_no_store_configured_the_provider_url_is_passed_through(tmp_path):
     state.assets = None
     r = client.post("/v1/images/generations", headers=AUTH, json={"prompt": "x"})
     assert r.json()["data"][0]["url"] == PROVIDER_URL
+
+
+def test_generated_audio_keeps_its_type():
+    """All five proxies do TTS as of 2026-08-20. Before this, an MP3 fell back
+    to application/octet-stream and browsers downloaded it instead of playing
+    it -- the asset was fine, the player was what broke."""
+    for content_type in ("audio/mpeg", "audio/wav", "audio/ogg", "audio/webm",
+                         "audio/mp4", "audio/aac", "audio/flac"):
+        assert normalise_type(content_type) == content_type
+
+
+def test_audio_is_served_inline_not_downloaded():
+    """Unlike SVG, none of these can carry script, so nothing forces attachment."""
+    assert content_disposition("audio/mpeg").startswith("inline")
+
+
+def test_an_unlisted_audio_type_still_falls_back():
+    assert normalise_type("audio/x-made-up") == "application/octet-stream"

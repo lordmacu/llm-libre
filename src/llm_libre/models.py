@@ -89,6 +89,15 @@ class RouteRequest:
     # Set by POST /v1/images/generations, never by a chat request: it is what
     # keeps that endpoint from ever attempting a route that cannot generate.
     needs_images: bool = False
+    # Same rule as needs_images, one flag per capability endpoint: each is set
+    # by the endpoint that was called and by nothing the client can put in a
+    # body. Three separate booleans rather than one `needs: str` because that
+    # is the shape `needs_images` already established and `_satisfies` already
+    # reads -- a second, parallel notion of "what this request needs" would be
+    # the more expensive change, not the cheaper one.
+    needs_audio_speech: bool = False
+    needs_audio_transcription: bool = False
+    needs_translate: bool = False
     min_context: int = 0
     profile: str = "balanced"       # "fast" | "balanced" | "strong"
     allow_paid: bool = True
@@ -108,6 +117,9 @@ class RouteRequest:
             "needs_tools": self.needs_tools,
             "needs_vision": self.needs_vision,
             "needs_images": self.needs_images,
+            "needs_audio_speech": self.needs_audio_speech,
+            "needs_audio_transcription": self.needs_audio_transcription,
+            "needs_translate": self.needs_translate,
             "min_context": self.min_context,
             "profile": self.profile,
             "allow_paid": self.allow_paid,
