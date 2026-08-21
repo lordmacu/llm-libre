@@ -85,7 +85,7 @@ def test_inject_converts_tool_messages_to_user():
     assert "tool" not in roles
     last = result["messages"][-1]
     assert last["role"] == "user"
-    assert "[Function result]" in last["content"]
+    assert last["content"].startswith("[Function result")
 
 
 def test_inject_no_op_when_no_tools():
@@ -520,6 +520,362 @@ def test_stream_chunk_text_variant():
     assert chunk["choices"][0]["delta"]["content"] == "plain answer"
     assert chunk["choices"][0]["finish_reason"] == "stop"
     assert chunk["id"] == "x"
+
+
+# --- vendor emission formats the parser must recognise ---
+# Every one of these is still gated on the allow-list: coverage of MORE shapes
+# never loosens the false-positive discipline, it only widens which spellings of
+# a genuine call are understood.
+
+def test_parse_batches_multiple_tool_call_tags_as_parallel_calls():
+    """Hermes/Qwen-style models emit one <tool_call> tag per parallel call."""
+    text = ('<tool_call>{"name": "fn1", "arguments": {"x": 1}}</tool_call>\n'
+            '<tool_call>{"name": "fn2", "arguments": {"y": 2}}</tool_call>')
+    result = parse_tool_calls(text, MULTI_VALID)
+    assert result is not None
+    assert [c["name"] for c in result] == ["fn1", "fn2"]
+    assert result[0]["arguments"] == {"x": 1}
+    assert result[1]["arguments"] == {"y": 2}
+
+
+def test_parse_keeps_valid_tags_and_drops_invalid_ones():
+    text = ('<tool_call>{"name": "not_offered", "arguments": {}}</tool_call>\n'
+            '<tool_call>{"name": "get_weather", "arguments": {"city": "Lima"}}</tool_call>')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["name"] == "get_weather"
+
+
+def test_parse_mistral_tool_calls_marker():
+    """Mistral fine-tunes prefix their calls with a literal [TOOL_CALLS] token."""
+    text = '[TOOL_CALLS][{"name": "get_weather", "arguments": {"city": "Paris"}}]'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Paris"
+
+
+def test_parse_keeps_the_marker_when_it_is_argument_data():
+    """[TOOL_CALLS] inside a string value is the user's data, not a marker."""
+    text = '{"name": "get_weather", "arguments": {"city": "[TOOL_CALLS] plaza"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "[TOOL_CALLS] plaza"
+
+
+def test_parse_finds_the_call_after_a_quoted_schema():
+    """The scan must not stop at the first balanced span: a schema quoted early
+    in the reply used to shadow the real call at the end."""
+    text = ('The tool takes {"type": "object", "properties": {"city": '
+            '{"type": "string"}}} as its schema, so I will now call it:\n'
+            '{"name": "get_weather", "arguments": {"city": "Lima"}}')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Lima"
+
+
+def test_parse_python_literal_dict():
+    """Weaker models emit Python repr instead of JSON: single quotes."""
+    text = "{'name': 'get_weather', 'arguments': {'city': 'Bogotá'}}"
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Bogotá"
+
+
+def test_parse_python_literal_with_brace_inside_single_quoted_string():
+    text = "{'name': 'get_weather', 'arguments': {'city': 'a } tricky { name'}}"
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "a } tricky { name"
+
+
+def test_parse_tolerates_trailing_commas():
+    text = '{"name": "get_weather", "arguments": {"city": "Quito",},}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Quito"
+
+
+def test_parse_strips_functions_namespace_prefix():
+    """OpenAI-tuned models sometimes emit the internal `functions.` namespace."""
+    text = '{"name": "functions.get_weather", "arguments": {"city": "Cali"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["name"] == "get_weather"
+
+
+def test_parse_resolves_a_unique_case_insensitive_name():
+    text = '{"name": "Get_Weather", "arguments": {"city": "Cali"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["name"] == "get_weather"
+
+
+def test_parse_rejects_a_case_ambiguous_name():
+    """Two offered names differing only by case: a third spelling names neither."""
+    text = '{"name": "GETDATA", "arguments": {}}'
+    assert parse_tool_calls(text, {"getData", "getdata"}) is None
+
+
+def test_parse_react_action_shape():
+    """LangChain/ReAct-trained models emit action/action_input."""
+    text = '{"action": "get_weather", "action_input": {"city": "Cali"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["name"] == "get_weather"
+    assert result[0]["arguments"]["city"] == "Cali"
+
+
+def test_parse_tool_and_tool_input_shape():
+    text = '{"tool": "get_weather", "tool_input": {"city": "Cali"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Cali"
+
+
+def test_parse_plural_tool_calls_wrapper():
+    """Some models wrap a batch in {"tool_calls": [...]}, mirroring the reply
+    shape they were fine-tuned on."""
+    text = ('{"tool_calls": [{"name": "fn1", "arguments": {"x": 1}}, '
+            '{"name": "fn2", "arguments": {}}]}')
+    result = parse_tool_calls(text, MULTI_VALID)
+    assert result is not None
+    assert [c["name"] for c in result] == ["fn1", "fn2"]
+
+
+def test_parse_plural_wrapper_is_all_or_nothing():
+    text = ('{"tool_calls": [{"name": "fn1", "arguments": {}}, '
+            '{"temp": 18}]}')
+    assert parse_tool_calls(text, MULTI_VALID) is None
+
+
+def test_parse_unclosed_think_block_is_still_scratchpad():
+    """A reasoning block truncated before its closing tag is reasoning to the
+    end of the text, not an answer."""
+    text = '<think>I could call {"name": "get_weather", "arguments": {"city": "X"}}'
+    assert parse_tool_calls(text, VALID) is None
+
+
+def test_parse_tool_code_fence_is_an_explicit_marker():
+    text = ('I looked at the available functions and the forecast endpoint fits '
+            'this question much better than answering from memory would, so:\n'
+            '```tool_code\n{"name": "get_weather", "arguments": {"city": "Cali"}}\n```\n'
+            'Once the result arrives I will summarise the conditions, compare them '
+            'with the seasonal averages for the region, and suggest what to wear.')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["arguments"]["city"] == "Cali"
+
+
+def test_parse_batches_jsonl_style_adjacent_calls():
+    """Two bare calls separated only by whitespace are a parallel batch, the
+    JSONL habit of models that ignore the documented array format."""
+    text = ('{"name": "fn1", "arguments": {"x": 1}}\n'
+            '{"name": "fn2", "arguments": {"y": 2}}')
+    result = parse_tool_calls(text, MULTI_VALID)
+    assert result is not None
+    assert [c["name"] for c in result] == ["fn1", "fn2"]
+
+
+def test_parse_prose_between_bare_objects_still_means_last_wins():
+    """Prose between two bare objects is the demo-then-real pattern, not JSONL."""
+    text = ('{"name": "get_weather", "arguments": {"city": "EXAMPLE"}}\n'
+            'That was the format. Now the real call:\n'
+            '{"name": "get_weather", "arguments": {"city": "Quito"}}')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["arguments"]["city"] == "Quito"
+
+
+# --- the new dialects stay behind the same allow-list ---
+
+def test_parse_react_shape_rejects_unoffered_action():
+    text = '{"action": "delete_everything", "action_input": {"confirm": true}}'
+    assert parse_tool_calls(text, VALID) is None
+
+
+def test_parse_python_literal_rejects_unoffered_name():
+    text = "{'name': 'delete_everything', 'arguments': {}}"
+    assert parse_tool_calls(text, VALID) is None
+
+
+def test_parse_tools_namespace_prefix_also_resolves():
+    text = '{"name": "tools.get_weather", "arguments": {"city": "Cali"}}'
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert result[0]["name"] == "get_weather"
+
+
+def test_parse_adjacent_call_and_data_do_not_batch():
+    """A JSONL run only groups when EVERY member is a call; here the valid
+    call still converts alone because it opens the message."""
+    text = ('{"name": "get_weather", "arguments": {"city": "Lima"}}\n'
+            '{"temp": 18}')
+    result = parse_tool_calls(text, VALID)
+    assert result is not None
+    assert len(result) == 1
+    assert result[0]["name"] == "get_weather"
+
+
+# --- tool_choice as an enforced contract, not a suggestion ---
+
+def test_allowed_names_narrows_to_the_forced_function():
+    from llm_libre.tool_emulator import allowed_names
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    tools = [WEATHER_TOOL, fn2]
+    forced = {"type": "function", "function": {"name": "get_weather"}}
+    assert allowed_names(tools, forced) == {"get_weather"}
+    assert allowed_names(tools, "auto") == {"get_weather", "fn2"}
+    assert allowed_names(tools, None) == {"get_weather", "fn2"}
+    assert allowed_names(tools, "none") == set()
+    unoffered = {"type": "function", "function": {"name": "ghost"}}
+    assert allowed_names(tools, unoffered) == set()
+
+
+def test_demands_call_variants():
+    from llm_libre.tool_emulator import demands_call
+    assert demands_call("required") is True
+    assert demands_call({"type": "function", "function": {"name": "f"}}) is True
+    assert demands_call("auto") is False
+    assert demands_call("none") is False
+    assert demands_call(None) is False
+    assert demands_call({"type": "function", "function": {}}) is False
+
+
+def test_detect_forced_function_ignores_calls_to_other_tools():
+    """With tool_choice forcing fn1, a call to fn2 is not the demanded call --
+    it must stay text so the gateway can treat the attempt as unmet."""
+    fn1 = {"type": "function", "function": {"name": "fn1", "parameters": {}}}
+    fn2 = {"type": "function", "function": {"name": "fn2", "parameters": {}}}
+    data = _response_with_content('{"name": "fn2", "arguments": {}}')
+    forced = {"type": "function", "function": {"name": "fn1"}}
+    assert detect_and_convert(data, [fn1, fn2], forced) is data
+
+
+def test_unmet_tool_demand():
+    from llm_libre.tool_emulator import unmet_tool_demand
+    prose = _response_with_content("It is sunny.")
+    assert unmet_tool_demand(prose, [WEATHER_TOOL], "required") is True
+    assert unmet_tool_demand(prose, [WEATHER_TOOL], "auto") is False
+    assert unmet_tool_demand(prose, [], "required") is False
+    called = detect_and_convert(
+        _response_with_content('{"name": "get_weather", "arguments": {"city": "X"}}'),
+        [WEATHER_TOOL], "required")
+    assert unmet_tool_demand(called, [WEATHER_TOOL], "required") is False
+
+
+# --- schema-aware argument coercion ---
+# A prompted model returns every scalar as a string more often than a native
+# one. Where the tool's own schema states the type and the conversion is
+# lossless, the gateway repairs it; anything ambiguous is left exactly as sent.
+
+TYPED_TOOL = {"type": "function", "function": {
+    "name": "typed",
+    "parameters": {"type": "object", "properties": {
+        "count": {"type": "integer"},
+        "flag": {"type": "boolean"},
+        "ratio": {"type": "number"},
+        "label": {"type": "string"},
+        "items": {"type": "array"},
+        "config": {"type": "object"},
+    }},
+}}
+
+
+def test_detect_coerces_argument_types_per_schema():
+    data = _response_with_content(
+        '{"name": "typed", "arguments": {"count": "5", "flag": "true", '
+        '"ratio": "0.5", "label": 7, "items": "[1, 2]", "config": "{\\"a\\": 1}"}}'
+    )
+    result = detect_and_convert(data, [TYPED_TOOL])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"count": 5, "flag": True, "ratio": 0.5,
+                    "label": "7", "items": [1, 2], "config": {"a": 1}}
+
+
+def test_detect_leaves_uncoercible_values_alone():
+    data = _response_with_content(
+        '{"name": "typed", "arguments": {"count": "five", "flag": "yes"}}'
+    )
+    result = detect_and_convert(data, [TYPED_TOOL])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"count": "five", "flag": "yes"}
+
+
+def test_detect_does_not_coerce_undeclared_parameters():
+    data = _response_with_content(
+        '{"name": "typed", "arguments": {"extra": "5"}}'
+    )
+    result = detect_and_convert(data, [TYPED_TOOL])
+    args = json.loads(result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"])
+    assert args == {"extra": "5"}
+
+
+# --- parallel_tool_calls handling in injection ---
+
+def test_inject_strips_parallel_tool_calls():
+    """An emulated provider may 400 on unknown fields; the knob cannot travel."""
+    body = {**BODY_WITH_TOOLS, "parallel_tool_calls": True}
+    result = inject_into_body(body)
+    assert "parallel_tool_calls" not in result
+
+
+def test_inject_parallel_false_instructs_a_single_call():
+    body = {**BODY_WITH_TOOLS, "parallel_tool_calls": False}
+    result = inject_into_body(body)
+    system = result["messages"][0]["content"]
+    assert "one function" in system.lower()
+    body_default = inject_into_body(BODY_WITH_TOOLS)
+    assert "at most one" not in body_default["messages"][0]["content"].lower()
+
+
+# --- tool results carry the function they answer ---
+
+SEARCH_TOOL = {"type": "function", "function": {
+    "name": "search_web",
+    "description": "Search the web",
+    "parameters": {"type": "object",
+                   "properties": {"query": {"type": "string"}},
+                   "required": ["query"]},
+}}
+
+
+def test_inject_labels_tool_results_with_their_function_name():
+    """With parallel calls in history, an unlabeled result is ambiguous: the
+    model cannot tell which answer belongs to which call."""
+    body = {
+        "model": "m",
+        "messages": [
+            {"role": "user", "content": "Weather in Lima and news about it"},
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function",
+                 "function": {"name": "get_weather", "arguments": '{"city": "Lima"}'}},
+                {"id": "c2", "type": "function",
+                 "function": {"name": "search_web", "arguments": '{"query": "Lima"}'}},
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": '{"temp": 18}'},
+            {"role": "tool", "tool_call_id": "c2", "content": '{"hits": []}'},
+        ],
+        "tools": [WEATHER_TOOL, SEARCH_TOOL],
+    }
+    result = inject_into_body(body)
+    tool_texts = [m["content"] for m in result["messages"]
+                  if m["role"] == "user" and m["content"].startswith("[Function result")]
+    assert len(tool_texts) == 2
+    assert "get_weather" in tool_texts[0]
+    assert "search_web" in tool_texts[1]
+
+
+def test_inject_tool_result_with_unknown_id_keeps_generic_label():
+    body = {
+        "model": "m",
+        "messages": [{"role": "tool", "tool_call_id": "ghost", "content": "data"}],
+        "tools": [WEATHER_TOOL],
+    }
+    result = inject_into_body(body)
+    last = result["messages"][-1]
+    assert last["content"].startswith("[Function result]")
 
 
 # --- live tests against the real DeepSeek proxy ---
