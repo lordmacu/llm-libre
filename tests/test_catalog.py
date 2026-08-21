@@ -624,12 +624,17 @@ def test_the_plugin_routes_keep_tools_and_vision_and_do_not_draw():
 
 def test_without_the_contract_grok_loses_every_image_route():
     """The exposure providers.yaml's fallback comment now names explicitly.
-    `default_capabilities` covers tools, vision and context; it carries no
-    `images`, so any state where parse_health returns None -- the proxy rolled
-    back, failing to start, a future contract version bump -- takes grok's only
-    three image routes away, with one WARNING and no alert. Asserted rather
-    than fixed: adding `images` to default_capabilities would reintroduce
-    exactly the stale hand-declaration the exceptions retirement removed."""
+    `default_capabilities` covers tools, vision, context and max_output; it
+    carries no `images`, so any state where grok-proxy ANSWERS /health but
+    parse_health returns None -- a rolled-back proxy with no `contract` key, a
+    version this gateway does not speak, a partial `capabilities` block --
+    takes grok's only three image routes away, with one WARNING and no alert.
+    (An UNREACHABLE /health is a different path and does not cost them:
+    probing carries over the last stored contract, or skips the provider.)
+
+    Asserted rather than fixed: adding `images` to default_capabilities would
+    reintroduce exactly the stale hand-declaration the exceptions retirement
+    removed."""
     without = _grok_routes(None)
     assert [r.model_id for r in without if r.capabilities.images] == []
     # ...and nothing ELSE is lost, which is why this degrades quietly: the

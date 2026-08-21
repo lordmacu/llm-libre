@@ -338,13 +338,21 @@ providers:
     #                         imagine-agent-mode-dev, imagine-agent-mode-grok-4-5
     #   WITHOUT a contract -> image routes: NONE
     #
-    # So any state in which `parse_health` returns None -- grok-proxy rolled
-    # back, failing to start, answering /health with something unparseable, or
-    # a future `contract:` version bump this gateway does not speak -- silently
-    # removes grok's ONLY three image routes. One WARNING is logged and no
-    # alert fires (a provider that had a stored contract and now publishes none
-    # is not yet an alerted transition). The other 14 routes survive intact on
-    # the declared tools/vision, so the degradation is quiet, not loud.
+    # So any state in which grok-proxy ANSWERS /health but `parse_health`
+    # returns None silently removes grok's ONLY three image routes. Verified,
+    # all three reaching `probing._read_contract`'s `ContractRead(None, False)`
+    # branch: a rolled-back proxy (no `contract:` key at all), a future
+    # `contract:` version this gateway does not speak, and a `capabilities`
+    # block missing any required key. One WARNING is logged and no alert fires
+    # -- a provider that HAD a stored contract and now publishes none is not
+    # yet an alerted transition. The other 14 routes survive intact on the
+    # declared tools/vision, so the degradation is quiet, not loud.
+    #
+    # An UNREACHABLE /health is a different, already-handled path and does NOT
+    # cost the image routes: `_read_contract` carries over the last good stored
+    # contract, or, with nothing stored, `_SKIP`s the provider and leaves the
+    # previous catalogue in place. The gap is specifically "answers, but not
+    # with a contract this gateway can read".
     #
     # `images` is deliberately NOT added to the fallback: a hand-declared
     # `images: true` here would be a stale snapshot claiming a capability grok
