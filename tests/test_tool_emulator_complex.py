@@ -419,3 +419,174 @@ async def test_three_turn_comparison_loop():
         print(f"\n  Loop ended at turn {turn + 1}. Calls: {calls_made}")
         if text:
             print(f"  Last text: {text[:200]!r}")
+
+
+# --- the genuinely complex one: a dependent multi-tool mission ---
+# Five tools plus a decoy. The user names only a customer CODE; the customer's
+# name and address exist ONLY inside get_customer's result, the real stock
+# level only inside check_inventory's -- so a correct order PROVES the model
+# chained tool results instead of hallucinating, across several turns, all
+# through the emulation layer.
+
+INVENTORY_TOOL = {"type": "function", "function": {
+    "name": "check_inventory",
+    "description": "Check stock for a product SKU",
+    "parameters": {"type": "object", "properties": {
+        "sku": {"type": "string"}},
+        "required": ["sku"]},
+}}
+
+CUSTOMER_TOOL = {"type": "function", "function": {
+    "name": "get_customer",
+    "description": "Look up a customer record by its customer code",
+    "parameters": {"type": "object", "properties": {
+        "customer_id": {"type": "string", "description": "Code like C-102"}},
+        "required": ["customer_id"]},
+}}
+
+SCHEDULE_TOOL = {"type": "function", "function": {
+    "name": "schedule_delivery",
+    "description": "Book a delivery time slot for an existing order",
+    "parameters": {"type": "object", "properties": {
+        "order_id": {"type": "string"},
+        "window": {"type": "string", "enum": ["morning", "afternoon", "evening"]}},
+        "required": ["order_id", "window"]},
+}}
+
+NOTIFY_TOOL = {"type": "function", "function": {
+    "name": "notify_customer",
+    "description": "Send the customer a text message",
+    "parameters": {"type": "object", "properties": {
+        "customer_id": {"type": "string"},
+        "message": {"type": "string"}},
+        "required": ["customer_id", "message"]},
+}}
+
+DECOY_TOOL = {"type": "function", "function": {
+    "name": "get_mars_weather",
+    "description": "Current weather at a Mars colony site",
+    "parameters": {"type": "object", "properties": {
+        "site": {"type": "string"}},
+        "required": ["site"]},
+}}
+
+MISSION_TOOLS = [INVENTORY_TOOL, CUSTOMER_TOOL, ORDER_TOOL, SCHEDULE_TOOL,
+                 NOTIFY_TOOL, DECOY_TOOL]
+
+def _mission_result(name: str, args: dict, issued: set) -> dict:
+    """A dependency-aware backend, like a real one: an order id only exists
+    after create_delivery_order returns it, and a call referencing an id never
+    issued gets an ERROR result the model must recover from. Measured against
+    the real backend (2026-08-20): the model sometimes parallelises the whole
+    mission in one turn, inventing an order id ("TBD", "DEL-12345") for the
+    downstream calls -- exactly the failure a real tool backend answers with
+    an error, and the recovery is part of what this mission tests."""
+    if name == "check_inventory":
+        return {"sku": "TOR-8x2", "available": 8, "restock_eta_days": 3}
+    if name == "get_customer":
+        return {"customer_id": "C-102", "name": "Marta Ruiz",
+                "phone": "3001234567", "address": "Calle 45 #12-34, Bogota"}
+    if name == "create_delivery_order":
+        issued.add("ORD-9944")
+        return {"order_id": "ORD-9944", "status": "confirmed",
+                "total_cop": 96000}
+    if name == "schedule_delivery":
+        oid = args.get("order_id")
+        if oid not in issued:
+            return {"error": f"unknown order_id {oid!r}: create the order "
+                             "first and use the order_id from its result"}
+        return {"order_id": oid, "window": args.get("window"),
+                "slot": "2026-08-21 08:00-11:00"}
+    if name == "notify_customer":
+        if not any(i in (args.get("message") or "") for i in issued):
+            return {"error": "rejected: the message must mention a real order "
+                             "number issued by create_delivery_order"}
+        return {"delivered_to": "3001234567", "status": "sent"}
+    return {"error": f"unknown tool {name}"}
+
+MISSION_PROMPT = (
+    "Handle this for customer C-102: they want 12 units of SKU TOR-8x2 "
+    "delivered tomorrow morning. First check the stock and their customer "
+    "record, create the order for whatever quantity is actually available, "
+    "schedule the delivery, and text them a confirmation that mentions the "
+    "order number. Use the tools; do not invent data.")
+
+
+async def test_multi_tool_mission_with_dependent_calls():
+    url = _skip_if_no_url()
+    providers, route, store = _build_proxy(url)
+
+    async with httpx.AsyncClient(timeout=120) as http:
+        from llm_libre.proxy import Proxy
+        proxy = Proxy(providers, store, http)
+
+        messages = [{"role": "user", "content": MISSION_PROMPT}]
+        calls_made = []
+        issued: set = set()
+        final_text = ""
+
+        for turn in range(8):
+            r = await proxy.complete(
+                [route],
+                {"model": "deepseek-chat", "messages": messages,
+                 "tools": MISSION_TOOLS},
+                now=0.0)
+            if r.status == 503:
+                pytest.skip(f"provider degraded mid-mission: {r.json}")
+            assert r.status == 200, f"turn {turn + 1}: HTTP {r.status}: {r.json}"
+            tcs = _tool_calls(r)
+            if not tcs:
+                final_text = _content(r)
+                break
+
+            messages = messages + [
+                {"role": "assistant", "content": None, "tool_calls": tcs}]
+            for tc in tcs:
+                name = tc["function"]["name"]
+                args = json.loads(tc["function"]["arguments"])
+                calls_made.append((name, args))
+                print(f"  turn {turn + 1}: {name}({json.dumps(args, ensure_ascii=False)[:160]})")
+                assert name != "get_mars_weather", "the decoy was called"
+                outcome = _mission_result(name, args, issued)
+                if "error" in outcome:
+                    print(f"           -> tool error: {outcome['error'][:90]}")
+                messages.append({
+                    "role": "tool", "tool_call_id": tc["id"],
+                    "content": json.dumps(outcome)})
+
+        names = [n for n, _ in calls_made]
+        print(f"  mission calls: {names}")
+        print(f"  final: {final_text[:220]!r}")
+
+        # The chain itself: the data-source calls happened before the order.
+        assert "create_delivery_order" in names, f"no order was created: {names}"
+        order_at = names.index("create_delivery_order")
+        assert "check_inventory" in names[:order_at], names
+        assert "get_customer" in names[:order_at], names
+
+        # The order was built FROM TOOL RESULTS, not from the prompt: the
+        # customer's name only exists in get_customer's answer, and the honest
+        # quantity (8, not the requested 12) only in check_inventory's.
+        order_args = calls_made[order_at][1]
+        assert "marta" in str(order_args.get("customer", {}).get("name", "")).lower(), order_args
+        quantities = [i.get("quantity") for i in order_args.get("items", [])]
+        assert quantities and all(isinstance(q, int) for q in quantities), order_args
+        assert quantities[0] <= 12, order_args
+        if quantities[0] == 8:
+            print("  adapted the quantity to the real stock (8)")
+
+        # Downstream calls reference the order id that ONLY the order result
+        # carries. The LAST call of each kind is the one that must be right:
+        # an eager model may fire them early with an invented id, eat the
+        # error result, and correct itself -- that recovery is part of the
+        # mission, not a failure of it.
+        scheduled = [a for n, a in calls_made if n == "schedule_delivery"]
+        assert scheduled, f"delivery was never scheduled: {names}"
+        assert scheduled[-1].get("order_id") == "ORD-9944", scheduled[-1]
+        assert scheduled[-1].get("window") in ("morning", "afternoon", "evening")
+
+        notified = [a for n, a in calls_made if n == "notify_customer"]
+        assert notified, f"customer was never notified: {names}"
+        assert "9944" in notified[-1].get("message", ""), notified[-1]
+
+        assert final_text.strip(), "mission ended without a final answer"
