@@ -1857,9 +1857,11 @@ and pass it to the stream:
         .listen(
 ```
 
-Careful: `model` now shadows nothing, but `_close` already has a local named
-`model` for the served model id. They are in different scopes; if the analyzer
-warns, rename this one `requested`.
+Careful: `_close` already has a local named `model` for the served model id, and
+these are NOT in different scopes — an earlier revision of this plan said they
+were and was wrong; it is a genuine redeclaration error. Name this one
+`requested`, and name the query result `conversationRow` rather than `row`,
+which collides the same way.
 
 - [ ] **Step 3: Run them to verify they pass**
 
@@ -2102,6 +2104,32 @@ button, a poll timer, or a double tap on the picker title. Whoever adds that
 either serialises the calls, or gives the failure to the caller as a return
 value instead of reading it off shared state. The second is the better shape and
 was not chosen here only because no consumer existed to shape it for.
+
+## Follow-up: the picker can write to the wrong conversation
+
+`_pickModel` reads `_conversationId` AFTER awaiting the sheet, so a conversation
+switch while the sheet is open writes the chosen override onto whichever
+conversation is current when the sheet closes — not the one it was opened from.
+
+Verified unreachable today, empirically rather than by argument: the modal
+barrier consumes the first tap outside the sheet and dismisses it, so the drawer
+cannot be reached while it is open. It becomes reachable the moment anything can
+change the conversation without dismissing the sheet — a deep link, a
+notification tap, a non-modal presentation, or a wider layout showing the drawer
+permanently.
+
+The fix is one line: capture the id before the await and use the captured value.
+
+```dart
+    final target = _conversationId;
+    final chosen = await showModelPicker(...);
+    if (chosen == null || !mounted) return;
+    await widget.db.updateModelOverride(target, chosen == 'auto' ? null : chosen);
+```
+
+Worth distinguishing from the other deferred items in this plan: those are
+cosmetic or inert, and this one silently writes a setting onto the wrong record.
+It is parked only because nothing can currently reach it.
 
 ## What this plan does not cover
 
