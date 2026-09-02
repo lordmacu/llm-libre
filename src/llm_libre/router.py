@@ -103,6 +103,10 @@ def _satisfies(r: Route, p: RouteRequest) -> bool:
         return False
     if p.needs_translate and not c.translate:
         return False
+    # Unlike the four above, this one arrives from the client's `x_requires`:
+    # search is a property of a CHAT route, not an endpoint of its own.
+    if p.needs_search and not c.search:
+        return False
     if p.min_context and c.context < p.min_context:
         return False
     return True

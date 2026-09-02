@@ -38,7 +38,8 @@ def test_as_wire_emits_the_spanish_keys_the_error_bodies_use():
     wire = RouteRequest(model="x", needs_tools=True, min_context=1000).as_wire()
     assert set(wire) == {"model", "needs_tools", "needs_vision", "needs_images",
                          "needs_audio_speech", "needs_audio_transcription",
-                         "needs_translate", "min_context", "profile", "allow_paid"}
+                         "needs_translate", "needs_search", "min_context", "profile",
+                         "allow_paid"}
     assert wire["model"] == "x"
     assert wire["needs_tools"] is True
     assert wire["min_context"] == 1000

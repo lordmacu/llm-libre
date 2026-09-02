@@ -1669,3 +1669,49 @@ def test_health_degrades_a_malformed_auth_block_instead_of_raising(state_client)
     entry = r.json()["providers"]["x"]
     assert entry["auth_mode"] is None
     assert entry["reported_capabilities"] == {}
+
+
+# --- x_requires reached only two flags (2026-09-01) -------------------------
+#
+# `parse_request` consumed the parsed set for `tools` and `vision` and dropped
+# everything else on the floor, in silence, even though RouteRequest already had
+# the `needs_*` fields and `_satisfies` already had the branches -- they were only
+# ever set by the capability ENDPOINTS. And `search` had no flag at all.
+#
+# Measured against the live gateway before the fix: `x_requires: ["translate"]`
+# was served by grok/grok-plugins-4p6-powerpoint (translate=false), and
+# `x_requires: ["images","translate","search"]` by
+# kilo/nvidia/nemotron-3.5-lightning:free (false on all three). A requirement that
+# is quietly ignored is worse than one that is rejected: the caller believes it
+# was honoured.
+
+def test_x_requires_search_reaches_its_flag():
+    p = parse_request({"model": "auto", "x_requires": ["search"]})
+    assert p.needs_search is True
+
+
+@pytest.mark.parametrize("name", ["images", "audio_speech", "audio_transcription",
+                                  "translate"])
+def test_an_endpoint_only_capability_in_x_requires_returns_400(name):
+    # These four are decided by the URL that was called and by nothing a client
+    # can put in a body -- see the comment above `needs_images`. Asking for one
+    # from a chat body is a category error, and saying so is the whole point:
+    # the previous behaviour accepted the word and ignored it.
+    with pytest.raises(HTTPException) as exc:
+        parse_request({"model": "auto", "x_requires": [name]})
+    assert exc.value.status_code == 400
+    assert exc.value.detail["field"] == "x_requires"
+
+
+def test_an_unknown_capability_in_x_requires_returns_400_naming_the_field():
+    # A typo used to be indistinguishable from a satisfied requirement.
+    with pytest.raises(HTTPException) as exc:
+        parse_request({"model": "auto", "x_requires": ["vison"]})
+    assert exc.value.status_code == 400
+    assert exc.value.detail["field"] == "x_requires"
+
+
+def test_the_two_capabilities_that_already_worked_keep_working():
+    p = parse_request({"model": "auto", "x_requires": ["tools", "vision"]})
+    assert p.needs_tools and p.needs_vision
+    assert p.needs_search is False

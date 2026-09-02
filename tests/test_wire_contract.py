@@ -189,7 +189,7 @@ def test_error_body_exposes_the_request_fields(client):
     assert set(detail["request"]) == {
         "model", "needs_tools", "needs_vision", "needs_images",
         "needs_audio_speech", "needs_audio_transcription", "needs_translate",
-        "min_context", "profile", "allow_paid",
+        "needs_search", "min_context", "profile", "allow_paid",
     }
 
 

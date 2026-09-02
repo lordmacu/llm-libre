@@ -2,9 +2,11 @@ from llm_libre.models import Capabilities, Metrics, Route, RouteRequest
 from llm_libre.router import order_routes
 
 
-def r(model, provider="kilo", tier="free", tools=True, vision=False, context=100000):
+def r(model, provider="kilo", tier="free", tools=True, vision=False, context=100000,
+      search=False):
     return Route(provider, model, tier,
-                 Capabilities(tools=tools, vision=vision, context=context, max_output=4096))
+                 Capabilities(tools=tools, vision=vision, context=context, max_output=4096,
+                              search=search))
 
 
 def m(quality=0.8, reliability=0.9, ttft=500, cooldown=0.0, measured_at=1000.0):
@@ -251,3 +253,14 @@ def test_a_genuinely_discovered_chatgpt_route_routes_straight_when_asked_for():
         priority=0, default_capabilities=defaults)
     out = order_routes(discovered, {}, RouteRequest(model="gpt-5-3-mini"), now=0.0)
     assert [x.model_id for x in out] == ["gpt-5-3-mini"]
+
+
+# `search` was the one capability `Capabilities` declared ("web_search on chat
+# completions") that `RouteRequest` had no flag for and `_satisfies` had no branch
+# for, so `x_requires: ["search"]` could never drop a single route. Measured live
+# 2026-09-01: it answered from grok/grok-plugins-4p6-powerpoint, whose /v1/ranking
+# row says search=false.
+def test_routes_without_search_are_dropped_when_search_is_asked_for():
+    routes = [r("busca:free", search=True), r("ciega:free", search=False)]
+    out = order_routes(routes, {}, RouteRequest(needs_search=True), now=0.0)
+    assert [x.model_id for x in out] == ["busca:free"]

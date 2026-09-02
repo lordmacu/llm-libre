@@ -49,6 +49,14 @@ class Capabilities:
     search: bool = False                 # web_search on chat completions
 
 
+# What `x_requires` in a chat body is allowed to name. Deliberately NOT every
+# capability: the endpoint ones (images, audio_speech, audio_transcription,
+# translate) are decided by the URL that was called, never by the body. Anything
+# outside this set is a 400 -- a requirement that is silently ignored is worse
+# than one that is rejected, because the caller believes it was honoured.
+REQUIRABLE_FROM_BODY = frozenset({"tools", "vision", "search"})
+
+
 @dataclass(frozen=True)
 class Route:
     provider: str
@@ -98,6 +106,16 @@ class RouteRequest:
     needs_audio_speech: bool = False
     needs_audio_transcription: bool = False
     needs_translate: bool = False
+    # The ONE capability flag a chat body may set, and the exception proves the
+    # rule above rather than weakening it: the four before this are endpoint
+    # capabilities -- the endpoints behind them take no model -- so letting a body
+    # ask for one would be asking a chat request to be served by /v1/translate.
+    # `search` is not an endpoint; `Capabilities.search` is documented as
+    # "web_search on chat completions", i.e. something a CHAT route either does or
+    # does not do, exactly like tools and vision. It was declared on Capabilities,
+    # published on /v1/ranking for 29 routes, and had no flag here and no branch in
+    # `_satisfies`, so `x_requires: ["search"]` could not drop a single route.
+    needs_search: bool = False
     min_context: int = 0
     profile: str = "balanced"       # "fast" | "balanced" | "strong"
     allow_paid: bool = True
@@ -120,6 +138,7 @@ class RouteRequest:
             "needs_audio_speech": self.needs_audio_speech,
             "needs_audio_transcription": self.needs_audio_transcription,
             "needs_translate": self.needs_translate,
+            "needs_search": self.needs_search,
             "min_context": self.min_context,
             "profile": self.profile,
             "allow_paid": self.allow_paid,

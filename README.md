@@ -119,7 +119,7 @@ that does not know them ignores them without breaking:
 
 | Field | What it does |
 |---|---|
-| `x_requires` | List of required capabilities, e.g. `["tools", "vision"]` — equivalent to asking for them by alias |
+| `x_requires` | Capabilities the route must have: `tools`, `vision`, `search` — equivalent to asking for them by alias. **Any other name is a 400**, including `images`, `audio_speech`, `audio_transcription` and `translate`: those are decided by the endpoint you called, never by a chat body |
 | `x_min_context` | Minimum context window in tokens; discards routes below it |
 | `x_allow_paid` | `false` disables the paid tier (MiniMax) for that one request |
 | `x_raw` | `true` disables reasoning trimming (`<think>`, etc.) and returns `content` exactly as the provider sent it |

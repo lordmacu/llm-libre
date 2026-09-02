@@ -11,8 +11,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from llm_libre.assets import content_disposition, localise, localise_completion
 from llm_libre.auth import RateLimiter, client_ip
 
-from llm_libre.models import (NEUTRAL_METRICS, UNKNOWN_BUDGET, RequestTrace,
-                              RouteRequest)
+from llm_libre.models import (NEUTRAL_METRICS, REQUIRABLE_FROM_BODY, UNKNOWN_BUDGET,
+                              RequestTrace, RouteRequest)
 from llm_libre.openapi import (CHAT_COMPLETIONS_DOCS, DESCRIPTION, HEALTH_DOCS,
                                ASSETS_DOCS, IMAGES_DOCS, MODELS_DOCS, RANKING_DOCS, SUMMARY, TITLE,
                                USAGE_DOCS, VERSION, customise_openapi)
@@ -194,7 +194,17 @@ def parse_request(body: dict) -> RouteRequest:
         value = body.get("x_requires") or []
         if isinstance(value, str):
             value = [value]
-        return set(value)
+        asked = set(value)
+        # Every name is checked, not just the two that used to be read. Before
+        # this, `parse_request` consumed the set for `tools` and `vision` and
+        # dropped the rest without a word, so `x_requires: ["translate"]` was
+        # served by a route with translate=false and the caller had no way to
+        # know. ValueError, not HTTPException, so `_read_field` produces the
+        # same 400 shape every other malformed field produces.
+        unknown = asked - REQUIRABLE_FROM_BODY
+        if unknown:
+            raise ValueError(f"not requirable from a chat body: {sorted(unknown)}")
+        return asked
     required = _read_field(
         "x_requires", body.get("x_requires"),
         "x_requires must be a string or a list of strings",
@@ -210,6 +220,7 @@ def parse_request(body: dict) -> RouteRequest:
         model=model,
         needs_tools=needs_tools or "tools" in required,
         needs_vision=needs_vision or "vision" in required,
+        needs_search="search" in required,
         min_context=min_context,
         profile=profile,
         allow_paid=bool(body.get("x_allow_paid", True)),
