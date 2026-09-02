@@ -1495,8 +1495,15 @@ void main() {
           final body = jsonDecode(await bodyStream.bytesToString())
               as Map<String, dynamic>;
           sentMessages = body['messages'] as List<dynamic>;
+          // Must emit real content: a stream of nothing but [DONE] finishes the
+          // new placeholder empty too, leaving TWO empty rows and making the
+          // assertion below about the pre-seeded one meaningless.
           return http.StreamedResponse(
-              Stream.fromIterable(['data: [DONE]\n\n'].map(utf8.encode)), 200);
+              Stream.fromIterable([
+                'data: {"model":"turbo","choices":[{"delta":{"content":"ok"}}]}\n\n',
+                'data: [DONE]\n\n',
+              ].map(utf8.encode)),
+              200);
         }),
       ),
       conversationId: id,
@@ -1675,15 +1682,28 @@ Create `lib/features/chat/chat_screen.dart`:
 import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 
+import '../../api/llm_client.dart';
 import '../../data/db.dart';
 import 'chat_controller.dart';
 import 'conversation_drawer.dart';
 
+/// Owns which conversation is open, because a [ChatController] is bound to one
+/// conversation for its lifetime. Switching conversations therefore means
+/// replacing the controller, which is why this screen builds it rather than
+/// receiving it.
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.db, required this.controller});
+  const ChatScreen({
+    super.key,
+    required this.db,
+    required this.client,
+    required this.conversationId,
+  });
 
   final AppDb db;
-  final ChatController controller;
+  final LlmClient client;
+
+  /// The conversation to open first. The drawer changes it from there.
+  final String conversationId;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -1691,16 +1711,41 @@ class ChatScreen extends StatefulWidget {
 
 class _ChatScreenState extends State<ChatScreen> {
   final _input = TextEditingController();
+  late String _conversationId;
+  late ChatController _controller;
 
   @override
   void initState() {
     super.initState();
-    widget.controller.addListener(_onControllerChanged);
+    _conversationId = widget.conversationId;
+    _controller = _newController();
+  }
+
+  ChatController _newController() =>
+      ChatController(
+        db: widget.db,
+        client: widget.client,
+        conversationId: _conversationId,
+      )..addListener(_onControllerChanged);
+
+  /// Disposing the outgoing controller cancels any stream still writing into
+  /// the conversation being left, so an answer cannot keep arriving into a
+  /// screen nobody is looking at.
+  void _open(String id) {
+    if (id == _conversationId) return;
+    final outgoing = _controller;
+    setState(() {
+      _conversationId = id;
+      _controller = _newController();
+    });
+    outgoing.removeListener(_onControllerChanged);
+    outgoing.dispose();
   }
 
   @override
   void dispose() {
-    widget.controller.removeListener(_onControllerChanged);
+    _controller.removeListener(_onControllerChanged);
+    _controller.dispose();
     _input.dispose();
     super.dispose();
   }
@@ -1709,15 +1754,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final busy = widget.controller.busy;
+    final busy = _controller.busy;
     return Scaffold(
       appBar: AppBar(title: const Text('llm-libre')),
-      drawer: ConversationDrawer(db: widget.db),
+      drawer: ConversationDrawer(db: widget.db, onOpen: _open),
       body: Column(
         children: [
           Expanded(
             child: StreamBuilder<List<Message>>(
-              stream: widget.db.watchMessages(widget.controller.conversationId),
+              stream: widget.db.watchMessages(_conversationId),
               builder: (context, snapshot) {
                 final messages = snapshot.data ?? const <Message>[];
                 return ListView.builder(
@@ -1749,11 +1794,11 @@ class _ChatScreenState extends State<ChatScreen> {
                     icon: Icon(busy ? Icons.stop : Icons.send),
                     onPressed: () {
                       if (busy) {
-                        widget.controller.stop();
+                        _controller.stop();
                       } else {
                         final text = _input.text;
                         _input.clear();
-                        widget.controller.send(text);
+                        _controller.send(text);
                       }
                     },
                   ),
@@ -1946,8 +1991,13 @@ Add to `ChatController`, and call it from `_close` when `status == 'ok'`:
       );
       final title = answer.content.trim();
       if (title.isNotEmpty) await db.renameConversation(conversationId, title);
-    } on LlmError {
-      // Leave it untitled.
+    } on Object {
+      // Deliberately catches EVERYTHING, not just LlmError. The promise this
+      // method makes is that a failure to name a conversation never surfaces as
+      // a chat failure, and `on LlmError` does not keep it: a malformed body
+      // throws FormatException, which escapes, which leaves `_close` unfinished
+      // and `send()`'s future hanging forever. A cosmetic feature must not be
+      // able to wedge the send path. Leave it untitled and move on.
     }
   }
 ```
@@ -1957,6 +2007,29 @@ In `_close`, after `db.finishMessage(...)`:
 ```dart
       if (status == 'ok') await _titleIfUnnamed();
 ```
+
+- [ ] **Step 6c: Rewire `main.dart`**
+
+`ChatScreen` now owns its controller, so `main.dart` resolves only WHICH
+conversation to open and hands the id over:
+
+```dart
+    return ChatScreen(
+      db: widget.db,
+      client: widget.client,
+      conversationId: id,
+    );
+```
+
+Picking that conversation is the one genuinely asynchronous step at startup —
+creating a fresh one writes a row — unlike the key and base URL, which are
+compile-time constants. So a brief loading state lives here and nowhere else.
+Reopen the most recently active conversation, in the same order the drawer
+lists them, and create one only when the device has none yet.
+
+`test/widget_test.dart` asserts that an unconfigured build shows
+`rebuild with --dart-define-from-file=.env`. That path must keep working: it is
+reached before any of this, straight from `Config.isConfigured`.
 
 - [ ] **Step 7: Delete the placeholder screen**
 
