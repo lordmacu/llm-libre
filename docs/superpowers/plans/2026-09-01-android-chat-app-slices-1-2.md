@@ -2186,30 +2186,34 @@ lists them, and create one only when the device has none yet.
 `rebuild with --dart-define-from-file=.env`. That path must keep working: it is
 reached before any of this, straight from `Config.isConfigured`.
 
-- [ ] **Step 6d: Prove the screen actually shows the arriving answer**
+### Known gap: the streaming wire is not covered by a test
 
-Add to `test/features/chat_screen_test.dart` a widget test that pumps
-`ChatScreen` with a client whose stream emits one delta and then holds open, and
-asserts the delta's text is on screen **before** the answer finishes.
+**Parked deliberately, with evidence.** `ChatController` is proven by two tests
+to hold the arriving text in `streamingText`, and `ChatScreen`'s `itemBuilder`
+is confirmed by reading to pass it as `liveText` to the row being streamed. What
+no test covers is the wire between them: **deleting the `liveText:` argument
+would fail nothing in this suite.**
 
-The acceptance criterion is not "it passes". It is: **delete the `liveText:`
-argument from `itemBuilder`, or revert `_Turn` to `GptMarkdown(message.content)`,
-and this test must FAIL.** Verify that by actually doing it, recording the
-failure, and putting the wiring back. A test that still passes with the wire cut
-is not covering the wire, and this is the precise defect that took three rounds
-to find: the controller held the text and nothing rendered it, while thirty
-tests stayed green.
+That is the exact shape of the defect it guards against — the controller was
+correct, the text existed, thirty tests were green, and nothing rendered it.
 
-Two mechanics worth knowing before you fight them:
+Two attempts were made to close it, and both failed on the test harness rather
+than on the code. What was learned, so a third attempt does not repeat it:
 
-- `GptMarkdown` renders into `RichText`, not a plain `Text`, so a matcher needs
-  `find.textContaining('...', findRichText: true)`.
-- The mock's stream runs on the real event loop, which `tester.pump()` does not
-  advance. `tester.runAsync()` is the usual way to let real async work proceed
-  inside a widget test; pump afterwards to rebuild.
+- A widget test that drives a real streamed response through
+  `MockClient.streaming` and waits with `tester.runAsync()` plus real delays
+  makes `flutter test` die with `Bad state: Cannot close sink while adding
+  stream` from `flutter_tools/src/test/flutter_platform.dart`, after running for
+  over five minutes. The drawer-switch test in the same file finishes in three
+  seconds, so it is specific to driving the stream, not to the screen.
+- Replacing the real delays with a `StreamController` the test feeds, pumping
+  with no `runAsync` at all, also hangs. So the obstacle is not the waiting
+  strategy.
 
-If those two turn out not to be enough, say what you tried and what the failure
-was rather than weakening the assertion.
+A third attempt should start by finding out WHY the harness deadlocks — most
+likely how drift's live query emits under `flutter_test`'s fake clock — rather
+than trying another synchronisation idiom. Until then the wire is verified by
+reading, which is weaker than a test and is recorded here as such.
 
 - [ ] **Step 7: Delete the placeholder screen**
 
