@@ -830,6 +830,24 @@ void main() {
     final client = clientReturning(http.Response('{}', 200));
     expect(await client.fetch(), isEmpty);
   });
+
+  test('one malformed row does not cost the whole catalogue', () async {
+    // `fromRanking` tolerates a missing field but not one of the wrong type,
+    // and the picker going blank because a single row went strange is a worse
+    // failure than that row being absent from it.
+    final client = clientReturning(http.Response.bytes(
+      utf8.encode(jsonEncode({
+        'routes': [
+          {'key': 'p/good', 'tier': 'free', 'context': 32000},
+          {'key': 12345, 'tier': 'free', 'context': 32000}, // key is not a String
+          {'key': 'p/alsogood', 'tier': 'free', 'context': 'lots'}, // context is not a num
+          {'key': 'q/good', 'tier': 'free', 'context': 8000},
+        ]
+      })),
+      200,
+    ));
+    expect((await client.fetch()).map((r) => r.key), ['p/good', 'q/good']);
+  });
 }
 ```
 
@@ -877,10 +895,22 @@ class CatalogClient {
     }
     final json = jsonDecode(text) as Map<String, dynamic>;
     final rows = json['routes'] as List? ?? const [];
-    return [
-      for (final row in rows)
-        if (row is Map<String, dynamic>) RouteInfo.fromRanking(row),
-    ];
+    final routes = <RouteInfo>[];
+    for (final row in rows) {
+      if (row is! Map<String, dynamic>) continue;
+      try {
+        routes.add(RouteInfo.fromRanking(row));
+      } on TypeError {
+        // One malformed row costs one model in the picker, not the whole
+        // picker. `fromRanking` tolerates a MISSING field by design -- this
+        // endpoint has gained fields before -- but a field present with the
+        // wrong type throws, and hardening fifteen casts individually would
+        // trade a crash for fifteen silent defaults. Skipping the row keeps
+        // the failure proportionate and visible in what is offered.
+        continue;
+      }
+    }
+    return routes;
   }
 }
 ```
@@ -1234,10 +1264,27 @@ git commit -m "feat(data): cache the route catalogue, and keep it across upgrade
     );
     expect(await store.routes(now: DateTime.utc(2026)), isEmpty);
   });
+
+  test('a non-JSON 200 does not escape as a raw FormatException', () async {
+    // `fetch()` decodes the body without guarding the shape, so a proxy or an
+    // error page answering 200 with HTML raises FormatException, not LlmError.
+    // This class promises it never throws; `on LlmError` alone would break that
+    // promise, which is precisely how a swallow-too-narrow shipped a hang once.
+    final t = DateTime.utc(2026, 9, 2, 10);
+    await db.saveRoutes([_route('p/kept')], t);
+    final store = CatalogStore(
+      db: db,
+      client: _clientThrowing(const FormatException('not json')),
+    );
+    final routes = await store.routes(now: t.add(const Duration(hours: 2)));
+    expect(routes.single.key, 'p/kept');
+    expect(store.lastFailure, isA<Disconnected>());
+  });
 ```
 
 Write `_clientYielding` and `_clientThrowing` as `CatalogClient` subclasses
-overriding `fetch()`; a `MockClient` would test the transport again rather than
+overriding `fetch()` — note `_clientThrowing` must accept any `Object`, not just
+an `LlmError`, since one test hands it a `FormatException`; a `MockClient` would test the transport again rather than
 the policy, which Task 5 already covers.
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1288,8 +1335,16 @@ class CatalogStore {
       lastFailure = null;
       await db.saveRoutes(fresh, at);
       return fresh;
-    } on LlmError catch (e) {
-      lastFailure = e;
+    } on Object catch (e) {
+      // Catches EVERYTHING, not just LlmError, because the promise in this
+      // class's doc comment is that it never throws — and `on LlmError` does
+      // not keep that promise. `fetch()` raises a bare FormatException if the
+      // gateway answers 200 with a body that is not JSON, which is exactly what
+      // a proxy or an error page in front of it produces. The same mistake in
+      // `_titleIfUnnamed` shipped a hang: a cosmetic feature able to wedge the
+      // path that calls it. Wrapped the way the chat controller already wraps
+      // its own stream errors, so `lastFailure` stays one type.
+      lastFailure = e is LlmError ? e : Disconnected(e);
       return db.cachedRoutes();
     }
   }
