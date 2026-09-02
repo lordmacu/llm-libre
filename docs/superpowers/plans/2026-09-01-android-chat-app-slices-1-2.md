@@ -1528,6 +1528,55 @@ void main() {
     expect(stored.where((m) => m.content.isEmpty).length, 1);
   });
 
+  test('disposing mid-answer keeps what arrived instead of stranding the row',
+      () async {
+    // Switching conversations disposes the controller. Without the fallback in
+    // dispose(), the buffered text was discarded AND the row stayed
+    // 'streaming' forever, so reopening that conversation showed a message
+    // frozen half-written. Neither the network nor a timer is waited on here:
+    // the first delta is awaited through the notifier, and the row is then
+    // polled until it settles, so the test cannot flake on timing.
+    final id = await db.createConversation();
+    final held = Completer<void>();
+    final controller = ChatController(
+      db: db,
+      client: LlmClient(
+        baseUrl: 'https://gw.test',
+        apiKey: 'k',
+        httpClient: MockClient.streaming((_, __) async => http.StreamedResponse(
+              Stream.multi((c) async {
+                c.add(utf8.encode(
+                    'data: {"choices":[{"delta":{"content":"half"}}]}\n\n'));
+                await held.future; // the answer never finishes arriving
+                await c.close();
+              }),
+              200,
+            )),
+      ),
+      conversationId: id,
+    );
+
+    final firstDelta = Completer<void>();
+    controller.addListener(() {
+      if (!firstDelta.isCompleted) firstDelta.complete();
+    });
+    unawaited(controller.send('hi'));
+    await firstDelta.future;
+
+    controller.dispose();
+
+    // dispose() cannot await its own write, so wait for the row to settle.
+    Message? row;
+    for (var i = 0; i < 100 && (row == null || row.status == 'streaming'); i++) {
+      row = (await db.watchMessages(id).first).last;
+      if (row.status != 'streaming') break;
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(row!.content, 'half');
+    expect(row.status, 'partial');
+    held.complete();
+  });
+
   test('a failure leaves the partial text marked, not discarded', () async {
     final id = await db.createConversation();
     final controller = ChatController(
@@ -1591,6 +1640,7 @@ class ChatController extends ChangeNotifier {
   final String conversationId;
 
   StreamSubscription<ChatDelta>? _subscription;
+  bool _disposed = false;
   int? _openRow;
   String _buffer = '';
   String? _model;
@@ -1657,20 +1707,32 @@ class ChatController extends ChangeNotifier {
   }
 
   Future<void> _close(String status) async {
+    // Claimed synchronously, before any await, so a stop() racing a naturally
+    // firing onDone cannot both find a row and write it twice.
     final row = _openRow;
+    _openRow = null;
+    if (row == null) return;
+
     await _subscription?.cancel();
     _subscription = null;
-    _openRow = null;
-    if (row != null) {
-      await db.finishMessage(row,
-          content: _buffer, status: status, modelUsed: _model);
-    }
-    notifyListeners();
+    await db.finishMessage(row,
+        content: _buffer, status: status, modelUsed: _model);
+    if (status == 'ok' && !_disposed) await _titleIfUnnamed();
+    // Titling is a full network round trip, and the user can switch away or
+    // leave during it. Notifying a disposed ChangeNotifier throws.
+    if (!_disposed) notifyListeners();
   }
 
   @override
   void dispose() {
-    _subscription?.cancel();
+    _disposed = true;
+    // Persist whatever already arrived, exactly as stop() does. dispose() cannot
+    // await, but the write does not need this object alive -- only
+    // notifyListeners() does, and _close skips it once disposed. Without this,
+    // switching conversations mid-answer discarded the buffered text AND left
+    // the row stuck at status 'streaming' forever, so reopening that
+    // conversation showed a message frozen half-written.
+    if (_openRow != null) unawaited(_close('partial'));
     super.dispose();
   }
 }
@@ -1721,11 +1783,18 @@ class _ChatScreenState extends State<ChatScreen> {
   late String _conversationId;
   late ChatController _controller;
 
+  /// Held in state rather than built in `build()`. Every streamed token calls
+  /// notifyListeners, which rebuilds; creating the query inline there would
+  /// make StreamBuilder tear down and re-subscribe drift's live query on every
+  /// delta.
+  late Stream<List<Message>> _messages;
+
   @override
   void initState() {
     super.initState();
     _conversationId = widget.conversationId;
     _controller = _newController();
+    _messages = widget.db.watchMessages(_conversationId);
   }
 
   ChatController _newController() =>
@@ -1738,14 +1807,20 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Disposing the outgoing controller cancels any stream still writing into
   /// the conversation being left, so an answer cannot keep arriving into a
   /// screen nobody is looking at.
-  void _open(String id) {
+  Future<void> _open(String id) async {
     if (id == _conversationId) return;
     final outgoing = _controller;
+    outgoing.removeListener(_onControllerChanged);
+    // Awaited, so a half-arrived answer is persisted before the screen moves
+    // on. dispose() has a fire-and-forget fallback for app teardown, where
+    // there is nothing left to await from.
+    await outgoing.stop();
+    if (!mounted) return;
     setState(() {
       _conversationId = id;
       _controller = _newController();
+      _messages = widget.db.watchMessages(_conversationId);
     });
-    outgoing.removeListener(_onControllerChanged);
     outgoing.dispose();
   }
 
@@ -1769,7 +1844,7 @@ class _ChatScreenState extends State<ChatScreen> {
         children: [
           Expanded(
             child: StreamBuilder<List<Message>>(
-              stream: widget.db.watchMessages(_conversationId),
+              stream: _messages,
               builder: (context, snapshot) {
                 final messages = snapshot.data ?? const <Message>[];
                 return ListView.builder(
