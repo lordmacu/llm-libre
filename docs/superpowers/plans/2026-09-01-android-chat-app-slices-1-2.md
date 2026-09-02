@@ -1471,6 +1471,49 @@ void main() {
     expect(stored.last.modelUsed, 'turbo');
   });
 
+  test('an empty row from an earlier turn is not sent as context', () async {
+    // watchMessages returns every row, placeholder and all. Task 9's review
+    // flagged this as a trap baked into the shared interface: without the
+    // filter, the second message of a conversation carries an empty assistant
+    // turn to the gateway, which is meaningless as context and which some
+    // providers reject outright.
+    final id = await db.createConversation();
+    await db.addMessage(conversationId: id, role: 'user', content: 'first');
+    final dead = await db.addMessage(
+        conversationId: id, role: 'assistant', content: '', status: 'partial');
+    await db.finishMessage(dead, content: '', status: 'partial');
+
+    List<dynamic>? sentMessages;
+    final controller = ChatController(
+      db: db,
+      client: LlmClient(
+        baseUrl: 'https://gw.test',
+        apiKey: 'k',
+        // MockClient.streaming hands the request body over as its second
+        // argument, so the outgoing turns can be read directly.
+        httpClient: MockClient.streaming((request, bodyStream) async {
+          final body = jsonDecode(await bodyStream.bytesToString())
+              as Map<String, dynamic>;
+          sentMessages = body['messages'] as List<dynamic>;
+          return http.StreamedResponse(
+              Stream.fromIterable(['data: [DONE]\n\n'].map(utf8.encode)), 200);
+        }),
+      ),
+      conversationId: id,
+    );
+    await controller.send('second');
+
+    expect(sentMessages, isNotNull);
+    expect(sentMessages!.any((m) => (m as Map)['content'] == ''), isFalse,
+        reason: 'an empty assistant turn reached the gateway');
+    expect(sentMessages!.map((m) => (m as Map)['content']),
+        containsAll(<String>['first', 'second']));
+
+    // The empty row still exists for the UI to render as an interrupted answer.
+    final stored = await db.watchMessages(id).first;
+    expect(stored.where((m) => m.content.isEmpty).length, 1);
+  });
+
   test('a failure leaves the partial text marked, not discarded', () async {
     final id = await db.createConversation();
     final controller = ChatController(
@@ -1547,10 +1590,15 @@ class ChatController extends ChangeNotifier {
     await db.addMessage(
         conversationId: conversationId, role: 'user', content: text.trim());
 
+    // Empty rows never go out. This query returns every message including the
+    // assistant placeholder inserted below and any row a stopped or dropped
+    // stream left with no text; sending an empty assistant turn as context is
+    // meaningless and some providers reject it outright. Partial answers DO go
+    // out -- the user saw them on screen and may refer to them.
     final history = await db.watchMessages(conversationId).first;
     final turns = [
       for (final m in history)
-        ChatMessage(role: m.role, content: m.content),
+        if (m.content.isNotEmpty) ChatMessage(role: m.role, content: m.content),
     ];
 
     _buffer = '';
