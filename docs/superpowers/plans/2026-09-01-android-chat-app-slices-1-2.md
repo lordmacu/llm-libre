@@ -1494,7 +1494,14 @@ void main() {
         httpClient: MockClient.streaming((request, bodyStream) async {
           final body = jsonDecode(await bodyStream.bytesToString())
               as Map<String, dynamic>;
-          sentMessages = body['messages'] as List<dynamic>;
+          // A send makes TWO requests through this same client: the streamed
+          // chat turn, and then a plain completion that names the conversation.
+          // This test is about the chat turn, so it captures that one by its
+          // `stream` flag; capturing unconditionally lets the titling request
+          // overwrite the answer before the assertions run.
+          if (body['stream'] == true) {
+            sentMessages = body['messages'] as List<dynamic>;
+          }
           // Must emit real content: a stream of nothing but [DONE] finishes the
           // new placeholder empty too, leaving TWO empty rows and making the
           // assertion below about the pre-seeded one meaningless.
