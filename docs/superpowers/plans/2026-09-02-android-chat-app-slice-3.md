@@ -38,6 +38,8 @@ whose "Follow-ups carried into the next slice" section this plan discharges).
   slash only; `split('/')` is a bug.
 - Never let `pub add` resolve a pinned dependency to latest.
 - Run `fvm dart format lib test` before every commit.
+- To run one test by name the flag is `--plain-name`, not `-n`; `flutter test`
+  has no `-n`.
 - App repo is `~/llm-libre-chat`; run Flutter as `fvm flutter <cmd>` from inside
   it. Commits authored `lordmacu <10134930+lordmacu@users.noreply.github.com>`,
   no `Co-Authored-By` trailer.
@@ -135,7 +137,7 @@ rebuilds. Fixing it after the picker means shipping the door open.
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `fvm flutter test test/features/chat_controller_test.dart -n "does not resume"`
+Run: `fvm flutter test test/features/chat_controller_test.dart --plain-name "does not resume"`
 Expected: FAIL — a row left at `streaming`, or a doubled buffer.
 
 - [ ] **Step 3: Replace the flag check with an identity check**
@@ -237,7 +239,7 @@ several providers.
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `fvm flutter test test/api/llm_client_stream_test.dart -n "carries the route"`
+Run: `fvm flutter test test/api/llm_client_stream_test.dart --plain-name "carries the route"`
 Expected: FAIL — `The getter 'route' isn't defined for the type 'ChatDelta'`.
 
 - [ ] **Step 3: Extend `ChatDelta`**
@@ -316,7 +318,7 @@ Expected: PASS, every test in the file.
 
 - [ ] **Step 7: Run it, then record the route**
 
-Run: `fvm flutter test test/features/chat_controller_test.dart -n "which route served"`
+Run: `fvm flutter test test/features/chat_controller_test.dart --plain-name "which route served"`
 Expected: FAIL — `routeUsed` is null.
 
 Add a field beside `_model`:
@@ -355,24 +357,29 @@ and pass it on:
       );
 ```
 
-`finishMessage` does not accept `routeUsed` yet — add it, mirroring `modelUsed`:
+`finishMessage` does not accept `routeUsed` yet. Add the parameter and write it
+alongside `modelUsed` — and **change nothing else in that method**. It is not
+the one-liner it looks like: it reads the row first to learn which conversation
+to touch, and calls `touchConversation` afterwards so a conversation used today
+does not sort by its creation date. Replacing the body with a bare `write`
+would silently delete that, which is a bug the previous plan's final review
+had to find once already. Add only:
 
 ```dart
-  Future<void> finishMessage(
-    int id, {
-    required String content,
-    required String status,
-    String? modelUsed,
     String? routeUsed,
-  }) => (update(messages)..where((m) => m.id.equals(id))).write(
-        MessagesCompanion(
-          content: Value(content),
-          status: Value(status),
-          modelUsed: Value(modelUsed),
-          routeUsed: Value(routeUsed),
-        ),
-      );
 ```
+
+to the parameter list, and
+
+```dart
+        routeUsed: Value(routeUsed),
+```
+
+to the `MessagesCompanion`.
+
+Any test double that overrides `finishMessage` needs the new named parameter
+too — Dart requires an override to declare every named parameter of the base
+method.
 
 - [ ] **Step 8: Run the whole suite and commit**
 
@@ -1653,7 +1660,7 @@ git commit -m "feat(catalog): pick a model, or a profile, from what the gateway 
 
 - [ ] **Step 2: Run them, then read the override**
 
-Run: `fvm flutter test test/features/chat_controller_test.dart -n "override"`
+Run: `fvm flutter test test/features/chat_controller_test.dart --plain-name "override"`
 Expected: FAIL — `model` is `auto` when an override is set.
 
 In `send()`, after the history query and its supersession check:
@@ -1727,7 +1734,7 @@ Expected: PASS, every test in the file.
 
 - [ ] **Step 5: Run it, then wire the screen**
 
-Run: `fvm flutter test test/features/chat_screen_test.dart -n "opens the picker"`
+Run: `fvm flutter test test/features/chat_screen_test.dart --plain-name "opens the picker"`
 Expected: FAIL — no `model-title` key.
 
 `ChatScreen` gains an injectable source, so a widget test never waits on drift:
@@ -1888,7 +1895,7 @@ Delete the `strandedRow` handling from `_abandon`:
     }
 ```
 
-Run: `fvm flutter test test/features/chat_controller_test.dart -n "just before the turn ended"`
+Run: `fvm flutter test test/features/chat_controller_test.dart --plain-name "just before the turn ended"`
 Expected: FAIL — a row left at `streaming`.
 
 Record that output, then put the code back and confirm it passes. A test that
