@@ -2186,34 +2186,39 @@ lists them, and create one only when the device has none yet.
 `rebuild with --dart-define-from-file=.env`. That path must keep working: it is
 reached before any of this, straight from `Config.isConfigured`.
 
-### Known gap: the streaming wire is not covered by a test
+### The streaming wire, and why three attempts to test it failed
 
-**Parked deliberately, with evidence.** `ChatController` is proven by two tests
-to hold the arriving text in `streamingText`, and `ChatScreen`'s `itemBuilder`
-is confirmed by reading to pass it as `liveText` to the row being streamed. What
-no test covers is the wire between them: **deleting the `liveText:` argument
-would fail nothing in this suite.**
+Covered now, after being parked once. The story is worth keeping because the
+diagnosis is not obvious and the same trap sits under any widget test in this
+project that waits on the database.
 
-That is the exact shape of the defect it guards against — the controller was
-correct, the text existed, thirty tests were green, and nothing rendered it.
+The wire is `chat_screen.dart`'s `itemBuilder` passing `liveText` to the row
+being streamed. Deleting it used to fail no test, which is exactly the defect it
+guards: the controller held the text, thirty tests were green, and nothing
+rendered it.
 
-Two attempts were made to close it, and both failed on the test harness rather
-than on the code. What was learned, so a third attempt does not repeat it:
+Three attempts to cover it failed, all on the harness rather than the code — a
+widget test driving a real streamed response through `MockClient.streaming` with
+`tester.runAsync` and real delays; the same with the delays removed; and the
+bytes fed through a `StreamController` the test owned. Every one either hung or
+died after five minutes with `Bad state: Cannot close sink while adding stream`
+from `flutter_tools/src/test/flutter_platform.dart`.
 
-- A widget test that drives a real streamed response through
-  `MockClient.streaming` and waits with `tester.runAsync()` plus real delays
-  makes `flutter test` die with `Bad state: Cannot close sink while adding
-  stream` from `flutter_tools/src/test/flutter_platform.dart`, after running for
-  over five minutes. The drawer-switch test in the same file finishes in three
-  seconds, so it is specific to driving the stream, not to the screen.
-- Replacing the real delays with a `StreamController` the test feeds, pumping
-  with no `runAsync` at all, also hangs. So the obstacle is not the waiting
-  strategy.
+**The cause: drift resolves its live queries on timers that `flutter_test`'s
+fake clock never fires.** So any test that waits for a drift stream to emit
+deadlocks, no matter how it synchronises. That is why `pumpAndSettle` returned
+before the request was even made.
 
-A third attempt should start by finding out WHY the harness deadlocks — most
-likely how drift's live query emits under `flutter_test`'s fake clock — rather
-than trying another synchronisation idiom. Until then the wire is verified by
-reading, which is weaker than a test and is recorded here as such.
+**The fix was to stop driving a stream at all.** `ChatScreen` gained a
+`ControllerFactory` seam, and the test injects a hand-written fake controller
+that reports `streamingRow`/`streamingText`/`busy` and notifies on command. No
+mock client, no `runAsync`, no drift query in the loop. Verified by mutation:
+deleting the `liveText:` argument makes it fail with `Found 0 widgets with
+GptMarkdown("arriving")`.
+
+Where a widget test genuinely must wait on the database, a bounded
+`tester.runAsync` is the tool, and the C1 failure-banner test uses one that way
+with the reason written next to it.
 
 - [ ] **Step 7: Delete the placeholder screen**
 
