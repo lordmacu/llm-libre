@@ -1271,6 +1271,37 @@ git commit -m "feat(data): cache the route catalogue, and keep it across upgrade
     expect(await store.routes(now: DateTime.utc(2026)), isEmpty);
   });
 
+  test('a clean call clears the failure a previous one recorded', () async {
+    // lastFailure was only ever assigned in the catch, so it survived a
+    // subsequent success: a caller reading it after a healthy cache read would
+    // report an error for an attempt that had already been superseded.
+    final t = DateTime.utc(2026, 9, 2, 10);
+    await db.saveRoutes([_route('p/kept')], t);
+    final store = CatalogStore(
+      db: db,
+      client: _clientThrowing(const Disconnected('offline')),
+    );
+
+    // Two hours past the seeded fetchedAt, so this one refetches and fails.
+    await store.routes(now: t.add(const Duration(hours: 2)));
+    expect(store.lastFailure, isNotNull);
+
+    // Re-seed so fetchedAt is recent relative to the NEXT call. Without this
+    // the failing client never lets saveRoutes run, fetchedAt stays at `t`,
+    // and a second call at any later time exceeds the floor and refetches --
+    // so the fast path this test exists to exercise is never reached, and the
+    // clock cannot be moved backwards to fake it either.
+    final later = t.add(const Duration(hours: 2));
+    await db.saveRoutes([_route('p/kept')], later);
+
+    // Five minutes on: inside the ten-minute floor, so no fetch happens at all.
+    final again = await store.routes(
+      now: later.add(const Duration(minutes: 5)),
+    );
+    expect(again.single.key, 'p/kept');
+    expect(store.lastFailure, isNull);
+  });
+
   test('a database that cannot be read is empty, not a throw', () async {
     // The property this class exists to guarantee, tested adversarially rather
     // than confirmed: with only the network call guarded, BOTH the fetched-at
@@ -1351,6 +1382,11 @@ class CatalogStore {
   final CatalogClient client;
   final Duration floor;
 
+  /// Why the MOST RECENT call to [routes] failed, or null when it did not.
+  ///
+  /// Reset on entry rather than only assigned in the catch: a consumer showing
+  /// "could not refresh" needs it to describe the call it just made, not some
+  /// earlier one that has since been superseded by a clean read.
   LlmError? lastFailure;
 
   Future<List<RouteInfo>> routes({DateTime? now}) async {
@@ -1366,12 +1402,17 @@ class CatalogStore {
     // the CALLER instead of the catch below -- which would quietly undo this
     // whole guard.
     try {
+      // Cleared on every entry, so `lastFailure` means "the most recent call to
+      // routes() failed" and nothing subtler. Setting it only in the catch left
+      // it stale: a transient failure, then a clean call served from cache, and
+      // a caller reading it would still show an error for an attempt that had
+      // since succeeded.
+      lastFailure = null;
       final fetchedAt = await db.routesFetchedAt();
       if (fetchedAt != null && at.difference(fetchedAt) < floor) {
         return await db.cachedRoutes();
       }
       final fresh = await client.fetch();
-      lastFailure = null;
       await db.saveRoutes(fresh, at);
       return fresh;
     } on Object catch (e) {
@@ -2043,6 +2084,24 @@ git commit -m "test(chat): the stranded-row arm is actually covered now"
 ```
 
 ---
+
+## Follow-up carried into the slice that first DISPLAYS `lastFailure`
+
+`CatalogStore.lastFailure` describes the caller's own awaited call only under
+NON-OVERLAPPING use of one instance. Resetting it on entry — which is what stops
+it going stale after a clean sweep — also made every call touch it before any
+`await`, so two genuinely interleaved `routes()` calls on the same store can
+clobber each other: call A records its failure, suspends inside
+`_cachedOrEmpty`, and call B clears the field at its own entry before A's future
+resolves. A's caller then reads null for a call that failed.
+
+Latent today: nothing reads `lastFailure`, and Task 9 wires the store in without
+displaying it. It becomes reachable the moment a screen shows "could not
+refresh" AND something can invoke `routes()` twice concurrently — a retry
+button, a poll timer, or a double tap on the picker title. Whoever adds that
+either serialises the calls, or gives the failure to the caller as a return
+value instead of reading it off shared state. The second is the better shape and
+was not chosen here only because no consumer existed to shape it for.
 
 ## What this plan does not cover
 
