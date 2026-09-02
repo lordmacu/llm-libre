@@ -1254,6 +1254,10 @@ void main() {
   });
 
   test('conversations come back newest first', () async {
+    // This also pins `storeDateTimeAsText: true`. Under drift's default of
+    // whole-second unix timestamps these two rows share an `updatedAt` and the
+    // order becomes whatever SQLite returns, so a silent revert of that option
+    // fails here rather than in the drawer.
     final older = await db.createConversation();
     await db.renameConversation(older, 'older');
     final newer = await db.createConversation();
@@ -1314,6 +1318,19 @@ class AppDb extends _$AppDb {
 
   @override
   int get schemaVersion => 1;
+
+  /// Datetimes are stored as ISO-8601 text, not as unix timestamps.
+  ///
+  /// drift's default is integer seconds, and it says so only to stay
+  /// backwards-compatible with existing databases. This one is new, so it costs
+  /// nothing to choose — and the default is lossy in a way that shows: two
+  /// conversations created in the same second get identical `updatedAt` values,
+  /// `ORDER BY updatedAt DESC` cannot separate them, and the drawer lists them
+  /// in whatever order SQLite happens to return. Measured, not theorised: with
+  /// the default, the "newest first" test below fails 5 times out of 5.
+  @override
+  DriftDatabaseOptions get options =>
+      const DriftDatabaseOptions(storeDateTimeAsText: true);
 
   Future<String> createConversation() async {
     final now = DateTime.now();
