@@ -1528,6 +1528,51 @@ void main() {
     expect(stored.where((m) => m.content.isEmpty).length, 1);
   });
 
+  test('the answer is readable while it is still arriving', () async {
+    // The database row stays empty until the answer completes, so the streamed
+    // text has to be readable from the controller or the screen shows nothing
+    // until the end -- one rebuild per token, each displaying no new text.
+    // That is the difference between streaming and a slow reveal.
+    final id = await db.createConversation();
+    final held = Completer<void>();
+    final controller = ChatController(
+      db: db,
+      client: LlmClient(
+        baseUrl: 'https://gw.test',
+        apiKey: 'k',
+        httpClient: MockClient.streaming((_, __) async => http.StreamedResponse(
+              Stream.multi((c) async {
+                c.add(utf8.encode(
+                    'data: {"choices":[{"delta":{"content":"partial "}}]}\n\n'));
+                await held.future;
+                await c.close();
+              }),
+              200,
+            )),
+      ),
+      conversationId: id,
+    );
+
+    final arrived = Completer<void>();
+    controller.addListener(() {
+      if (controller.streamingText.isNotEmpty && !arrived.isCompleted) {
+        arrived.complete();
+      }
+    });
+    unawaited(controller.send('hi'));
+    await arrived.future;
+
+    expect(controller.streamingText, 'partial ');
+    expect(controller.streamingRow, isNotNull);
+    // ...and the persisted row is still empty at this moment, which is exactly
+    // why the buffer has to be exposed.
+    final stored = await db.watchMessages(id).first;
+    expect(stored.last.content, isEmpty);
+
+    held.complete();
+    await controller.stop();
+  });
+
   test('disposing mid-answer keeps what arrived instead of stranding the row',
       () async {
     // Switching conversations disposes the controller. Without the fallback in
@@ -1556,12 +1601,18 @@ void main() {
       conversationId: id,
     );
 
-    final firstDelta = Completer<void>();
+    final contentArrived = Completer<void>();
     controller.addListener(() {
-      if (!firstDelta.isCompleted) firstDelta.complete();
+      // Waits for real CONTENT, not for a notify count. send() notifies once
+      // when it inserts the placeholder, before the stream is even subscribed;
+      // treating that first notify as "a delta arrived" disposes the controller
+      // before the mock has produced anything.
+      if (controller.streamingText.isNotEmpty && !contentArrived.isCompleted) {
+        contentArrived.complete();
+      }
     });
     unawaited(controller.send('hi'));
-    await firstDelta.future;
+    await contentArrived.future;
 
     controller.dispose();
 
@@ -1647,6 +1698,16 @@ class ChatController extends ChangeNotifier {
   LlmError? failure;
 
   bool get busy => _subscription != null;
+
+  /// The row currently being streamed into, or null when nothing is in flight.
+  int? get streamingRow => _openRow;
+
+  /// The answer accumulated so far. The database row is not written until the
+  /// answer completes, so while it is arriving THIS is the only place the text
+  /// exists — the screen renders it in place of the still-empty row. Without
+  /// it, every `notifyListeners()` below rebuilds a view showing nothing new
+  /// and the answer appears all at once at the end, which is not streaming.
+  String get streamingText => _buffer;
 
   Future<void> send(String text) async {
     if (busy || text.trim().isEmpty) return;
@@ -1850,7 +1911,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 return ListView.builder(
                   padding: const EdgeInsets.symmetric(vertical: 12),
                   itemCount: messages.length,
-                  itemBuilder: (context, i) => _Turn(message: messages[i]),
+                  itemBuilder: (context, i) {
+                    final message = messages[i];
+                    return _Turn(
+                      message: message,
+                      liveText: message.id == _controller.streamingRow
+                          ? _controller.streamingText
+                          : null,
+                    );
+                  },
                 );
               },
             ),
@@ -1896,9 +1965,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
 /// User turns get a bubble; assistant turns run full width, as ChatGPT does.
 class _Turn extends StatelessWidget {
-  const _Turn({required this.message});
+  const _Turn({required this.message, this.liveText});
 
   final Message message;
+
+  /// The text arriving right now, when this row is the one being streamed.
+  /// Null for every other row, and for all of them once nothing is in flight.
+  final String? liveText;
 
   @override
   Widget build(BuildContext context) {
@@ -1921,7 +1994,7 @@ class _Turn extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          GptMarkdown(message.content),
+          GptMarkdown(liveText ?? message.content),
           if (message.modelUsed != null)
             Padding(
               padding: const EdgeInsets.only(top: 6),
