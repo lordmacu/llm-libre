@@ -47,6 +47,21 @@ whose "Follow-ups carried into the next slice" section this plan discharges).
   timers `flutter_test`'s fake clock never fires, which deadlocks the harness.
   Inject a fake through the `controllerFactory` seam instead, or use a bounded
   `tester.runAsync` and say why next to it.
+- **Every widget test that renders a screen backed by the database must unmount
+  before teardown:**
+
+  ```dart
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
+  ```
+
+  Closing the database with a `StreamBuilder` still subscribed waits on the same
+  drift timer, and the symptom looks nothing like the cause: no assertion fails,
+  the whole suite hangs for five minutes and then the harness crashes. Measured
+  on this plan's Task 3 — the two tests went from hanging to 5 passing in 2
+  seconds with those two lines added. The pre-existing tests in
+  `chat_screen_test.dart` already do this; copy them rather than trusting a
+  single `pump()`.
 
 ---
 
@@ -433,6 +448,12 @@ death leaves behind — renders as a blank turn with no explanation.
     await tester.pump();
 
     expect(find.text('perplexity · turbo'), findsOneWidget);
+
+    // Unmount before teardown: closing the database while a StreamBuilder is
+    // still subscribed waits on a drift timer the fake clock never fires, and
+    // the suite hangs rather than failing.
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
   });
 
   testWidgets('an interrupted answer says so even with no route recorded',
@@ -459,6 +480,9 @@ death leaves behind — renders as a blank turn with no explanation.
     await tester.pump();
 
     expect(find.textContaining('interrupted'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    await tester.pumpAndSettle();
   });
 ```
 
