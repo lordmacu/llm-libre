@@ -67,7 +67,7 @@ because headers are sent before the failover chain resolves. But the SSE chunks
 themselves do carry `"model": "turbo"`. So attribution while streaming is
 recoverable by crossing that id against the cached catalogue — except when the
 same model id exists at two providers, where it stays ambiguous. This is what
-motivates gateway change 1 below.
+motivates gateway change 2 below.
 
 **Provider metadata leaks into the stream.** Perplexity's final chunk carries a
 `"_pplx": {"display_model": ...}` object inside an OpenAI-shaped payload. The
@@ -167,12 +167,26 @@ behaviour does not change between streaming and not.
 
 Each failure gets its own treatment, because each means something different:
 
-- **404 with `suggestions`** — the model is gone from the provider even though
-  it is still in the local catalogue. Render the suggestions as tappable chips
-  that retry. Note this only happens on the non-streaming path.
-- **503** — no serviceable route left. Show what `/health` actually says
-  ("only paid remains", "everything down"), not a generic failure.
+- **404 with `suggestions`** — the requested model is not in the catalogue.
+  `{"detail": {"message": "the model 'X' no longer exists", "suggestions": [...]}}`.
+  Render the suggestions as tappable chips that retry. **Verified 2026-09-01 that
+  this reaches streaming requests too** (`stream: true` returned 404 with three
+  suggestions), because the check runs before the SSE headers go out. Only the
+  rarer *live* 404 — still in the catalogue, but the provider 404s mid-attempt —
+  cannot be surfaced on a stream.
+- **400 `no route satisfies the request`** — a different failure from 503, and
+  the app must not merge them. It means no route can EVER serve this: the
+  requirements are unsatisfiable, not the routes unavailable. The body carries
+  `request` (the parsed requirements) and `active_routes`. Shown as "no model can
+  do this", naming the offending requirement.
+- **503** — routes exist that could serve, but all are down or in cooldown. The
+  body carries `compatible_routes`, `paid_cap_reached`, and `next_release`, a
+  timestamp for when the first punished route comes back. That last field is a
+  concrete countdown to show, not a generic failure message.
 - **429** — the gateway's per-minute cap. Back off and retry; not a red error.
+  Its `detail` is a bare string (`"too many requests for this key"`), unlike
+  400/404/503 whose `detail` is an object. So is 401's (`"invalid api key"`). The
+  client must handle both shapes.
 - **Network loss mid-stream** — persist the partial answer marked incomplete,
   offer "continue".
 - **Stop button** — cancels the stream and keeps the partial text, as ChatGPT
@@ -256,23 +270,33 @@ as a message action ("translate this answer") backed by the endpoint.
 
 Authorised by the user as part of this project. Ordered by value against cost.
 
-**1. `x_route` in the final streamed chunk.** Today the stream carries
+**1. `x_requires` reached only two of its capabilities — FIXED, commit
+`08cbc46`.** Found while writing the implementation plan, and it invalidated the
+chosen approach until fixed. `parse_request` consumed the parsed `x_requires` set
+for `tools` and `vision` and dropped every other name silently; `search` had no
+`RouteRequest` flag and no `_satisfies` branch at all, despite being declared on
+`Capabilities` as "web_search on chat completions" and published on
+`/v1/ranking` for 29 routes. Measured live before the fix: `["translate"]` was
+served by `grok/grok-plugins-4p6-powerpoint` (translate=false), and
+`["images","translate","search"]` by `kilo/nvidia/nemotron-3.5-lightning:free`,
+false on all three. Without this, "enable web search" in the composer would have
+sent a requirement the gateway ignored.
+
+The fix makes `search` requirable from the body and returns 400 for any other
+name; the four endpoint capabilities stay URL-decided. 936 tests pass.
+**Deploying it is a separate decision** — the new 400 is a behaviour change for
+any existing caller sending a name outside `{tools, vision, search}`.
+
+**2. `x_route` in the final streamed chunk.** The stream carries
 `"model": "turbo"` but not the provider, leaving attribution ambiguous when a
-model id exists at two providers. Adding a gateway-owned field to the final
-chunk is the same pattern the codebase already uses for `x_*`: SDKs ignore what
-they do not know. Small, non-breaking, and it is what makes the per-answer
-attribution chip honest.
+model id exists at two providers. Adding a gateway-owned field to the final chunk
+is the same pattern the codebase already uses for `x_*`: SDKs ignore what they do
+not know. Small, non-breaking, and it is what makes the per-answer attribution
+chip honest.
 
-**2. Strip the `_pplx` leak.** Perplexity's own metadata inside an
-OpenAI-shaped payload. The client ignores unknown fields anyway, so this is
-hygiene rather than need.
-
-**3. 404-with-suggestions on the streaming path — open question, not a task.**
-The app streams by default, so a dead model currently yields the generic 503 and
-the suggestion chips never appear. Fixing it is harder than it looks: the status
-line precedes the body, and emitting an SSE error event is precisely what the
-code avoids so as not to break SDK parsing. Recorded here with its cost, to be
-decided during implementation rather than promised now.
+**3. Strip the `_pplx` leak.** Perplexity's own metadata inside an OpenAI-shaped
+payload. The client ignores unknown fields anyway, so this is hygiene rather than
+need.
 
 **Explicitly not doing:** adding capability fields to `/v1/models`. The app
 needs `/v1/ranking` for the panel regardless, so this would duplicate the truth
@@ -304,7 +328,7 @@ one lands:
 2. **A real chat** — SSE streaming, stop button, markdown, drift persistence,
    the drawer, automatic titles.
 3. **Knowing who answered** — catalogue from `/v1/ranking`, the attribution chip,
-   the model picker bottom sheet with capability chips. Gateway change 1 lands
+   the model picker bottom sheet with capability chips. Gateway change 2 lands
    here, because that is where its absence starts to show.
 4. **Images** — vision attachments in, `/v1/images/generations` out, asset
    download and local storage.
