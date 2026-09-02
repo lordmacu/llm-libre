@@ -40,6 +40,9 @@ resolves with on the same Dart.
 - Commit after every task.
 - Never let `pub add` resolve a pinned dependency to latest. The constraints in
   Tech Stack are load-bearing, not preferences.
+- Run `fvm dart format lib test` before every commit. The code blocks in this
+  plan are hand-written and are NOT format-clean; transcribing them verbatim
+  leaves the tree dirty, and the drift compounds across tasks.
 
 ---
 
