@@ -2186,6 +2186,31 @@ lists them, and create one only when the device has none yet.
 `rebuild with --dart-define-from-file=.env`. That path must keep working: it is
 reached before any of this, straight from `Config.isConfigured`.
 
+- [ ] **Step 6d: Prove the screen actually shows the arriving answer**
+
+Add to `test/features/chat_screen_test.dart` a widget test that pumps
+`ChatScreen` with a client whose stream emits one delta and then holds open, and
+asserts the delta's text is on screen **before** the answer finishes.
+
+The acceptance criterion is not "it passes". It is: **delete the `liveText:`
+argument from `itemBuilder`, or revert `_Turn` to `GptMarkdown(message.content)`,
+and this test must FAIL.** Verify that by actually doing it, recording the
+failure, and putting the wiring back. A test that still passes with the wire cut
+is not covering the wire, and this is the precise defect that took three rounds
+to find: the controller held the text and nothing rendered it, while thirty
+tests stayed green.
+
+Two mechanics worth knowing before you fight them:
+
+- `GptMarkdown` renders into `RichText`, not a plain `Text`, so a matcher needs
+  `find.textContaining('...', findRichText: true)`.
+- The mock's stream runs on the real event loop, which `tester.pump()` does not
+  advance. `tester.runAsync()` is the usual way to let real async work proceed
+  inside a widget test; pump afterwards to rebuild.
+
+If those two turn out not to be enough, say what you tried and what the failure
+was rather than weakening the assertion.
+
 - [ ] **Step 7: Delete the placeholder screen**
 
 ```bash
