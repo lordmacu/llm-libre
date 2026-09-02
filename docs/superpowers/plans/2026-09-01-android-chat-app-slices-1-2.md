@@ -2236,6 +2236,40 @@ git commit -m "feat(chat): streaming conversation persisted on the device"
 
 ---
 
+## Follow-ups carried into the next slice
+
+Adjudicated at the end of the fix wave, none of them blocking. Slice 3 touches
+this code and should pick them up.
+
+**The `_sending` guard is a boolean where it wants a generation token.** `send()`
+is now guarded against re-entry, but a `stop()` followed by a new `send()` inside
+the same window lets the abandoned first send resume — one row stranded at
+`streaming`, and two live streams appending into one buffer. Reproduced in a
+throwaway copy, producing the buffer `"oneone"`. It is NOT reachable from the
+current UI: the stop icon only appears after the window closes, because nothing
+rebuilds `ChatScreen.build` during it. Slice 3 adding any rebuild in that window
+opens the door. The fix is one line — compare the turn's own completer against
+the current one (`_done != done`) instead of checking a shared boolean.
+
+**Two things pass their tests for the wrong reason.** Deleting the `migration`
+override that runs `repairInterruptedMessages()` fails no test, because the test
+calls the method directly rather than reopening a database. And `_abandon`'s
+stranded-row arm is untested: the C4 test disposes at the FIRST await, where no
+placeholder exists yet, so its "no row stranded" assertion passes trivially.
+Both are the same shape as the `liveText` gap that took three rounds — correct
+code, green tests, nothing actually covering the wire. A file-backed reopen test
+closes the first; disposing at the third await closes the second.
+
+**A repaired row that never received text renders as a blank turn.**
+`repairInterruptedMessages` correctly relabels it `partial`, but `_Turn` gates
+its "interrupted" label on `modelUsed != null`, which such a row does not have.
+The user sees an empty assistant bubble with no explanation. Label it from
+`status` instead.
+
+**`\r\r` is still not a frame separator.** `sse.dart` handles `\n\n` and
+`\r\n\r\n`; the spec also allows `\r\r`, which yields zero events silently.
+No gateway in use sends it.
+
 ## What this plan does not cover
 
 Slices 3 to 6 of the spec — the route catalogue and model picker, vision and
