@@ -112,16 +112,24 @@ rebuilds. Fixing it after the picker means shipping the door open.
 
     final first = controller.send('first');
     await controller.stop();
-    await controller.send('second');
+    final second = controller.send('second');
+    // `held` is completed BEFORE either future is awaited. `send()` does not
+    // resolve until its own stream closes, and this mock's stream closes only
+    // when `held` does, so awaiting first would deadlock on a completer nothing
+    // has reached yet -- a fixed ordering bug, not a race.
+    held.complete();
     await first;
+    await second;
 
+    // The sharpest statement of the bug: the abandoned turn must never
+    // subscribe. Before the fix it resumed and opened a SECOND stream, because
+    // `_close` had cleared `_sending` and the new turn had set it again.
+    expect(streams, 1, reason: 'the abandoned turn subscribed a second stream');
     final rows = await db.watchMessages(id).first;
     expect(rows.where((m) => m.status == 'streaming'), isEmpty,
         reason: 'the abandoned turn stranded its placeholder');
     expect(controller.streamingText.contains('oneone'), isFalse,
         reason: 'two live streams appended into one buffer');
-    held.complete();
-    await controller.stop();
   });
 ```
 
@@ -146,7 +154,8 @@ Add beside `busy`:
   bool _superseded(Completer<void> done) => _disposed || _done != done;
 ```
 
-Then replace all three occurrences of
+The file has THREE guard sites, not four: two plain and one carrying a row.
+Replace the two plain ones,
 
 ```dart
     if (_disposed || !_sending) return _abandon(done);
@@ -158,7 +167,7 @@ with
     if (_superseded(done)) return _abandon(done);
 ```
 
-and the fourth, which carries a row:
+and the one that carries a row:
 
 ```dart
     if (_superseded(done)) return _abandon(done, strandedRow: row);
