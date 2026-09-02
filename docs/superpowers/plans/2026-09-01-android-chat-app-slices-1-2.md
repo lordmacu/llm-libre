@@ -12,9 +12,14 @@ transport — request building, SSE parsing, error mapping — so its tests run 
 messages. Riverpod carries state to a ChatGPT-shaped UI. There is no backend and
 no repository layer: `api/` is the boundary.
 
-**Tech Stack:** Flutter 3.38.3 via fvm, Dart ^3.10.1, `flutter_riverpod` 2.6.1,
-`go_router` 17.3.0, `drift` 2.30.1 + `drift_flutter` 0.2.8,
-`flutter_secure_storage` 10.3.1, `http` 1.6.0, `gpt_markdown`, `uuid`.
+**Tech Stack:** Flutter 3.38.3 via fvm, Dart ^3.10.1. Versions are pinned with
+hard upper bounds where a major bump breaks the toolchain:
+`drift` and `drift_dev` `>=2.30.0 <2.31.0`, `drift_flutter` `>=0.2.4 <0.3.0`
+(0.3.x pulls sqlite3 3.x and drift_dev then cannot resolve at all),
+`flutter_riverpod` `^2.6.1`, `go_router` `^17.3.0`,
+`flutter_secure_storage` `^10.3.1`, `http` `^1.6.0`, `build_runner` `^2.15.0`,
+plus `gpt_markdown` and `uuid` unpinned. This is the set `~/testenglish`
+resolves with on the same Dart.
 
 **Spec:** `docs/superpowers/specs/2026-09-01-android-chat-app-design.md`
 
@@ -33,6 +38,8 @@ no repository layer: `api/` is the boundary.
 - The app repository is `~/llm-libre-chat`, separate from the llm-libre repo this
   plan lives in.
 - Commit after every task.
+- Never let `pub add` resolve a pinned dependency to latest. The constraints in
+  Tech Stack are load-bearing, not preferences.
 
 ---
 
@@ -46,10 +53,17 @@ no repository layer: `api/` is the boundary.
 | `lib/api/llm_client.dart` | Request building and the two chat calls. |
 | `lib/settings/settings_store.dart` | API key and base URL in secure storage. |
 | `lib/data/db.dart` | drift tables, DAO methods. |
-| `lib/features/chat/chat_controller.dart` | Riverpod notifier driving one conversation. |
+| `lib/features/chat/chat_controller.dart` | `ChangeNotifier` driving one conversation. |
 | `lib/features/chat/chat_screen.dart` | Message list, composer, stop button. |
 | `lib/features/chat/conversation_drawer.dart` | Conversation list grouped by date. |
-| `lib/app.dart` | go_router wiring. |
+| `lib/app.dart` | Not written in these slices — see the note below. |
+
+**On Riverpod and go_router:** both are declared dependencies because slices 3
+to 6 need them, and neither is wired here. These two slices have one screen and
+one drawer; a router for a single route, and a provider graph for a single
+controller passed by constructor, would be scaffolding with no user. The
+controller is a plain `ChangeNotifier` and the screen reads the database through
+`StreamBuilder`. Introduce them in the slice that first needs a second route.
 
 ---
 
@@ -82,11 +96,24 @@ cd ~/llm-libre-chat && fvm use 3.38.3 --force
 
 - [ ] **Step 3: Add the dependencies**
 
+Versions are PINNED, not resolved to latest. A bare `pub add` takes
+`drift_flutter` to 0.3.x, which pulls `sqlite3` 3.x, and `drift_dev` then cannot
+resolve at all — verified on this machine. The upper bound on `drift_flutter` is
+what holds sqlite3 at 2.x. These exact constraints are the ones `~/testenglish`
+resolves with on this same Dart 3.10.1.
+
 ```bash
 cd ~/llm-libre-chat
-fvm flutter pub add flutter_riverpod go_router drift drift_flutter \
-  flutter_secure_storage http gpt_markdown uuid
-fvm flutter pub add --dev drift_dev build_runner
+fvm flutter pub add \
+  flutter_riverpod:^2.6.1 \
+  go_router:^17.3.0 \
+  'drift:>=2.30.0 <2.31.0' \
+  'drift_flutter:>=0.2.4 <0.3.0' \
+  flutter_secure_storage:^10.3.1 \
+  http:^1.6.0 \
+  gpt_markdown \
+  uuid
+fvm flutter pub add --dev 'drift_dev:>=2.30.0 <2.31.0' build_runner:^2.15.0
 ```
 
 - [ ] **Step 4: Verify the toolchain**
@@ -1339,7 +1366,7 @@ git commit -m "feat(data): on-device conversations and messages"
 - Create: `lib/features/chat/chat_screen.dart`
 - Create: `lib/features/chat/conversation_drawer.dart`
 - Delete: `lib/features/chat/simple_chat_screen.dart` and its test
-- Modify: `lib/app.dart`, `lib/main.dart`
+- Modify: `lib/main.dart`
 - Test: `test/features/chat_controller_test.dart`
 
 **Interfaces:**
