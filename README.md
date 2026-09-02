@@ -155,8 +155,25 @@ Every **non-streaming** response from `/v1/chat/completions` carries:
 
 **When streaming (`stream: true`) these headers do NOT travel.** HTTP headers
 are sent before the body, and at that moment the failover chain is not yet
-resolved — there is no way to know which route will end up serving. Paid spend
-is still recorded and visible another way: `GET /v1/usage`.
+resolved — there is no way to know which route will end up serving.
+
+**The stream says it in the body instead.** Immediately before `data: [DONE]`,
+and only when a route actually served, one extra chunk carries the attribution:
+
+```json
+{"object": "chat.completion.chunk", "choices": [],
+ "x_route": "perplexity/turbo", "x_tier": "free"}
+```
+
+`choices: []` is OpenAI's own shape for a final metadata-only chunk — the same
+one its usage chunk uses — so an SDK that tolerates that tolerates this. Do not
+read the per-chunk `model` field for attribution on its own: the same model id
+can exist at several providers, which is the whole reason this gateway routes by
+model rather than by provider. Paid spend is also visible at `GET /v1/usage`.
+
+**Fields whose name starts with `_` are stripped from streamed chunks.** They
+are the provider's own — perplexity leaks `_pplx` — and were never part of the
+contract published here.
 
 ## Endpoints
 

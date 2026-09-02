@@ -1720,3 +1720,62 @@ def test_the_two_capabilities_that_already_worked_keep_working():
     p = parse_request({"model": "auto", "x_requires": ["tools", "vision"]})
     assert p.needs_tools and p.needs_vision
     assert p.needs_search is False
+
+
+# --- The streamed response could not say WHO served it (2026-09-02) -----------
+#
+# `X-Route-Used` cannot travel on a stream: headers go out before the failover
+# chain resolves. The per-chunk `model` the provider sends is not enough on its
+# own, because the same model id can exist at several providers -- which is the
+# whole reason routing is by model rather than by provider. So a streaming
+# client could not attribute an answer at all.
+#
+# The same pass also drops provider-private fields: perplexity leaks a `_pplx`
+# object into its final chunk, inside a payload that is otherwise the OpenAI
+# contract.
+
+def _stream_lines(text):
+    return [l for l in text.split("\n\n") if l.strip()]
+
+
+def test_a_streamed_answer_names_the_route_that_served_it():
+    state, client = _free_and_paid_state(
+        daily_paid_cap=0,
+        make_free_response=lambda: httpx.Response(200, content=_sse("ho", "la")),
+        make_paid_response=lambda: httpx.Response(500, json={"error": "x"}))
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "stream": True})
+    lines = _stream_lines(r.text)
+
+    assert lines[-1] == "data: [DONE]"
+    attribution = json.loads(lines[-2][6:])
+    # provider/model, not just the model: that is the point of the field.
+    assert attribution["x_route"] == "free_prov/f:free"
+    assert attribution["x_tier"] == "free"
+    # OpenAI's own convention for a final metadata-only chunk, so an SDK that
+    # already tolerates its usage chunk tolerates this one.
+    assert attribution["choices"] == []
+
+
+def test_nothing_is_attributed_when_no_route_served():
+    state, client = _free_and_paid_state(
+        daily_paid_cap=0,
+        make_free_response=lambda: httpx.Response(500, json={"error": "x"}),
+        make_paid_response=lambda: httpx.Response(500, json={"error": "x"}))
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "stream": True})
+    assert "x_route" not in r.text
+
+
+def test_a_provider_private_field_does_not_reach_the_client():
+    leaky = ('data: {"choices":[{"delta":{"content":"hi"}}],'
+             '"_pplx":{"display_model":"turbo"}}\n\n'
+             'data: [DONE]\n\n').encode()
+    state, client = _free_and_paid_state(
+        daily_paid_cap=0,
+        make_free_response=lambda: httpx.Response(200, content=leaky),
+        make_paid_response=lambda: httpx.Response(500, json={"error": "x"}))
+    r = client.post("/v1/chat/completions", headers={"X-API-Key": "buena"},
+                     json={"model": "auto", "messages": [], "stream": True})
+    assert "hi" in r.text          # the answer still arrives
+    assert "_pplx" not in r.text   # the provider's own metadata does not

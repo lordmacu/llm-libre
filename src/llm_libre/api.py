@@ -25,6 +25,65 @@ PROFILES = {"fast", "balanced", "strong"}
 ALIASES = ["auto", "auto:fast", "auto:strong", "auto:tools", "auto:vision"]
 
 
+async def _finish_stream(source, served: dict):
+    """Drop the provider's private fields, and name the route that served.
+
+    Two jobs in one pass, because both need every chunk parsed and walking the
+    stream twice to keep them apart would cost more than the separation explains.
+
+    **Attribution.** `X-Route-Used` cannot travel on a stream: headers go out
+    before the failover chain has resolved, so at that moment there is nothing
+    true to put in them. The per-chunk `model` the provider sends is not enough
+    on its own either -- the same model id can exist at several providers, which
+    is the whole reason this gateway routes by model rather than by provider --
+    so the provider has to come from here. One chunk carrying `x_route` and
+    `x_tier` is emitted immediately before `data: [DONE]`, and only when a route
+    actually served: `served` is filled by `on_route_committed`, which fires at
+    most once per stream and only for the route that genuinely answered.
+
+    `choices: []` is OpenAI's own convention for a final metadata-only chunk
+    (its usage chunk has exactly that shape), so an SDK that already tolerates
+    that one tolerates this one, and `x_*` is the same non-breaking extension
+    the request side already uses.
+
+    **Private fields.** A key starting with "_" is the provider's own and was
+    never part of the contract this gateway publishes: perplexity leaks
+    `_pplx` into its final chunk. Forwarding it invites a client to depend on
+    something no route promises and most cannot deliver. Nothing can be relying
+    on it today, precisely because it was never promised.
+    """
+    async for chunk in source:
+        if not isinstance(chunk, str) or not chunk.startswith("data:"):
+            yield chunk
+            continue
+        payload = chunk[5:].strip()
+        if payload == "[DONE]":
+            route = served.get("route")
+            if route is not None:
+                yield "data: " + json.dumps({
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "x_route": route.key,
+                    "x_tier": route.tier,
+                }) + "\n\n"
+            yield chunk
+            continue
+        try:
+            obj = json.loads(payload)
+        except (json.JSONDecodeError, ValueError):
+            # Not ours to interpret -- a keep-alive or a frame this version does
+            # not understand travels through untouched, as it always has.
+            yield chunk
+            continue
+        private = [k for k in obj if isinstance(k, str) and k.startswith("_")]
+        if not private:
+            yield chunk
+            continue
+        for k in private:
+            del obj[k]
+        yield f"data: {json.dumps(obj)}\n\n"
+
+
 async def _rehost_stream_images(source, assets, http, public_base: str):
     """Pass-through async generator that rehosts image_url delta parts on-the-fly.
 
@@ -399,12 +458,19 @@ def create_app(state: State) -> FastAPI:
         # against what was served, and resolving it here erases the asking side.
         trace = RequestTrace(request_id=uuid4().hex, requested=body.get("model"))
         if body.get("stream"):
+            # Filled by `on_route_committed`, which fires at most once per
+            # stream and only for the route that genuinely served -- so the
+            # attribution chunk cannot name a route that merely returned 200 and
+            # then failed over.
+            served: dict = {}
             stream = state.proxy.complete_stream(
                 routes, body, now, raw,
+                on_route_committed=lambda route: served.__setitem__("route", route),
                 on_billable_attempt=_count_paid_usage, trace=trace)
             if state.assets and state.public_base_url:
                 stream = _rehost_stream_images(
                     stream, state.assets, state.proxy.http, state.public_base_url)
+            stream = _finish_stream(stream, served)
             return StreamingResponse(stream, media_type="text/event-stream")
         r = await state.proxy.complete(routes, body, now, raw,
                                        on_billable_attempt=_count_paid_usage,
