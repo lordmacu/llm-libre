@@ -194,21 +194,28 @@ def parse_request(body: dict) -> RouteRequest:
         value = body.get("x_requires") or []
         if isinstance(value, str):
             value = [value]
-        asked = set(value)
-        # Every name is checked, not just the two that used to be read. Before
-        # this, `parse_request` consumed the set for `tools` and `vision` and
-        # dropped the rest without a word, so `x_requires: ["translate"]` was
-        # served by a route with translate=false and the caller had no way to
-        # know. ValueError, not HTTPException, so `_read_field` produces the
-        # same 400 shape every other malformed field produces.
-        unknown = asked - REQUIRABLE_FROM_BODY
-        if unknown:
-            raise ValueError(f"not requirable from a chat body: {sorted(unknown)}")
-        return asked
+        return set(value)
     required = _read_field(
         "x_requires", body.get("x_requires"),
         "x_requires must be a string or a list of strings",
         _normalise_required)
+
+    # Checked HERE and not inside `_normalise_required`, because `_read_field`
+    # replaces the exception's own message with the type message it was handed --
+    # which answered "must be a string or a list of strings" for a value that
+    # already was one, sending the caller after the wrong bug. Every name is
+    # checked, not just the two that used to be read: before this, parse_request
+    # consumed the set for `tools` and `vision` and dropped the rest without a
+    # word, so `x_requires: ["translate"]` was served by a route with
+    # translate=false and the caller had no way to know.
+    unknown = required - REQUIRABLE_FROM_BODY
+    if unknown:
+        raise HTTPException(400, {
+            "message": (f"x_requires accepts only {sorted(REQUIRABLE_FROM_BODY)}; "
+                        f"not requirable from a chat body: {sorted(unknown)}"),
+            "field": "x_requires",
+            "received_value": body.get("x_requires"),
+        })
 
     raw_min_context = body.get("x_min_context")
     min_context = _read_field(

@@ -1703,12 +1703,17 @@ def test_an_endpoint_only_capability_in_x_requires_returns_400(name):
     assert exc.value.detail["field"] == "x_requires"
 
 
-def test_an_unknown_capability_in_x_requires_returns_400_naming_the_field():
-    # A typo used to be indistinguishable from a satisfied requirement.
+def test_an_unknown_capability_in_x_requires_returns_400_naming_the_value():
+    # A typo used to be indistinguishable from a satisfied requirement. And the
+    # 400 has to say WHICH word was wrong: routing this through _read_field made
+    # it answer "must be a string or a list of strings" for a value that was
+    # already a list of strings, which sends the caller hunting the wrong bug.
     with pytest.raises(HTTPException) as exc:
         parse_request({"model": "auto", "x_requires": ["vison"]})
     assert exc.value.status_code == 400
     assert exc.value.detail["field"] == "x_requires"
+    assert "vison" in exc.value.detail["message"]
+    assert "string" not in exc.value.detail["message"]
 
 
 def test_the_two_capabilities_that_already_worked_keep_working():
