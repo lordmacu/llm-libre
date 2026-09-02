@@ -17,7 +17,7 @@ hard upper bounds where a major bump breaks the toolchain:
 `drift` and `drift_dev` `>=2.30.0 <2.31.0`, `drift_flutter` `>=0.2.4 <0.3.0`
 (0.3.x pulls sqlite3 3.x and drift_dev then cannot resolve at all),
 `flutter_riverpod` `^2.6.1`, `go_router` `^17.3.0`,
-`flutter_secure_storage` `^10.3.1`, `http` `^1.6.0`, `build_runner` `^2.15.0`,
+`http` `^1.6.0`, `build_runner` `^2.15.0`,
 plus `gpt_markdown` and `uuid` unpinned. This is the set `~/testenglish`
 resolves with on the same Dart.
 
@@ -26,8 +26,10 @@ resolves with on the same Dart.
 ## Global Constraints
 
 - All code — identifiers, comments, strings — in English. No Spanish in source.
-- Gateway base URL default: `https://llm.comparadorinternet.co`. Never hardcode
-  the API key; it lives in `flutter_secure_storage`.
+- Gateway base URL default: `https://llm.comparadorinternet.co`. The API key is
+  a BUILD-TIME constant from `--dart-define-from-file=.env` — never a literal in
+  source, and `.env` is never committed. The owner has accepted that the key
+  ships inside the APK; it is rotatable at the gateway.
 - `lib/api/` must not import `package:flutter/*`. A Flutter import there is a
   review rejection.
 - `x_requires` accepts only `tools`, `vision`, `search`. Any other name is a 400
@@ -54,7 +56,7 @@ resolves with on the same Dart.
 | `lib/api/errors.dart` | The `LlmError` hierarchy and `errorFromResponse`. |
 | `lib/api/sse.dart` | Byte stream to SSE payload strings. Nothing gateway-specific. |
 | `lib/api/llm_client.dart` | Request building and the two chat calls. |
-| `lib/settings/settings_store.dart` | API key and base URL in secure storage. |
+| `lib/config.dart` | API key and base URL, compiled in from `.env`. |
 | `lib/data/db.dart` | drift tables, DAO methods. |
 | `lib/features/chat/chat_controller.dart` | `ChangeNotifier` driving one conversation. |
 | `lib/features/chat/chat_screen.dart` | Message list, composer, stop button. |
@@ -105,6 +107,10 @@ resolve at all — verified on this machine. The upper bound on `drift_flutter` 
 what holds sqlite3 at 2.x. These exact constraints are the ones `~/testenglish`
 resolves with on this same Dart 3.10.1.
 
+(An earlier revision of this plan also added `flutter_secure_storage` here, and
+Task 1 did install it. The API key moved to a build-time `.env` before Task 5
+shipped, so the dependency has no user left; Task 5 removes it.)
+
 ```bash
 cd ~/llm-libre-chat
 fvm flutter pub add \
@@ -112,7 +118,6 @@ fvm flutter pub add \
   go_router:^17.3.0 \
   'drift:>=2.30.0 <2.31.0' \
   'drift_flutter:>=0.2.4 <0.3.0' \
-  flutter_secure_storage:^10.3.1 \
   http:^1.6.0 \
   gpt_markdown \
   uuid
@@ -618,107 +623,120 @@ git commit -m "feat(api): non-streaming chat with typed failures"
 
 ---
 
-## Task 5: Settings storage
+## Task 5: Build-time configuration from `.env`
 
 **Files:**
-- Create: `lib/settings/settings_store.dart`
-- Test: `test/settings/settings_store_test.dart`
+- Create: `lib/config.dart`
+- Create: `.env.example`
+- Create: `.env` (git-ignored, holds the real key)
+- Modify: `.gitignore`
+- Modify: `pubspec.yaml` (remove `flutter_secure_storage`)
+- Test: `test/config_test.dart`
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `class SettingsStore(FlutterSecureStorage storage)` with
-  `Future<String?> readApiKey()`, `Future<void> writeApiKey(String)`,
-  `Future<String> readBaseUrl()`, `Future<void> writeBaseUrl(String)`, and
-  `const String defaultBaseUrl`.
+- Produces: `abstract final class Config` with
+  `static const String apiKey`, `static const String baseUrl`, and
+  `static bool get isConfigured`.
+
+The app is single-user and its owner has decided the key ships inside the build.
+That makes the key a compile-time constant, not a stored secret:
+`--dart-define-from-file=.env` is native to Flutter 3.38.3 and reads a plain
+`.env`, so this needs no package at all. `flutter_secure_storage` is removed
+because nothing is left for it to hold.
+
+**The key is in the binary and an APK is decompilable.** That is the accepted
+trade for a personal app. It means the key must be rotatable at the gateway and
+must never be committed: `.env` is git-ignored and `.env.example` carries the
+shape with no value.
 
 - [ ] **Step 1: Write the failing test**
 
 ```dart
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:llm_libre_chat/settings/settings_store.dart';
+import 'package:llm_libre_chat/config.dart';
 
 void main() {
-  setUp(() {
-    // The plugin has no Android side in a unit test; this in-memory map stands
-    // in for the Keystore.
-    FlutterSecureStorage.setMockInitialValues({});
+  test('the base URL falls back to the production gateway', () {
+    // Tests run without --dart-define-from-file, so this exercises the default.
+    expect(Config.baseUrl, 'https://llm.comparadorinternet.co');
   });
 
-  test('the base URL falls back to the production gateway', () async {
-    final store = SettingsStore(const FlutterSecureStorage());
-    expect(await store.readBaseUrl(), 'https://llm.comparadorinternet.co');
-  });
-
-  test('a stored key comes back', () async {
-    final store = SettingsStore(const FlutterSecureStorage());
-    await store.writeApiKey('llmlibre_abc');
-    expect(await store.readApiKey(), 'llmlibre_abc');
-  });
-
-  test('a base URL with a trailing slash is normalised', () async {
-    // '$baseUrl/v1/chat/completions' would otherwise produce a double slash,
-    // which Cloudflare answers with a redirect the POST does not survive.
-    final store = SettingsStore(const FlutterSecureStorage());
-    await store.writeBaseUrl('https://gw.test/');
-    expect(await store.readBaseUrl(), 'https://gw.test');
+  test('a build with no key reports itself unconfigured', () {
+    // Without this the app would 401 on every message and read as a broken
+    // gateway rather than a build that was never given a key.
+    expect(Config.apiKey, isEmpty);
+    expect(Config.isConfigured, isFalse);
   });
 }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `fvm flutter test test/settings/settings_store_test.dart`
-Expected: FAIL — `Target of URI doesn't exist`
+Run: `fvm flutter test test/config_test.dart`
+Expected: FAIL — `Target of URI doesn't exist: 'package:llm_libre_chat/config.dart'`
 
 - [ ] **Step 3: Write the implementation**
 
 ```dart
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+/// Build-time configuration, supplied by `--dart-define-from-file=.env`.
+///
+/// These MUST be `const`: `String.fromEnvironment` only reads the build's
+/// defines in a const context, and silently yields the default otherwise.
+abstract final class Config {
+  static const String apiKey = String.fromEnvironment('LLM_LIBRE_API_KEY');
 
-const String defaultBaseUrl = 'https://llm.comparadorinternet.co';
+  static const String baseUrl = String.fromEnvironment(
+    'LLM_LIBRE_BASE_URL',
+    defaultValue: 'https://llm.comparadorinternet.co',
+  );
 
-const _apiKeyKey = 'api_key';
-const _baseUrlKey = 'base_url';
-
-/// The API key never reaches the source: an APK is trivially decompiled, and a
-/// key held here can be rotated without a rebuild.
-class SettingsStore {
-  const SettingsStore(this._storage);
-
-  final FlutterSecureStorage _storage;
-
-  Future<String?> readApiKey() => _storage.read(key: _apiKeyKey);
-
-  Future<void> writeApiKey(String value) =>
-      _storage.write(key: _apiKeyKey, value: value.trim());
-
-  Future<String> readBaseUrl() async =>
-      await _storage.read(key: _baseUrlKey) ?? defaultBaseUrl;
-
-  Future<void> writeBaseUrl(String value) => _storage.write(
-      key: _baseUrlKey, value: _normalise(value));
-
-  static String _normalise(String url) {
-    var out = url.trim();
-    while (out.endsWith('/')) {
-      out = out.substring(0, out.length - 1);
-    }
-    return out;
-  }
+  static bool get isConfigured => apiKey.isNotEmpty;
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `fvm flutter test test/settings/settings_store_test.dart`
+Run: `fvm flutter test test/config_test.dart`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Create the env files and ignore the real one**
+
+`.env.example` — committed, no value:
+
+```
+LLM_LIBRE_API_KEY=
+LLM_LIBRE_BASE_URL=https://llm.comparadorinternet.co
+```
+
+`.env` — NOT committed, same keys with the real value filled in.
+
+Append to `.gitignore`:
+
+```
+# Holds the real API key, which is compiled into the build.
+.env
+```
+
+- [ ] **Step 6: Remove the now-unused dependency**
 
 ```bash
-git add lib/settings/settings_store.dart test/settings/settings_store_test.dart
-git commit -m "feat(settings): key and base URL in secure storage"
+fvm flutter pub remove flutter_secure_storage
+```
+
+- [ ] **Step 7: Prove the define actually reaches the constant**
+
+Run: `fvm flutter test --dart-define=LLM_LIBRE_API_KEY=probe test/config_test.dart`
+Expected: FAIL on the second test, which asserts the key is empty — that failure
+is the proof the define is wired. Record the output in your report, then move on;
+do not change the test to accommodate it.
+
+- [ ] **Step 8: Commit**
+
+```bash
+fvm dart format lib test
+git add -A
+git commit -m "feat(config): API key and base URL from a build-time .env"
 ```
 
 ---
@@ -727,23 +745,20 @@ git commit -m "feat(settings): key and base URL in secure storage"
 
 **Files:**
 - Create: `lib/features/chat/simple_chat_screen.dart`
-- Create: `lib/features/settings/api_key_screen.dart`
 - Modify: `lib/main.dart`
 - Test: `test/features/simple_chat_screen_test.dart`
-- Test: `test/features/api_key_screen_test.dart`
 
 **Interfaces:**
-- Consumes: `LlmClient.complete`, `SettingsStore`.
+- Consumes: `LlmClient.complete`, `Config`.
 - Produces: `class SimpleChatScreen extends StatefulWidget` taking a
-  `LlmClient client`, and
-  `class ApiKeyScreen extends StatefulWidget` taking a `SettingsStore store` and
-  a `VoidCallback onSaved`. Both are replaced by the real UI in later slices;
-  they exist so slice 1 is an app you can actually run.
+  `LlmClient client`. Replaced in Task 10; it exists so slice 1 is a running app.
 
-**Why the key screen is here.** Task 5 builds the secure store and nothing gives
-the key a way in — there is no field anywhere to type it into, so slice 1 would
-ship unusable. `main.dart` reads the key at startup: absent, it shows
-`ApiKeyScreen`; present, it builds the client and shows the chat.
+**Startup is synchronous.** The key is a compile-time constant, so there is no
+async read and no loading state: `main.dart` builds
+`LlmClient(baseUrl: Config.baseUrl, apiKey: Config.apiKey)` and shows the chat.
+When `Config.isConfigured` is false it shows a single line naming the fix
+(`rebuild with --dart-define-from-file=.env`) instead — otherwise a build with no
+key 401s on every message and reads as a broken gateway.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -902,76 +917,12 @@ class _SimpleChatScreenState extends State<SimpleChatScreen> {
 Run: `fvm flutter test test/features/simple_chat_screen_test.dart`
 Expected: PASS
 
-- [ ] **Step 5: Write the failing test for the key screen**
+- [ ] **Step 5: Wire `main.dart` and commit**
 
-```dart
-import 'package:flutter/material.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:flutter_test/flutter_test.dart';
-import 'package:llm_libre_chat/features/settings/api_key_screen.dart';
-import 'package:llm_libre_chat/settings/settings_store.dart';
-
-void main() {
-  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
-
-  testWidgets('saving stores the key and reports back', (tester) async {
-    const store = SettingsStore(FlutterSecureStorage());
-    var saved = false;
-    await tester.pumpWidget(MaterialApp(
-        home: ApiKeyScreen(store: store, onSaved: () => saved = true)));
-
-    await tester.enterText(
-        find.byKey(const Key('api-key-field')), 'llmlibre_abc');
-    await tester.tap(find.byKey(const Key('save-settings')));
-    await tester.pumpAndSettle();
-
-    expect(await store.readApiKey(), 'llmlibre_abc');
-    expect(saved, isTrue);
-  });
-
-  testWidgets('the base URL field starts on the production gateway',
-      (tester) async {
-    const store = SettingsStore(FlutterSecureStorage());
-    await tester.pumpWidget(
-        MaterialApp(home: ApiKeyScreen(store: store, onSaved: () {})));
-    await tester.pumpAndSettle();
-    expect(find.text('https://llm.comparadorinternet.co'), findsOneWidget);
-  });
-
-  testWidgets('an empty key cannot be saved', (tester) async {
-    // Saving nothing would build a client that 401s on every message, which
-    // reads as "the gateway is broken" rather than "you have not set a key".
-    const store = SettingsStore(FlutterSecureStorage());
-    var saved = false;
-    await tester.pumpWidget(MaterialApp(
-        home: ApiKeyScreen(store: store, onSaved: () => saved = true)));
-    await tester.tap(find.byKey(const Key('save-settings')));
-    await tester.pumpAndSettle();
-    expect(saved, isFalse);
-    expect(await store.readApiKey(), isNull);
-  });
-}
-```
-
-- [ ] **Step 6: Run it and watch it fail, then write `ApiKeyScreen`**
-
-A `StatefulWidget` with two `TextField`s — the key (`Key('api-key-field')`) and
-the base URL (`Key('base-url-field')`, prefilled from
-`store.readBaseUrl()`) — and a save button (`Key('save-settings')`) that writes
-both through `SettingsStore` and then calls `onSaved`. An empty key disables the
-save. Nothing else: this screen is replaced by the real settings UI in a later
-slice.
-
-- [ ] **Step 7: Wire `main.dart`**
-
-On startup read the key. Absent, show `ApiKeyScreen` and, on `onSaved`, rebuild
-into the chat. Present, construct
-`LlmClient(baseUrl: await store.readBaseUrl(), apiKey: key)` and show
-`SimpleChatScreen`. Reading secure storage is async, so show a
-`CircularProgressIndicator` while it resolves rather than flashing the wrong
-screen.
-
-- [ ] **Step 8: Run the whole suite and commit**
+`main.dart` builds the client from `Config` and shows `SimpleChatScreen`, or a
+single centred line naming the missing define when `Config.isConfigured` is
+false. No `FutureBuilder`, no loading state — the values are compile-time
+constants.
 
 Run: `fvm flutter test`
 Expected: PASS, every test.
@@ -1455,7 +1406,7 @@ git commit -m "feat(data): on-device conversations and messages"
 - Test: `test/features/chat_controller_test.dart`
 
 **Interfaces:**
-- Consumes: `LlmClient.stream`, `AppDb`, `SettingsStore`.
+- Consumes: `LlmClient.stream`, `AppDb`, `Config`.
 - Produces: `class ChatController` with
   `Future<void> send(String text)`, `Future<void> stop()`, and a `bool get busy`;
   `class ChatScreen` and `class ConversationDrawer` widgets.
