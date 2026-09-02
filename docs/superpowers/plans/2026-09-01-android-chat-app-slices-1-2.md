@@ -727,13 +727,23 @@ git commit -m "feat(settings): key and base URL in secure storage"
 
 **Files:**
 - Create: `lib/features/chat/simple_chat_screen.dart`
+- Create: `lib/features/settings/api_key_screen.dart`
 - Modify: `lib/main.dart`
 - Test: `test/features/simple_chat_screen_test.dart`
+- Test: `test/features/api_key_screen_test.dart`
 
 **Interfaces:**
 - Consumes: `LlmClient.complete`, `SettingsStore`.
 - Produces: `class SimpleChatScreen extends StatefulWidget` taking a
-  `LlmClient client`. Replaced in Task 10; it exists so slice 1 is a running app.
+  `LlmClient client`, and
+  `class ApiKeyScreen extends StatefulWidget` taking a `SettingsStore store` and
+  a `VoidCallback onSaved`. Both are replaced by the real UI in later slices;
+  they exist so slice 1 is an app you can actually run.
+
+**Why the key screen is here.** Task 5 builds the secure store and nothing gives
+the key a way in — there is no field anywhere to type it into, so slice 1 would
+ship unusable. `main.dart` reads the key at startup: absent, it shows
+`ApiKeyScreen`; present, it builds the client and shows the chat.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -892,11 +902,83 @@ class _SimpleChatScreenState extends State<SimpleChatScreen> {
 Run: `fvm flutter test test/features/simple_chat_screen_test.dart`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Write the failing test for the key screen**
+
+```dart
+import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:llm_libre_chat/features/settings/api_key_screen.dart';
+import 'package:llm_libre_chat/settings/settings_store.dart';
+
+void main() {
+  setUp(() => FlutterSecureStorage.setMockInitialValues({}));
+
+  testWidgets('saving stores the key and reports back', (tester) async {
+    const store = SettingsStore(FlutterSecureStorage());
+    var saved = false;
+    await tester.pumpWidget(MaterialApp(
+        home: ApiKeyScreen(store: store, onSaved: () => saved = true)));
+
+    await tester.enterText(
+        find.byKey(const Key('api-key-field')), 'llmlibre_abc');
+    await tester.tap(find.byKey(const Key('save-settings')));
+    await tester.pumpAndSettle();
+
+    expect(await store.readApiKey(), 'llmlibre_abc');
+    expect(saved, isTrue);
+  });
+
+  testWidgets('the base URL field starts on the production gateway',
+      (tester) async {
+    const store = SettingsStore(FlutterSecureStorage());
+    await tester.pumpWidget(
+        MaterialApp(home: ApiKeyScreen(store: store, onSaved: () {})));
+    await tester.pumpAndSettle();
+    expect(find.text('https://llm.comparadorinternet.co'), findsOneWidget);
+  });
+
+  testWidgets('an empty key cannot be saved', (tester) async {
+    // Saving nothing would build a client that 401s on every message, which
+    // reads as "the gateway is broken" rather than "you have not set a key".
+    const store = SettingsStore(FlutterSecureStorage());
+    var saved = false;
+    await tester.pumpWidget(MaterialApp(
+        home: ApiKeyScreen(store: store, onSaved: () => saved = true)));
+    await tester.tap(find.byKey(const Key('save-settings')));
+    await tester.pumpAndSettle();
+    expect(saved, isFalse);
+    expect(await store.readApiKey(), isNull);
+  });
+}
+```
+
+- [ ] **Step 6: Run it and watch it fail, then write `ApiKeyScreen`**
+
+A `StatefulWidget` with two `TextField`s — the key (`Key('api-key-field')`) and
+the base URL (`Key('base-url-field')`, prefilled from
+`store.readBaseUrl()`) — and a save button (`Key('save-settings')`) that writes
+both through `SettingsStore` and then calls `onSaved`. An empty key disables the
+save. Nothing else: this screen is replaced by the real settings UI in a later
+slice.
+
+- [ ] **Step 7: Wire `main.dart`**
+
+On startup read the key. Absent, show `ApiKeyScreen` and, on `onSaved`, rebuild
+into the chat. Present, construct
+`LlmClient(baseUrl: await store.readBaseUrl(), apiKey: key)` and show
+`SimpleChatScreen`. Reading secure storage is async, so show a
+`CircularProgressIndicator` while it resolves rather than flashing the wrong
+screen.
+
+- [ ] **Step 8: Run the whole suite and commit**
+
+Run: `fvm flutter test`
+Expected: PASS, every test.
 
 ```bash
-git add lib/features/chat/simple_chat_screen.dart lib/main.dart \
-  test/features/simple_chat_screen_test.dart
+fvm dart format lib test
+git add -A
 git commit -m "feat(chat): a screen that sends one message and shows the answer"
 ```
 
