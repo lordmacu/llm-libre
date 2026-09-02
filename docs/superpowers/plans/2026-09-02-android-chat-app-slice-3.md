@@ -1061,8 +1061,14 @@ Register it: `@DriftDatabase(tables: [Conversations, Messages, RoutesCache])`.
       );
 ```
 
-`onCreate` becomes explicit because supplying `onUpgrade` replaces drift's
-default strategy, and a fresh install must still get every table.
+`onCreate` is spelled out even though it only restates drift's default.
+`MigrationStrategy`'s parameters are independent named defaults — verified in
+drift 2.30.1's source — so supplying `onUpgrade` alone would still leave
+`onCreate` as `m.createAll()`, and a fresh install would be fine either way. An
+earlier revision of this plan claimed the opposite and was wrong. It is written
+out because a migration getter that names all three hooks is one a future reader
+can reason about without going to drift's source, which is exactly what the
+false claim cost.
 
 - [ ] **Step 5: Add the DAO methods**
 
@@ -1265,6 +1271,27 @@ git commit -m "feat(data): cache the route catalogue, and keep it across upgrade
     expect(await store.routes(now: DateTime.utc(2026)), isEmpty);
   });
 
+  test('a database that cannot be read is empty, not a throw', () async {
+    // The property this class exists to guarantee, tested adversarially rather
+    // than confirmed: with only the network call guarded, BOTH the fetched-at
+    // read and the cache read inside the catch escaped uncaught. Keep the
+    // failing-executor harness from that investigation.
+    final broken = AppDb.forTesting(_FailingExecutor(NativeDatabase.memory()));
+    addTearDown(() async {
+      try {
+        await broken.close();
+      } on Object {
+        // Closing a database whose executor throws is not the subject here.
+      }
+    });
+    final store = CatalogStore(
+      db: broken,
+      client: _clientYielding(() => [_route('p/m')]),
+    );
+    expect(await store.routes(now: DateTime.utc(2026)), isEmpty);
+    expect(store.lastFailure, isNotNull);
+  });
+
   test('a non-JSON 200 does not escape as a raw FormatException', () async {
     // `fetch()` decodes the body without guarding the shape, so a proxy or an
     // error page answering 200 with HTML raises FormatException, not LlmError.
@@ -1284,7 +1311,9 @@ git commit -m "feat(data): cache the route catalogue, and keep it across upgrade
 
 Write `_clientYielding` and `_clientThrowing` as `CatalogClient` subclasses
 overriding `fetch()` — note `_clientThrowing` must accept any `Object`, not just
-an `LlmError`, since one test hands it a `FormatException`; a `MockClient` would test the transport again rather than
+an `LlmError`, since one test hands it a `FormatException`. `_FailingExecutor`
+wraps a real `QueryExecutor` and throws from `runSelect`, which is what proves
+the database reads are guarded; a `MockClient` would test the transport again rather than
 the policy, which Task 5 already covers.
 
 - [ ] **Step 2: Run it to verify it fails**
@@ -1326,11 +1355,21 @@ class CatalogStore {
 
   Future<List<RouteInfo>> routes({DateTime? now}) async {
     final at = now ?? DateTime.now();
-    final fetchedAt = await db.routesFetchedAt();
-    if (fetchedAt != null && at.difference(fetchedAt) < floor) {
-      return db.cachedRoutes();
-    }
+    // The WHOLE body is guarded, not just the network call. The database reads
+    // fail too -- a corrupt or locked file, a full disk -- and on Android none
+    // of those is exotic. Verified by injecting a QueryExecutor whose runSelect
+    // always throws: with only the fetch guarded, both `routesFetchedAt` and
+    // the `cachedRoutes` inside the catch escaped uncaught.
+    //
+    // Note every return inside the try is `return await`. `return someFuture;`
+    // leaves the try block before the future completes, so its error reaches
+    // the CALLER instead of the catch below -- which would quietly undo this
+    // whole guard.
     try {
+      final fetchedAt = await db.routesFetchedAt();
+      if (fetchedAt != null && at.difference(fetchedAt) < floor) {
+        return await db.cachedRoutes();
+      }
       final fresh = await client.fetch();
       lastFailure = null;
       await db.saveRoutes(fresh, at);
@@ -1345,7 +1384,20 @@ class CatalogStore {
       // path that calls it. Wrapped the way the chat controller already wraps
       // its own stream errors, so `lastFailure` stays one type.
       lastFailure = e is LlmError ? e : Disconnected(e);
-      return db.cachedRoutes();
+      return _cachedOrEmpty();
+    }
+  }
+
+  /// The fallback's own fallback.
+  ///
+  /// Reached only when something has already failed, so if the cache read fails
+  /// too there is nothing left to return but an empty catalogue. A picker with
+  /// no models in it is survivable; a crash on the way to opening it is not.
+  Future<List<RouteInfo>> _cachedOrEmpty() async {
+    try {
+      return await db.cachedRoutes();
+    } on Object {
+      return const [];
     }
   }
 }
