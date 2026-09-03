@@ -79,3 +79,21 @@ def test_an_unusable_id_is_replaced_rather_than_trusted(bad):
                headers={"X-API-Key": "buena", "X-Request-Id": bad})
     got = r.headers.get("X-Request-Id")
     assert got and got != bad
+
+
+def test_the_trace_log_actually_reaches_somewhere():
+    """A log line nobody sees is worse than no log line: it reads as a working
+    trace with a hole in it, and the hole is blamed on the hop that is missing.
+
+    Caught in production the first time, exactly that way: the middleware ran
+    (the response carried the id) but nothing appeared in the container log,
+    because this codebase never calls `basicConfig` and Python's handler of last
+    resort drops anything below WARNING.
+    """
+    import logging
+
+    from llm_libre import tracing  # noqa: F401  (import configures the logger)
+
+    logger = logging.getLogger("llm_libre.tracing")
+    assert logger.isEnabledFor(logging.INFO), "INFO is dropped, so nothing prints"
+    assert logger.handlers or logger.propagate, "the record goes nowhere"

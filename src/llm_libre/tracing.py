@@ -18,9 +18,38 @@ junk from being reflected into either.
 import contextvars
 import logging
 import re
+import sys
 import uuid
 
 log = logging.getLogger("llm_libre.tracing")
+
+
+def _configure(logger: logging.Logger) -> logging.Logger:
+    """Make this logger's lines actually appear, without touching anyone else's.
+
+    Nothing in this codebase calls `basicConfig`, so a bare `log.info` reaches
+    Python's handler of last resort, which drops anything below WARNING. The
+    existing modules only ever log warnings, so the gap never showed -- and it
+    cost a production check to find: the middleware ran (the response carried
+    the id) and the container log had nothing in it, which reads as a trace with
+    a hole rather than as a broken logger.
+
+    Configured HERE rather than with a global `basicConfig` in main, because
+    that would switch on INFO for every module at once -- a decision about the
+    whole application's log volume, made as a side effect of adding a trace.
+    `propagate = False` keeps the line from also reaching the root logger and
+    printing twice under uvicorn.
+    """
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    return logger
+
+
+_configure(log)
 
 #: The header the id travels on, in and out. Spelled the way every reverse
 #: proxy already spells it, so an id set upstream of this gateway is picked up
