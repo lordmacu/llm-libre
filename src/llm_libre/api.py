@@ -1,5 +1,6 @@
 import difflib
 import json
+import logging
 import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -9,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from llm_libre.assets import content_disposition, localise, localise_completion
+from llm_libre import tracing
 from llm_libre.auth import RateLimiter, client_ip
 
 from llm_libre.models import (NEUTRAL_METRICS, REQUIRABLE_FROM_BODY, UNKNOWN_BUDGET,
@@ -20,6 +22,8 @@ from llm_libre.proxy import (AUDIO_SPEECH, AUDIO_TRANSCRIPTION, CHAT,
                              IMAGES, TRANSLATE)
 from llm_libre.ranking import score
 from llm_libre.router import compatible_routes, order_routes, sort_key
+
+_trace_log = logging.getLogger("llm_libre.tracing")
 
 PROFILES = {"fast", "balanced", "strong"}
 ALIASES = ["auto", "auto:fast", "auto:strong", "auto:tools", "auto:vision"]
@@ -392,6 +396,37 @@ def create_app(state: State) -> FastAPI:
     app = FastAPI(title=TITLE, version=VERSION, summary=SUMMARY, description=DESCRIPTION)
     customise_openapi(app)
 
+    @app.middleware("http")
+    async def _trace(request: Request, call_next):
+        """Bind one id to the request, echo it back, and time the whole thing.
+
+        Timed HERE and not inside each endpoint because this is the only place
+        that sees the same boundary the CALLER sees: everything between the
+        first byte in and the last byte out, routing and failover included. An
+        endpoint-level timer would exclude exactly the overhead an operator is
+        trying to rule out.
+
+        Note what the number does not cover on a streamed answer: `call_next`
+        returns when the response STARTS, so a stream is logged at its first
+        byte, not its last. That is the honest reading anyway -- time to first
+        token is the latency a caller feels.
+        """
+        rid = tracing.sanitise(request.headers.get(tracing.HEADER))
+        token = tracing.bind(rid)
+        t0 = time.perf_counter()
+        try:
+            response = await call_next(request)
+        finally:
+            tracing.reset(token)
+        ms = (time.perf_counter() - t0) * 1000
+        response.headers[tracing.HEADER] = rid
+        _trace_log.info(
+            "[%s] %s %s -> %s in %.0fms route=%s attempts=%s",
+            rid, request.method, request.url.path, response.status_code, ms,
+            response.headers.get("X-Route-Used", "-"),
+            response.headers.get("X-Attempts", "-"))
+        return response
+
     def _limit_by_ip(request: Request) -> None:
         """Bound what one source can cost before any key is involved."""
         if state.ip_rate_limiter is None:
@@ -497,7 +532,7 @@ def create_app(state: State) -> FastAPI:
         # failover chain stays reconstructable afterwards. `body["model"]` verbatim
         # and not the resolved profile: the question this answers is what was asked
         # against what was served, and resolving it here erases the asking side.
-        trace = RequestTrace(request_id=uuid4().hex, requested=body.get("model"))
+        trace = RequestTrace(request_id=tracing.current() or uuid4().hex, requested=body.get("model"))
         if body.get("stream"):
             # Filled by `on_route_committed`, which fires at most once per
             # stream and only for the route that genuinely served -- so the
@@ -597,7 +632,7 @@ def create_app(state: State) -> FastAPI:
 
         r = await state.proxy.generate_images(
             routes, body, now, on_billable_attempt=_count_paid_usage,
-            trace=RequestTrace(request_id=uuid4().hex, requested=body.get("model")))
+            trace=RequestTrace(request_id=tracing.current() or uuid4().hex, requested=body.get("model")))
         if r.status == 200 and state.assets is not None:
             # The provider's URL never reaches the client: it expires, it may
             # need headers the client does not have, and it names who served --
@@ -641,7 +676,7 @@ def create_app(state: State) -> FastAPI:
         r = await state.proxy.serve_capability(
             routes, time.time(), scope=AUDIO_SPEECH, path="/audio/speech",
             json_body=body, expect_binary=True,
-            trace=RequestTrace(request_id=uuid4().hex, requested=body.get("model")))
+            trace=RequestTrace(request_id=tracing.current() or uuid4().hex, requested=body.get("model")))
         if r.content is not None:
             return Response(content=r.content, media_type=r.media_type,
                             headers=_capability_headers(r))
@@ -670,7 +705,7 @@ def create_app(state: State) -> FastAPI:
             routes, time.time(), scope=AUDIO_TRANSCRIPTION,
             path="/audio/transcriptions", content=raw,
             content_type=request.headers.get("content-type"),
-            trace=RequestTrace(request_id=uuid4().hex, requested=None))
+            trace=RequestTrace(request_id=tracing.current() or uuid4().hex, requested=None))
         return JSONResponse(r.json, status_code=r.status, headers=_capability_headers(r))
 
     @app.post("/v1/translate")
@@ -690,7 +725,7 @@ def create_app(state: State) -> FastAPI:
         r = await state.proxy.serve_capability(
             routes, time.time(), scope=TRANSLATE, path="/translate",
             json_body=body,
-            trace=RequestTrace(request_id=uuid4().hex, requested=body.get("model")))
+            trace=RequestTrace(request_id=tracing.current() or uuid4().hex, requested=body.get("model")))
         return JSONResponse(r.json, status_code=r.status, headers=_capability_headers(r))
 
     @app.get("/v1/assets/{asset_id}", **ASSETS_DOCS)

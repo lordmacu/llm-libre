@@ -1,6 +1,24 @@
 from llm_libre import tool_emulator as _emu
+from llm_libre import tracing
 from llm_libre.models import GATEWAY_EXTENSIONS
 from llm_libre.providers import Provider, join_path
+
+
+
+def _with_trace(headers: dict) -> dict:
+    """Carry this request's trace id on to the provider.
+
+    Added at BUILD time rather than at each POST site because there are four of
+    those (chat, stream, images, capability endpoints) and a trace with one hole
+    in it answers nothing: the missing hop is exactly the one an operator would
+    have blamed. Absent outside a request -- the probing scheduler is the
+    gateway asking, not a caller, and tagging its traffic with a caller's id
+    would make the logs lie.
+    """
+    rid = tracing.current()
+    if rid:
+        headers[tracing.HEADER] = rid
+    return headers
 
 
 def build_image_request(p: Provider, body: dict,
@@ -29,7 +47,7 @@ def build_image_request(p: Provider, body: dict,
     out = {k: v for k, v in body.items() if k not in GATEWAY_EXTENSIONS}
     if real_model is not None:
         out["model"] = real_model
-    return url, headers, out
+    return url, _with_trace(headers), out
 
 
 def build_request(p: Provider, body: dict,
@@ -59,7 +77,7 @@ def build_request(p: Provider, body: dict,
         out["model"] = real_model
     if p.emulates_tools and out.get("tools"):
         out = _emu.inject_into_body(out)
-    return url, headers, out
+    return url, _with_trace(headers), out
 
 
 def build_capability_request(p: Provider, path: str,
@@ -84,7 +102,7 @@ def build_capability_request(p: Provider, path: str,
         headers["Authorization"] = "Bearer " + p.api_key
     if body is not None:
         headers["Content-Type"] = "application/json"
-    return url, headers
+    return url, _with_trace(headers)
 
 
 def strip_extensions(body: dict) -> dict:
