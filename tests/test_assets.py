@@ -8,12 +8,14 @@ the assets directory.
 import base64
 import hashlib
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
-from llm_libre.api import State, create_app
+from llm_libre.api import State, create_app, effective_public_base_url
 from llm_libre.assets import AssetStore, content_disposition, localise, normalise_type
 from llm_libre.models import Capabilities, Route
 from llm_libre.providers import Provider
@@ -187,7 +189,7 @@ async def test_the_original_payload_is_not_mutated(store):
 
 # --- end to end through the app ---
 
-def _app(tmp_path, image_response):
+def _app(tmp_path, image_response, public_base_url="https://llm.example.app"):
     db = Storage(":memory:")
     db.create_schema()
     route = Route("p", "drawer", "free",
@@ -205,7 +207,7 @@ def _app(tmp_path, image_response):
     state = State(store=db, proxy=Proxy(provs, db, http), api_keys={"k"},
                   daily_paid_cap=200)
     state.assets = AssetStore(str(tmp_path / "assets"), db._con)
-    state.public_base_url = "https://llm.example.app"
+    state.public_base_url = public_base_url
     return TestClient(create_app(state)), state
 
 
@@ -305,3 +307,146 @@ def test_audio_is_served_inline_not_downloaded():
 
 def test_an_unlisted_audio_type_still_falls_back():
     assert normalise_type("audio/x-made-up") == "application/octet-stream"
+
+
+# --- deriving the public base from the request when none is configured ---
+
+def _scope_request(headers: dict, scheme: str = "http") -> Request:
+    raw = [(k.lower().encode(), v.encode()) for k, v in headers.items()]
+    return Request({"type": "http", "asgi": {"version": "3.0"},
+                    "http_version": "1.1", "method": "POST", "scheme": scheme,
+                    "path": "/v1/chat/completions",
+                    "raw_path": b"/v1/chat/completions", "query_string": b"",
+                    "root_path": "", "headers": raw,
+                    "client": ("127.0.0.1", 1234), "server": ("testserver", 80)})
+
+
+def _no_base():
+    return SimpleNamespace(public_base_url="")
+
+
+def test_a_configured_base_url_wins_over_any_header():
+    state = SimpleNamespace(public_base_url="https://llm.example.app")
+    request = _scope_request({"host": "internal:8000",
+                              "x-forwarded-proto": "http",
+                              "x-forwarded-host": "chat.example.com"})
+    assert effective_public_base_url(state, request) == "https://llm.example.app"
+
+
+def test_the_origin_comes_from_the_forwarded_headers():
+    request = _scope_request({"host": "internal:8000",
+                              "x-forwarded-proto": "https",
+                              "x-forwarded-host": "chat.example.com"})
+    assert effective_public_base_url(_no_base(), request) == "https://chat.example.com"
+
+
+def test_a_proxy_chain_contributes_only_its_first_forwarded_value():
+    request = _scope_request({"x-forwarded-proto": "https, http",
+                              "x-forwarded-host": "chat.example.com, 10.0.0.1"})
+    assert effective_public_base_url(_no_base(), request) == "https://chat.example.com"
+
+
+def test_the_host_header_and_the_connection_scheme_are_the_last_resort():
+    request = _scope_request({"host": "chat.example.com:8443"}, scheme="https")
+    assert effective_public_base_url(_no_base(), request) == "https://chat.example.com:8443"
+
+
+def test_a_garbage_forwarded_host_is_not_turned_into_a_url():
+    request = _scope_request({"x-forwarded-host": "not a host",
+                              "host": "testserver"})
+    assert effective_public_base_url(_no_base(), request) == "http://testserver"
+
+
+def test_an_unknown_forwarded_proto_derives_nothing():
+    request = _scope_request({"x-forwarded-proto": "gopher",
+                              "host": "testserver"})
+    assert effective_public_base_url(_no_base(), request) is None
+
+
+def test_without_any_host_nothing_can_be_derived():
+    assert effective_public_base_url(_no_base(), _scope_request({})) is None
+
+
+def test_generated_images_are_rehosted_against_the_forwarded_origin(tmp_path):
+    client, _ = _app(tmp_path, {"created": 1, "data": [{"url": PROVIDER_URL}]},
+                     public_base_url="")
+    r = client.post("/v1/images/generations",
+                    headers={**AUTH, "X-Forwarded-Proto": "https",
+                             "X-Forwarded-Host": "chat.example.com"},
+                    json={"prompt": "a cat"})
+    url = r.json()["data"][0]["url"]
+    assert url.startswith("https://chat.example.com/v1/assets/")
+    assert "provider.test" not in url
+
+
+def test_without_forwarded_headers_the_host_header_carries_the_origin(tmp_path):
+    client, _ = _app(tmp_path, {"created": 1, "data": [{"url": PROVIDER_URL}]},
+                     public_base_url="")
+    r = client.post("/v1/images/generations", headers=AUTH, json={"prompt": "a cat"})
+    assert r.json()["data"][0]["url"].startswith("http://testserver/v1/assets/")
+
+
+def test_the_configured_base_url_still_wins_end_to_end(tmp_path):
+    client, _ = _app(tmp_path, {"created": 1, "data": [{"url": PROVIDER_URL}]})
+    r = client.post("/v1/images/generations",
+                    headers={**AUTH, "X-Forwarded-Proto": "https",
+                             "X-Forwarded-Host": "chat.example.com"},
+                    json={"prompt": "a cat"})
+    assert r.json()["data"][0]["url"].startswith("https://llm.example.app/v1/assets/")
+
+
+IMAGE_COMPLETION = {
+    "id": "c1", "object": "chat.completion",
+    "choices": [{"index": 0, "finish_reason": "stop", "message": {
+        "role": "assistant",
+        "content": [{"type": "image_url", "image_url": {"url": PROVIDER_URL}}]}}],
+}
+
+
+def _chat_app(tmp_path, respond, public_base_url=""):
+    db = Storage(":memory:")
+    db.create_schema()
+    db.upsert_routes([Route("p", "talker", "free",
+                            Capabilities(True, False, 100000, 4096))], 1.0)
+
+    def handler(req):
+        if req.url.path == "/chat/completions":
+            return respond(req)
+        return httpx.Response(200, content=PNG, headers={"content-type": "image/png"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provs = {"p": Provider("p", "free", "openai", "https://p.test", "", "/models", {}, [])}
+    state = State(store=db, proxy=Proxy(provs, db, http), api_keys={"k"},
+                  daily_paid_cap=200)
+    state.assets = AssetStore(str(tmp_path / "assets"), db._con)
+    state.public_base_url = public_base_url
+    return TestClient(create_app(state)), state
+
+
+FORWARDED = {**AUTH, "X-Forwarded-Proto": "https",
+             "X-Forwarded-Host": "chat.example.com"}
+CHAT_BODY = {"model": "auto", "messages": [{"role": "user", "content": "draw a cat"}]}
+
+
+def test_completion_images_are_rehosted_against_the_forwarded_origin(tmp_path):
+    """The reported bug: with PUBLIC_BASE_URL empty, a gpt-image-1 completion
+    handed the client the proxy's internal URL, which resolves nowhere."""
+    client, _ = _chat_app(tmp_path, lambda req: httpx.Response(200, json=IMAGE_COMPLETION))
+    r = client.post("/v1/chat/completions", headers=FORWARDED, json=CHAT_BODY)
+    assert r.status_code == 200
+    url = r.json()["choices"][0]["message"]["content"][0]["image_url"]["url"]
+    assert url.startswith("https://chat.example.com/v1/assets/")
+    assert "provider.test" not in url
+
+
+def test_streamed_completion_images_are_rehosted_against_the_forwarded_origin(tmp_path):
+    sse = ('data: {"choices":[{"delta":{"content":[{"type":"image_url",'
+           '"image_url":{"url":"%s"}}]}}]}\n\ndata: [DONE]\n\n'
+           % PROVIDER_URL).encode()
+    client, _ = _chat_app(tmp_path, lambda req: httpx.Response(
+        200, content=sse, headers={"content-type": "text/event-stream"}))
+    r = client.post("/v1/chat/completions", headers=FORWARDED,
+                    json={**CHAT_BODY, "stream": True})
+    assert r.status_code == 200
+    assert "https://chat.example.com/v1/assets/" in r.text
+    assert "provider.test" not in r.text

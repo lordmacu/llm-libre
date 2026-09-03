@@ -321,6 +321,47 @@ class State:
     public_base_url: str = ""
 
 
+def _first_header_value(raw: str | None) -> str | None:
+    """The first entry of a possibly comma-joined forwarding header.
+
+    A proxy chain appends to X-Forwarded-Proto/Host, so the value nearest the
+    client is the first one. Anything containing whitespace or a control
+    character is refused rather than cleaned: it cannot be a legitimate host or
+    scheme, and a header a client controls is not something to build URLs from
+    on a guess.
+    """
+    if not raw:
+        return None
+    value = raw.split(",", 1)[0].strip()
+    if not value or any(ord(c) < 0x21 or ord(c) > 0x7e for c in value):
+        return None
+    return value
+
+
+def effective_public_base_url(state: State, request: Request) -> str | None:
+    """The origin asset URLs carry: the configured one, or the request's own.
+
+    PUBLIC_BASE_URL wins whenever it is set -- it is the operator's explicit
+    declaration and headers can lie. When it is empty (the deploy cannot declare
+    it, or simply has not), the origin is derived from the request itself:
+    behind a reverse proxy that sets X-Forwarded-Proto/X-Forwarded-Host -- which
+    Cloudflare's tunnel does -- those describe the URL the CLIENT used, exactly
+    the origin a returned asset URL has to resolve against. Direct requests fall
+    back to the connection's scheme and the Host header. None means nothing
+    trustworthy could be derived, and the localising functions degrade to the
+    provider's URL as before.
+    """
+    if state.public_base_url:
+        return state.public_base_url
+    proto = (_first_header_value(request.headers.get("x-forwarded-proto"))
+             or request.url.scheme or "").lower()
+    host = (_first_header_value(request.headers.get("x-forwarded-host"))
+            or _first_header_value(request.headers.get("host")))
+    if proto not in ("http", "https") or not host:
+        return None
+    return f"{proto}://{host}"
+
+
 def _resolve_api_key(x_api_key: str | None, authorization: str | None) -> str | None:
     """Accepts the key via `X-API-Key` (the convention `arkiv-api`, the sibling
     gateway, already uses) or via `Authorization: Bearer <key>` (what ANY OpenAI
@@ -467,9 +508,10 @@ def create_app(state: State) -> FastAPI:
                 routes, body, now, raw,
                 on_route_committed=lambda route: served.__setitem__("route", route),
                 on_billable_attempt=_count_paid_usage, trace=trace)
-            if state.assets and state.public_base_url:
+            base = effective_public_base_url(state, request)
+            if state.assets and base:
                 stream = _rehost_stream_images(
-                    stream, state.assets, state.proxy.http, state.public_base_url)
+                    stream, state.assets, state.proxy.http, base)
             stream = _finish_stream(stream, served)
             return StreamingResponse(stream, media_type="text/event-stream")
         r = await state.proxy.complete(routes, body, now, raw,
@@ -521,10 +563,12 @@ def create_app(state: State) -> FastAPI:
             # and wants the reasoning asks for `x_raw: true` and receives it
             # inside `content`, exactly as the provider sent it.
             response_body = {**response_body, "x_reasoning": r.reasoning}
-        if (r.status == 200 and state.assets is not None and state.public_base_url
+        if (r.status == 200 and state.assets is not None
                 and isinstance(response_body, dict)):
-            response_body = await localise_completion(
-                response_body, state.assets, state.proxy.http, state.public_base_url)
+            base = effective_public_base_url(state, request)
+            if base:
+                response_body = await localise_completion(
+                    response_body, state.assets, state.proxy.http, base)
         return JSONResponse(response_body, status_code=r.status, headers=headers)
 
     @app.post("/v1/images/generations", **IMAGES_DOCS)
@@ -561,7 +605,8 @@ def create_app(state: State) -> FastAPI:
             # client care about. See assets.localise; it degrades to the
             # original URL rather than failing the request.
             r = replace(r, json=await localise(
-                r.json, state.assets, state.proxy.http, state.public_base_url,
+                r.json, state.assets, state.proxy.http,
+                effective_public_base_url(state, request),
                 body.get("response_format"), now))
         headers = {"X-Attempts": str(r.attempts)}
         if r.route is not None:

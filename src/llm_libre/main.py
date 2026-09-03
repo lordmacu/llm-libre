@@ -53,9 +53,12 @@ SHUFFLE_TIES = _env("ROTATE_TIES", "ROTAR_EMPATES", "true").strip().lower() \
 ASSETS_DIR = os.getenv("ASSETS_DIR", "/datos/assets")
 # The origin asset URLs carry. The gateway cannot discover its own public
 # hostname -- behind a Cloudflare tunnel the request it sees says 127.0.0.1 --
-# so it is declared. Left EMPTY the images endpoint keeps handing back the
-# provider's own URL, which is the pre-asset behaviour and a safe default: a
-# wrong origin here would produce URLs that resolve nowhere.
+# so it is declared. Left EMPTY, api.effective_public_base_url derives it per
+# request from X-Forwarded-Proto/X-Forwarded-Host (what the tunnel sets) or the
+# connection's own scheme and Host; only when nothing trustworthy can be
+# derived does the images endpoint keep handing back the provider's own URL,
+# which is the pre-asset behaviour and a safe default: a wrong origin here
+# would produce URLs that resolve nowhere.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip()
 
 
